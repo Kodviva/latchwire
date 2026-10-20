@@ -108,6 +108,20 @@ func pivSlot(s uint8) piv.Slot {
 	return ps
 }
 
+// Occupied reports whether the retired slot s (0x82-0x95) holds a key. It
+// reads only the slot's metadata and changes nothing on the card.
+func (c *Card) Occupied(s uint8) (bool, error) {
+	if !retired(s) {
+		return false, fmt.Errorf(msg.PIVSlotOutOfRangeFmt, s)
+	}
+	c.sem <- struct{}{}
+	defer func() { <-c.sem }()
+	if c.closed {
+		return false, keyprovider.ErrUnavailable
+	}
+	return c.occupied(s)
+}
+
 func (c *Card) occupied(s uint8) (bool, error) {
 	_, err := c.c.KeyInfo(pivSlot(s))
 	switch {

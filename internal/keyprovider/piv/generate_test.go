@@ -82,6 +82,30 @@ func TestGenerateForceReplacesOccupiedSlot(t *testing.T) {
 	}
 }
 
+func TestOccupiedReportsSlot(t *testing.T) {
+	f := newFakeCard(t, testSerial)
+	f.occupyX25519(0x82)
+	c := mustCard(t, f)
+	if occ, err := c.Occupied(0x82); err != nil || !occ {
+		t.Fatalf("Occupied(82) = %v, %v; want true", occ, err)
+	}
+	if occ, err := c.Occupied(0x83); err != nil || occ {
+		t.Fatalf("Occupied(83) = %v, %v; want false", occ, err)
+	}
+	for _, s := range []uint8{0x9a, 0x81, 0x96} {
+		if _, err := c.Occupied(s); err == nil {
+			t.Errorf("Occupied(%02x) accepted a non-retired slot", s)
+		}
+	}
+	if n := f.callCount("GenerateKey"); n != 0 {
+		t.Fatalf("GenerateKey called %d times", n)
+	}
+	c.Close()
+	if _, err := c.Occupied(0x82); !errors.Is(err, keyprovider.ErrUnavailable) {
+		t.Fatalf("Occupied after Close: %v, want ErrUnavailable", err)
+	}
+}
+
 func TestGenerateNoFreeSlot(t *testing.T) {
 	f := newFakeCard(t, testSerial).protectMgmt()
 	for s := uint32(0x82); s <= 0x95; s++ {

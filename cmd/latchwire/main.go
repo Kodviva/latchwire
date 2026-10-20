@@ -39,6 +39,7 @@ const agentPoll = time.Second
 type cardOps interface {
 	Generate(piv.GenerateOptions) (keyref.Ref, [32]byte, error)
 	Provider(ref keyref.Ref, prompt func(retriesLeft int) (string, error)) (keyprovider.Provider, error)
+	Occupied(slot uint8) (bool, error)
 	Close() error
 }
 
@@ -54,7 +55,10 @@ type env struct {
 	stdout, stderr io.Writer
 	// readSecret asks for a PIN or PUK without echo. The answer is only
 	// ever passed on to the card.
-	readSecret  func(prompt string) (string, error)
+	readSecret func(prompt string) (string, error)
+	// readLine asks on the terminal with echo, for confirmations. It never
+	// reads stdin, so a pipe cannot confirm.
+	readLine    func(prompt string) (string, error)
 	listDevices func() ([]piv.Device, error)
 	openCard    func(serial uint32) (cardOps, error)
 	dial        func(ctx context.Context) (rpcConn, error)
@@ -68,6 +72,7 @@ func defaultEnv() *env {
 		stdout:      os.Stdout,
 		stderr:      os.Stderr,
 		readSecret:  readSecretTTY,
+		readLine:    readLineTTY,
 		listDevices: piv.List,
 		openCard: func(serial uint32) (cardOps, error) {
 			c, err := piv.Open(serial)

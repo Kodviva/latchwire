@@ -31,7 +31,9 @@ type fakeCard struct {
 
 	// slotPub, if set, is what Provider reports for an occupied slot.
 	slotPub *[32]byte
-	closed  bool
+	// occupied lists the slots Occupied reports as holding a key.
+	occupied map[uint8]bool
+	closed   bool
 }
 
 func (f *fakeCard) Generate(o piv.GenerateOptions) (keyref.Ref, [32]byte, error) {
@@ -64,6 +66,8 @@ func (f *fakeCard) Provider(ref keyref.Ref, _ func(int) (string, error)) (keypro
 	return fakeProvider{*f.slotPub}, nil
 }
 
+func (f *fakeCard) Occupied(slot uint8) (bool, error) { return f.occupied[slot], nil }
+
 func (f *fakeCard) Close() error { f.closed = true; return nil }
 
 // secretQueue answers readSecret in order and records the prompts.
@@ -87,14 +91,18 @@ type testEnv struct {
 	out, errOut *bytes.Buffer
 	card        *fakeCard
 	secrets     *secretQueue
+	// lines answers readLine (the echoed terminal confirmation).
+	lines *secretQueue
 }
 
 func newTestEnv(card *fakeCard, answers ...string) *testEnv {
-	te := &testEnv{out: &bytes.Buffer{}, errOut: &bytes.Buffer{}, card: card, secrets: &secretQueue{answers: answers}}
+	te := &testEnv{out: &bytes.Buffer{}, errOut: &bytes.Buffer{}, card: card,
+		secrets: &secretQueue{answers: answers}, lines: &secretQueue{}}
 	te.env = &env{
 		stdout:     te.out,
 		stderr:     te.errOut,
 		readSecret: te.secrets.read,
+		readLine:   te.lines.read,
 		openCard: func(serial uint32) (cardOps, error) {
 			if card == nil || serial != card.serial {
 				return nil, piv.ErrNotFound
@@ -168,8 +176,12 @@ func TestKeygenSlotFlag(t *testing.T) {
 	if code := run(context.Background(), te.env, []string{"keygen", "--serial", "7", "--slot", "8a", "--force"}); code != 0 {
 		t.Fatalf("exit %d: %s", code, te.errOut)
 	}
-	if got := te.card.gens[0]; got.Slot != 0x8a || !got.Force {
+	// The slot is empty: nothing to confirm, and Force is not passed on.
+	if got := te.card.gens[0]; got.Slot != 0x8a || got.Force {
 		t.Errorf("Generate options = %+v", got)
+	}
+	if len(te.lines.prompts) != 0 {
+		t.Errorf("asked for confirmation of an empty slot: %q", te.lines.prompts)
 	}
 	if !strings.Contains(te.out.String(), "piv://7/8a") {
 		t.Errorf("output: %s", te.out)
@@ -355,6 +367,72 @@ func TestKeygenWrongManagementKeyRetriedOnce(t *testing.T) {
 	}
 	if !strings.Contains(te.errOut.String(), msg.KeygenManagementKeyRejected) {
 		t.Errorf("stderr: %s", te.errOut)
+	}
+}
+
+func TestForceShowsSlotAndRequiresYes(t *testing.T) {
+	old := [32]byte{9, 9, 9}
+	card := &fakeCard{serial: 7, pub: testPub(), slotPub: &old, occupied: map[uint8]bool{0x82: true}}
+	te := newTestEnv(card, "654321")
+	te.lines.answers = []string{"yes"}
+	if code := run(context.Background(), te.env, []string{"keygen", "--serial", "7", "--slot", "82", "--force"}); code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, te.errOut)
+	}
+	e := te.errOut.String()
+	for _, want := range []string{fmt.Sprintf(msg.KeygenSlotOccupiedFmt, 0x82, 7, b64(old)), msg.KeygenForceWarn} {
+		if !strings.Contains(e, want) {
+			t.Errorf("stderr lacks %q:\n%s", want, e)
+		}
+	}
+	if !slices.Equal(te.lines.prompts, []string{msg.KeygenForceConfirmPrompt}) {
+		t.Errorf("confirmation prompts = %q", te.lines.prompts)
+	}
+	// The slot is shown and confirmed before the PIN is asked for.
+	if len(te.secrets.prompts) != 1 {
+		t.Errorf("secret prompts = %q", te.secrets.prompts)
+	}
+	if len(card.gens) != 1 || !card.gens[0].Force || card.gens[0].Slot != 0x82 {
+		t.Fatalf("Generate calls = %+v, want one with Force for slot 82", card.gens)
+	}
+}
+
+func TestForceWithoutTTYRefuses(t *testing.T) {
+	old := [32]byte{9, 9, 9}
+	card := &fakeCard{serial: 7, pub: testPub(), slotPub: &old, occupied: map[uint8]bool{0x82: true}}
+	te := newTestEnv(card, "654321")
+	te.env.readLine = func(string) (string, error) { return "", errors.New(msg.AgentNoTTY) }
+	if code := run(context.Background(), te.env, []string{"keygen", "--serial", "7", "--slot", "82", "--force"}); code != 1 {
+		t.Fatalf("exit %d, want 1", code)
+	}
+	if len(card.gens) != 0 {
+		t.Fatalf("Generate called %d times without confirmation", len(card.gens))
+	}
+	if len(te.secrets.prompts) != 0 {
+		t.Errorf("asked for the PIN: %q", te.secrets.prompts)
+	}
+	e := te.errOut.String()
+	for _, want := range []string{b64(old), msg.KeygenForceNeedsTTY} {
+		if !strings.Contains(e, want) {
+			t.Errorf("stderr lacks %q:\n%s", want, e)
+		}
+	}
+}
+
+func TestForceDeclinedLeavesSlot(t *testing.T) {
+	for _, answer := range []string{"", "no", "y", "YES please", "Yes!"} {
+		old := [32]byte{9, 9, 9}
+		card := &fakeCard{serial: 7, pub: testPub(), slotPub: &old, occupied: map[uint8]bool{0x82: true}}
+		te := newTestEnv(card, "654321")
+		te.lines.answers = []string{answer}
+		if code := run(context.Background(), te.env, []string{"keygen", "--serial", "7", "--slot", "82", "--force"}); code != 1 {
+			t.Errorf("answer %q: exit %d, want 1", answer, code)
+		}
+		if len(card.gens) != 0 {
+			t.Errorf("answer %q: Generate called %d times", answer, len(card.gens))
+		}
+		if !strings.Contains(te.errOut.String(), msg.KeygenForceDeclined) {
+			t.Errorf("answer %q: stderr: %s", answer, te.errOut)
+		}
 	}
 }
 

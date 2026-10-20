@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
@@ -27,4 +28,24 @@ func readSecretTTY(prompt string) (string, error) {
 		return "", fmt.Errorf("reading input: %w", err)
 	}
 	return string(bytes.TrimRight(b, "\r\n")), nil
+}
+
+// maxLineLen bounds a confirmation answer.
+const maxLineLen = 256
+
+// readLineTTY asks on the controlling terminal with echo on and returns the
+// answer without the line ending. It reads /dev/tty, never stdin, so piped
+// input cannot answer it.
+func readLineTTY(prompt string) (string, error) {
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return "", errors.New(msg.AgentNoTTY)
+	}
+	defer tty.Close()
+	fmt.Fprint(tty, prompt)
+	line, err := bufio.NewReaderSize(tty, maxLineLen).ReadSlice('\n')
+	if err != nil && !errors.Is(err, bufio.ErrBufferFull) {
+		return "", fmt.Errorf("reading input: %w", err)
+	}
+	return string(bytes.TrimRight(line, "\r\n")), nil
 }

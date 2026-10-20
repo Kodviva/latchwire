@@ -57,6 +57,23 @@ func cmdKeygen(_ context.Context, e *env, args []string) error {
 	}
 	defer card.Close()
 
+	// --force on an occupied slot: show what is there and require "yes" on
+	// the terminal before anything else (spec §5.4). Force is passed on only
+	// after that confirmation.
+	confirmed := false
+	if *force && slot != 0 {
+		occ, err := card.Occupied(slot)
+		if err != nil {
+			return err
+		}
+		if occ {
+			if err := confirmForce(e, card, uint32(*serial), slot); err != nil {
+				return err
+			}
+			confirmed = true
+		}
+	}
+
 	pin, err := e.readSecret(fmt.Sprintf(msg.KeygenPINPromptFmt, *serial))
 	if err != nil {
 		return err
@@ -65,7 +82,7 @@ func cmdKeygen(_ context.Context, e *env, args []string) error {
 		return errors.New(msg.PIVEmptyPIN)
 	}
 
-	opts := piv.GenerateOptions{Slot: slot, PIN: pin, Force: *force}
+	opts := piv.GenerateOptions{Slot: slot, PIN: pin, Force: confirmed}
 	ref, pub, err := card.Generate(opts)
 	if errors.Is(err, piv.ErrFreshCard) {
 		if err := askFreshCardSecrets(e, &opts); err != nil {
@@ -196,20 +213,39 @@ func keygenFailure(e *env, card cardOps, serial uint32, slot uint8, err error) e
 
 // slotOccupied describes what the slot holds and says how to replace it.
 func slotOccupied(card cardOps, serial uint32, slot uint8) error {
-	var what string
+	return errors.New(slotContents(card, serial, slot) + "\n" + msg.KeygenSlotOccupiedStop)
+}
+
+// confirmForce shows what the slot holds, warns that it is destroyed, and
+// succeeds only if the user types "yes" on the terminal. Without a terminal
+// it refuses.
+func confirmForce(e *env, card cardOps, serial uint32, slot uint8) error {
+	fmt.Fprintln(e.stderr, slotContents(card, serial, slot))
+	fmt.Fprintln(e.stderr, msg.KeygenForceWarn)
+	answer, err := e.readLine(msg.KeygenForceConfirmPrompt)
+	if err != nil {
+		return errors.New(msg.KeygenForceNeedsTTY)
+	}
+	if strings.TrimSpace(answer) != "yes" {
+		return errors.New(msg.KeygenForceDeclined)
+	}
+	return nil
+}
+
+// slotContents describes what an occupied slot holds. Reading the public key
+// never needs the PIN.
+func slotContents(card cardOps, serial uint32, slot uint8) string {
 	p, err := card.Provider(keyref.Ref{Serial: serial, Slot: slot}, func(int) (string, error) {
 		return "", keyprovider.ErrPINRequired
 	})
 	if err != nil {
-		what = fmt.Sprintf(msg.KeygenSlotOccupiedOther, slot, serial, err)
-	} else {
-		pub := p.PublicKey()
-		what = fmt.Sprintf(msg.KeygenSlotOccupiedFmt, slot, serial, base64.StdEncoding.EncodeToString(pub[:]))
-		if c, ok := p.(io.Closer); ok {
-			c.Close()
-		}
+		return fmt.Sprintf(msg.KeygenSlotOccupiedOther, slot, serial, err)
 	}
-	return errors.New(what + "\n" + msg.KeygenSlotOccupiedStop)
+	if c, ok := p.(io.Closer); ok {
+		defer c.Close()
+	}
+	pub := p.PublicKey()
+	return fmt.Sprintf(msg.KeygenSlotOccupiedFmt, slot, serial, base64.StdEncoding.EncodeToString(pub[:]))
 }
 
 // printNewKey writes the result: the KeyRef, the lines for the tunnel
