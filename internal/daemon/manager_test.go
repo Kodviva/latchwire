@@ -683,8 +683,14 @@ func TestCardReinsertReconnects(t *testing.T) {
 	}
 }
 
-func TestAgentDisconnectFailsHandshakeCleanly(t *testing.T) {
-	e, srv := connected(t, envOpts{})
+// withGrace sets how long the daemon waits for a gone agent's user to come
+// back before it tears that user's tunnels down.
+func withGrace(d time.Duration) func(*Manager) {
+	return func(m *Manager) { m.agentGrace = d }
+}
+
+func TestAgentGoneFailsHandshakeDuringGrace(t *testing.T) {
+	e, srv := connected(t, envOpts{hook: withGrace(time.Minute)})
 	tnet, _ := e.f.last()
 	if err := get(tnet, 5*time.Second); err != nil {
 		t.Fatalf("GET: %v", err)
@@ -703,14 +709,79 @@ func TestAgentDisconnectFailsHandshakeCleanly(t *testing.T) {
 		t.Fatal("GET succeeded without an agent")
 	}
 
-	// The daemon is still serving and the tunnel is still configured.
+	// Within the grace period the daemon keeps the tunnel configured, so an
+	// agent restart does not cost a reconnect.
 	if st := e.status(); st.State != StateConnected {
-		t.Fatalf("state %q after agent loss, want connected (handshakes fail until it returns)", st.State)
+		t.Fatalf("state %q during the grace period, want connected", st.State)
+	}
+}
+
+func TestAgentExitTearsDownAfterGrace(t *testing.T) {
+	const grace = 300 * time.Millisecond
+	e, _ := connected(t, envOpts{hook: withGrace(grace)})
+	tnet, cfg := e.f.last()
+	if err := get(tnet, 5*time.Second); err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	start := time.Now()
+	e.stopAgent()
+	e.waitState(StateCardRemoved, grace+3*time.Second)
+	if d := time.Since(start); d < grace {
+		t.Errorf("torn down %v after the agent left, want >= grace %v", d, grace)
+	}
+	cfg.mu.Lock()
+	removed := cfg.removed
+	cfg.mu.Unlock()
+	if removed != 1 {
+		t.Errorf("Configurer.Remove called %d times, want 1 (device closed)", removed)
+	}
+	if err := get(tnet, time.Second); err == nil {
+		t.Fatal("GET succeeded after the tunnel was torn down")
 	}
 
-	// The agent comes back: handshakes work again on the same device.
+	// A later agent of the same user reports the card again: the tunnel
+	// comes back on a new device, without a PIN (the card is still verified).
+	e.startAgent()
+	e.waitState(StateConnected, 5*time.Second)
+	if n := e.f.count(); n != 2 {
+		t.Fatalf("%d TUN devices made, want 2 (reconnect builds a new device)", n)
+	}
+	tnet, _ = e.f.last()
+	if err := get(tnet, 5*time.Second); err != nil {
+		t.Fatalf("GET after the agent returned: %v", err)
+	}
+	if n := e.p.count(); n != 1 {
+		t.Errorf("PIN asked %d times, want 1 (card stayed verified)", n)
+	}
+}
+
+func TestAgentRestartWithinGraceKeepsTunnel(t *testing.T) {
+	const grace = 500 * time.Millisecond
+	e, srv := connected(t, envOpts{hook: withGrace(grace)})
+	tnet, cfg := e.f.last()
+	if err := get(tnet, 5*time.Second); err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	e.stopAgent()
+	e.waitCard(serialA, false)
 	e.startAgent()
 	e.waitCard(serialA, true)
+
+	// Let the grace timer of the old agent fire: the new agent reports the
+	// card, so nothing is torn down.
+	time.Sleep(grace + 300*time.Millisecond)
+	if st := e.status(); st.State != StateConnected {
+		t.Fatalf("state %q after a restart within the grace period, want connected", st.State)
+	}
+	cfg.mu.Lock()
+	removed := cfg.removed
+	cfg.mu.Unlock()
+	if removed != 0 {
+		t.Errorf("Configurer.Remove called %d times, want 0", removed)
+	}
+
+	// Handshakes work again on the same device.
+	e.clientDev().LookupPeer(device.NoisePublicKey(srv.pub)).ExpireCurrentKeypairs()
 	deadline := time.Now().Add(15 * time.Second)
 	for {
 		err := get(tnet, time.Second)
@@ -723,6 +794,9 @@ func TestAgentDisconnectFailsHandshakeCleanly(t *testing.T) {
 	}
 	if n := e.f.count(); n != 1 {
 		t.Errorf("%d devices made, want 1", n)
+	}
+	if n := e.p.count(); n != 1 {
+		t.Errorf("PIN asked %d times, want 1 (card stayed verified)", n)
 	}
 }
 
