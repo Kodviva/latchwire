@@ -97,8 +97,10 @@ func (c *scContext) Connect(reader string) (*scHandle, error) {
 		handle         C.SCARDHANDLE
 		activeProtocol C.DWORD
 	)
+	// Latchwire patch: shared mode, so other programs can use the card
+	// between our transactions (upstream: SCARD_SHARE_EXCLUSIVE).
 	rc := C.SCardConnect(c.ctx, C.CString(reader),
-		C.SCARD_SHARE_EXCLUSIVE, C.SCARD_PROTOCOL_T1,
+		C.SCARD_SHARE_SHARED, C.SCARD_PROTOCOL_T1,
 		&handle, &activeProtocol)
 	if err := scCheck(rc); err != nil {
 		return nil, err
@@ -108,6 +110,14 @@ func (c *scContext) Connect(reader string) (*scHandle, error) {
 
 func (h *scHandle) Close() error {
 	return scCheck(C.SCardDisconnect(h.h, C.SCARD_LEAVE_CARD))
+}
+
+// Reconnect re-establishes the connection after another program reset the
+// card (Latchwire patch).
+func (h *scHandle) Reconnect() error {
+	var activeProtocol C.DWORD
+	return scCheck(C.SCardReconnect(h.h, C.SCARD_SHARE_SHARED, C.SCARD_PROTOCOL_T1,
+		C.SCARD_LEAVE_CARD, &activeProtocol))
 }
 
 type scTx struct {

@@ -82,16 +82,24 @@ func TestBackendSerialsWhileProviderOpen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A real card held open by the provider cannot be opened a second time
-	// (PC/SC exclusive mode); the backend must not need to.
-	s.openErr = map[string]error{readerA: errors.New("sharing violation")}
-
-	serials, err := be.Serials()
-	if err != nil {
+	// Presence polling must not send commands to held cards or reopen
+	// readers already seen.
+	if _, err := be.Serials(); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(serials, []uint32{a.serial, b.serial}) {
-		t.Fatalf("Serials = %v, want both cards", serials)
+	opened, aSerial, bSerial := len(s.opened), a.callCount("Serial"), b.callCount("Serial")
+	for i := 0; i < 3; i++ {
+		serials, err := be.Serials()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(serials, []uint32{a.serial, b.serial}) {
+			t.Fatalf("Serials = %v, want both cards", serials)
+		}
+	}
+	if len(s.opened) != opened || a.callCount("Serial") != aSerial || b.callCount("Serial") != bSerial {
+		t.Fatalf("polling touched cards: opened %d->%d, Serial calls A %d->%d B %d->%d",
+			opened, len(s.opened), aSerial, a.callCount("Serial"), bSerial, b.callCount("Serial"))
 	}
 
 	// A provider for the other card must not reopen (and so disturb) the
@@ -169,6 +177,31 @@ func TestBackendCardRemovedAndReinserted(t *testing.T) {
 	}
 	_ = p.(io.Closer).Close()
 	_ = p2.(io.Closer).Close()
+}
+
+func TestSerialsOpensEachReaderOnce(t *testing.T) {
+	s, _, _ := twoCards(t)
+	var be Backend
+	for i := 0; i < 5; i++ {
+		if _, err := be.Serials(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !slices.Equal(s.opened, []string{readerA, readerB}) {
+		t.Fatalf("opened %v, want each YubiKey reader exactly once", s.opened)
+	}
+	// A reader that disappears and comes back is read again.
+	s.readers = []string{readerB}
+	if _, err := be.Serials(); err != nil {
+		t.Fatal(err)
+	}
+	s.readers = []string{readerA, readerB}
+	if _, err := be.Serials(); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(s.opened, []string{readerA, readerB, readerA}) {
+		t.Fatalf("opened %v after reinsertion", s.opened)
+	}
 }
 
 func TestProbeClassification(t *testing.T) {

@@ -40,7 +40,15 @@ const (
 	PIVSlotOutOfRangeFmt     = "slot %02x is not a retired key management slot (82-95)"
 	PIVWrongPUKFmt           = "wrong PUK, %d retries left"
 	PIVPUKBlocked            = "the PUK is blocked"
-	PIVStoredKeyMismatch     = "the management key stored on the YubiKey could not be read back correctly; the management key was not changed"
-	PIVEmptyPIN              = "no PIN was entered"
-	PIVUnexpectedPublicKey   = "the YubiKey returned an unexpected public key type"
+	PIVStoredKeyMismatch     = "the management key stored on the YubiKey could not be read back correctly, so the factory management key was kept"
+	PIVPIVManFlagFailed      = "the new management key is set and stored on the YubiKey under the PIN, but ykman's \"protected by PIN\" flag could not be written"
+	// PIVPINAlreadyChanged and PIVPINAndPUKAlreadyChanged prefix errors from
+	// securing a fresh card after the PIN (and PUK) were already changed.
+	PIVPINAlreadyChanged       = "the PIN has already been changed to the new PIN (the PUK has not)"
+	PIVPINAndPUKAlreadyChanged = "the PIN and PUK have already been changed to the new values"
+	PIVSecretTooLong           = "a PIN or PUK longer than 8 bytes was given"
+	PIVPINTooLong              = "the PIN entered is longer than 8 bytes"
+	PIVUnsupportedPolicy       = "the key in this slot does not use PIN policy \"once\" and touch policy \"never\"; Latchwire only uses such keys"
+	PIVEmptyPIN                = "no PIN was entered"
+	PIVUnexpectedPublicKey     = "the YubiKey returned an unexpected public key type"
 )

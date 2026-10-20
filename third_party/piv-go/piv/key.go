@@ -608,6 +608,12 @@ func (yk *YubiKey) AttestationCertificate() (*x509.Certificate, error) {
 //
 // If the slot doesn't have a key, the returned error wraps ErrNotFound.
 func (yk *YubiKey) Attest(slot Slot) (*x509.Certificate, error) {
+	// Latchwire patch: one PC/SC transaction per operation (see begin).
+	end, txErr := yk.begin()
+	if txErr != nil {
+		return nil, txErr
+	}
+	defer end()
 	cert, err := ykAttest(yk.tx, slot)
 	if err == nil {
 		return cert, nil
@@ -711,6 +717,12 @@ func (ki *KeyInfo) unmarshal(b []byte) error {
 // KeyInfo returns public information about the given key slot. It is only
 // supported by YubiKeys with a version >= 5.3.0.
 func (yk *YubiKey) KeyInfo(slot Slot) (KeyInfo, error) {
+	// Latchwire patch: one PC/SC transaction per operation (see begin).
+	end, txErr := yk.begin()
+	if txErr != nil {
+		return KeyInfo{}, txErr
+	}
+	defer end()
 	// https://developers.yubico.com/PIV/Introduction/Yubico_extensions.html#_get_metadata
 	cmd := apdu{
 		instruction: insGetMetadata,
@@ -733,6 +745,12 @@ func (yk *YubiKey) KeyInfo(slot Slot) (KeyInfo, error) {
 // If a certificate hasn't been set in the provided slot, the returned error
 // wraps ErrNotFound.
 func (yk *YubiKey) Certificate(slot Slot) (*x509.Certificate, error) {
+	// Latchwire patch: one PC/SC transaction per operation (see begin).
+	end, txErr := yk.begin()
+	if txErr != nil {
+		return nil, txErr
+	}
+	defer end()
 	cmd := apdu{
 		instruction: insGetData,
 		param1:      0x3f,
@@ -792,6 +810,12 @@ func marshalASN1(tag byte, data []byte) []byte {
 // certificate isn't required to use the associated key for signing or
 // decryption.
 func (yk *YubiKey) SetCertificate(key []byte, slot Slot, cert *x509.Certificate) error {
+	// Latchwire patch: one PC/SC transaction per operation (see begin).
+	end, txErr := yk.begin()
+	if txErr != nil {
+		return txErr
+	}
+	defer end()
 	if err := ykAuthenticate(yk.tx, key, yk.rand, yk.version); err != nil {
 		return fmt.Errorf("authenticating with management key: %w", err)
 	}
@@ -846,6 +870,12 @@ type Key struct {
 // GenerateKey generates an asymmetric key on the card, returning the key's
 // public key.
 func (yk *YubiKey) GenerateKey(key []byte, slot Slot, opts Key) (crypto.PublicKey, error) {
+	// Latchwire patch: one PC/SC transaction per operation (see begin).
+	end, txErr := yk.begin()
+	if txErr != nil {
+		return nil, txErr
+	}
+	defer end()
 	if err := ykAuthenticate(yk.tx, key, yk.rand, yk.version); err != nil {
 		return nil, fmt.Errorf("authenticating with management key: %w", err)
 	}
@@ -945,59 +975,87 @@ type KeyAuth struct {
 	PINPolicy PINPolicy
 }
 
-func (k KeyAuth) authTx(yk *YubiKey, pp PINPolicy) error {
+// pinFor returns the PIN to verify before an operation, or "" when none is
+// needed.
+//
+// Latchwire patch (replaces upstream authTx): the "is a PIN needed" check
+// runs in its own short transaction and the prompt runs outside any PC/SC
+// transaction, so other programs are not locked out while the user types.
+// The decision is upstream's: PINPolicyNever and the match (biometric)
+// policies never take a PIN; PINPolicyAlways always does; otherwise an empty
+// VERIFY tells whether the card still holds a verified PIN (9000) or not
+// (63Cx), and the prompt is only called in the latter case.
+func (k KeyAuth) pinFor(yk *YubiKey, pp PINPolicy) (string, error) {
 	// PINPolicyNever shouldn't require a PIN.
 	if pp == PINPolicyNever {
-		return nil
+		return "", nil
 	}
 
 	// Match policies use biometric verification (not PIN) and are handled in do().
 	if pp == PINPolicyMatchOnce || pp == PINPolicyMatchAlways {
-		return nil
+		return "", nil
 	}
 
 	// PINPolicyAlways should always prompt a PIN even if the key says that
 	// login isn't needed.
 	// https://github.com/go-piv/piv-go/issues/49
-	if pp != PINPolicyAlways && !ykLoginNeeded(yk.tx) {
-		return nil
+	if pp != PINPolicyAlways {
+		end, err := yk.begin()
+		if err != nil {
+			return "", err
+		}
+		needed := ykLoginNeeded(yk.tx)
+		end()
+		if !needed {
+			return "", nil
+		}
 	}
 
 	pin := k.PIN
 	if pin == "" && k.PINPrompt != nil {
 		p, err := k.PINPrompt()
 		if err != nil {
-			return fmt.Errorf("pin prompt: %v", err)
+			return "", fmt.Errorf("pin prompt: %v", err)
 		}
 		pin = p
 	}
 	if pin == "" {
-		return fmt.Errorf("pin required but wasn't provided")
+		return "", fmt.Errorf("pin required but wasn't provided")
 	}
-	return ykLogin(yk.tx, pin)
+	return pin, nil
 }
 
 func (k KeyAuth) do(yk *YubiKey, pp PINPolicy, f func(tx *scTx) ([]byte, error)) ([]byte, error) {
 	const swSecurityStatusNotSatisfied = 0x6982
 
+	pin, err := k.pinFor(yk, pp)
+	if err != nil {
+		return nil, err
+	}
+
+	// Latchwire patch: the PIN verification and the operation share one
+	// transaction.
+	end, err := yk.begin()
+	if err != nil {
+		return nil, err
+	}
+	defer end()
+
 	if pp == PINPolicyMatchAlways {
-		if err := yk.VerifyBiometrics(); err != nil {
+		if err := ykVerifyUV(yk.tx); err != nil {
 			return nil, err
 		}
 		return f(yk.tx)
 	}
 
 	if pp == PINPolicyMatchOnce {
-		if err := k.authTx(yk, pp); err != nil {
-			return nil, err
-		}
 		resp, err := f(yk.tx)
 		if err == nil {
 			return resp, nil
 		}
 		var apdu *apduErr
 		if errors.As(err, &apdu) && apdu.Status() == swSecurityStatusNotSatisfied {
-			if err := yk.VerifyBiometrics(); err != nil {
+			if err := ykVerifyUV(yk.tx); err != nil {
 				return nil, err
 			}
 			return f(yk.tx)
@@ -1005,8 +1063,10 @@ func (k KeyAuth) do(yk *YubiKey, pp PINPolicy, f func(tx *scTx) ([]byte, error))
 		return nil, err
 	}
 
-	if err := k.authTx(yk, pp); err != nil {
-		return nil, err
+	if pin != "" {
+		if err := ykLogin(yk.tx, pin); err != nil {
+			return nil, err
+		}
 	}
 	return f(yk.tx)
 }
@@ -1097,6 +1157,12 @@ func (yk *YubiKey) PrivateKey(slot Slot, public crypto.PublicKey, auth KeyAuth) 
 // as there's no way to prove the key wasn't copied, exfiltrated, or replaced with malicious
 // material before being imported.
 func (yk *YubiKey) SetPrivateKeyInsecure(key []byte, slot Slot, private crypto.PrivateKey, policy Key) error {
+	// Latchwire patch: one PC/SC transaction per operation (see begin).
+	end, txErr := yk.begin()
+	if txErr != nil {
+		return txErr
+	}
+	defer end()
 	// Reference implementation
 	// https://github.com/Yubico/yubico-piv-tool/blob/671a5740ef09d6c5d9d33f6e5575450750b58bde/lib/ykpiv.c#L1812
 

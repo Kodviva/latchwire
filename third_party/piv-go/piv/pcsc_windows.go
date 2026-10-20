@@ -30,11 +30,12 @@ var (
 	procSCardBeginTransaction = winscard.NewProc("SCardBeginTransaction")
 	procSCardEndTransaction   = winscard.NewProc("SCardEndTransaction")
 	procSCardTransmit         = winscard.NewProc("SCardTransmit")
+	procSCardReconnect        = winscard.NewProc("SCardReconnect") // Latchwire patch
 )
 
 const (
 	scardScopeSystem      = 2
-	scardShareExclusive   = 1
+	scardShareShared      = 2 // Latchwire patch: replaces SCARD_SHARE_EXCLUSIVE (1)
 	scardLeaveCard        = 0
 	scardProtocolT1       = 2
 	scardPCIT1            = 0
@@ -134,7 +135,7 @@ func (c *scContext) Connect(reader string) (*scHandle, error) {
 	r0, _, _ := procSCardConnectW.Call(
 		uintptr(c.ctx),
 		uintptr(unsafe.Pointer(readerPtr)),
-		scardShareExclusive,
+		scardShareShared, // Latchwire patch: shared mode
 		scardProtocolT1,
 		uintptr(unsafe.Pointer(&handle)),
 		uintptr(activeProtocol),
@@ -151,6 +152,20 @@ type scHandle struct {
 
 func (h *scHandle) Close() error {
 	r0, _, _ := procSCardDisconnect.Call(uintptr(h.handle), scardLeaveCard)
+	return scCheck(r0)
+}
+
+// Reconnect re-establishes the connection after another program reset the
+// card (Latchwire patch).
+func (h *scHandle) Reconnect() error {
+	var activeProtocol uint32
+	r0, _, _ := procSCardReconnect.Call(
+		uintptr(h.handle),
+		scardShareShared,
+		scardProtocolT1,
+		scardLeaveCard,
+		uintptr(unsafe.Pointer(&activeProtocol)),
+	)
 	return scCheck(r0)
 }
 

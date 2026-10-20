@@ -4,6 +4,9 @@ go 1.25
 
 replace golang.zx2c4.com/wireguard => ./third_party/wireguard-go
 
+// piv-go v2.5.0 with Latchwire patches, see third_party/piv-go/PATCHES.md.
+replace github.com/go-piv/piv-go/v2 => ./third_party/piv-go
+
 require (
 	github.com/go-piv/piv-go/v2 v2.5.0
 	golang.org/x/crypto v0.37.0

@@ -122,6 +122,10 @@ type YubiKey struct {
 	// before exposing an API.
 	version *version
 
+	// Latchwire patch: depth of nested begin calls. Only the outermost call
+	// begins and ends the PC/SC transaction. Like the rest of YubiKey, this
+	// is not safe for concurrent use.
+	txDepth int
 }
 
 // Close releases the connection to the smart card.
@@ -169,17 +173,18 @@ func (c *client) Open(card string) (*YubiKey, error) {
 		ctx.Close()
 		return nil, fmt.Errorf("connecting to smart card: %w", err)
 	}
-	tx, err := h.Begin()
+
+	// Latchwire patch: no transaction is held for the lifetime of the
+	// handle; begin opens one per operation. Every error path closes both
+	// the handle and the context (upstream leaked them).
+	yk := &YubiKey{ctx: ctx, h: h}
+	end, err := yk.begin()
 	if err != nil {
+		yk.Close()
 		return nil, fmt.Errorf("beginning smart card transaction: %w", err)
 	}
-	if err := ykSelectApplication(tx, aidPIV[:]); err != nil {
-		tx.Close()
-		return nil, fmt.Errorf("selecting piv applet: %w", err)
-	}
-
-	yk := &YubiKey{ctx: ctx, h: h, tx: tx}
 	v, err := ykVersion(yk.tx)
+	end()
 	if err != nil {
 		yk.Close()
 		return nil, fmt.Errorf("getting yubikey version: %w", err)
@@ -191,6 +196,65 @@ func (c *client) Open(card string) (*YubiKey, error) {
 		yk.rand = rand.Reader
 	}
 	return yk, nil
+}
+
+// rcResetCard is SCARD_W_RESET_CARD: another program reset the card since our
+// last transaction.
+const rcResetCard = 0x80100068
+
+// begin starts a PC/SC transaction for one operation and makes sure the PIV
+// applet is selected. The returned function ends the transaction.
+//
+// Latchwire patch: the card is connected in shared mode and no transaction
+// is held between operations, so other programs (macOS CryptoTokenKit,
+// ykman, Yubico Authenticator, GnuPG) can use the card in between. They may
+// have selected another applet or reset the card meanwhile:
+//   - a reset (SCARD_W_RESET_CARD) is handled by reconnecting;
+//   - the applet check follows libykpiv's _ykpiv_ensure_application_selected:
+//     an empty VERIFY answers 9000 or 63Cx/6983 only when PIV is selected,
+//     and, unlike SELECT, it keeps the PIN verification state. Only if it
+//     fails is PIV selected again.
+func (yk *YubiKey) begin() (func(), error) {
+	if yk.txDepth > 0 {
+		yk.txDepth++
+		return func() { yk.txDepth-- }, nil
+	}
+	tx, err := yk.h.Begin()
+	var sc *scErr
+	if err != nil && errors.As(err, &sc) && sc.rc == rcResetCard {
+		if err := yk.h.Reconnect(); err != nil {
+			return nil, fmt.Errorf("reconnecting after card reset: %w", err)
+		}
+		tx, err = yk.h.Begin()
+	}
+	if err != nil {
+		return nil, err
+	}
+	yk.tx = tx
+	yk.txDepth = 1
+	end := func() {
+		yk.txDepth--
+		if yk.txDepth == 0 {
+			tx.Close()
+		}
+	}
+	if err := ykEnsureSelected(tx); err != nil {
+		end()
+		return nil, err
+	}
+	return end, nil
+}
+
+func ykEnsureSelected(tx *scTx) error {
+	_, err := tx.Transmit(apdu{instruction: insVerify, param2: 0x80})
+	var ae AuthErr
+	if err == nil || errors.As(err, &ae) {
+		return nil
+	}
+	if err := ykSelectApplication(tx, aidPIV[:]); err != nil {
+		return fmt.Errorf("selecting piv applet: %w", err)
+	}
+	return nil
 }
 
 // Version returns the version as reported by the PIV applet. For newer
@@ -208,6 +272,12 @@ func (yk *YubiKey) Version() Version {
 
 // Serial returns the YubiKey's serial number.
 func (yk *YubiKey) Serial() (uint32, error) {
+	// Latchwire patch: one PC/SC transaction per operation (see begin).
+	end, txErr := yk.begin()
+	if txErr != nil {
+		return 0, txErr
+	}
+	defer end()
 	return ykSerial(yk.tx, yk.version)
 }
 
@@ -241,6 +311,12 @@ func encodePIN(pin string) ([]byte, error) {
 //
 // Use DefaultPIN if the PIN hasn't been set.
 func (yk *YubiKey) VerifyPIN(pin string) error {
+	// Latchwire patch: one PC/SC transaction per operation (see begin).
+	end, txErr := yk.begin()
+	if txErr != nil {
+		return txErr
+	}
+	defer end()
 	return ykLogin(yk.tx, pin)
 }
 
@@ -249,6 +325,12 @@ func (yk *YubiKey) VerifyPIN(pin string) error {
 // decrypting. When using PINPolicyMatchAlways, call this before every signing
 // or decrypting operation.
 func (yk *YubiKey) VerifyBiometrics() error {
+	// Latchwire patch: one PC/SC transaction per operation (see begin).
+	end, txErr := yk.begin()
+	if txErr != nil {
+		return txErr
+	}
+	defer end()
 	return ykVerifyUV(yk.tx)
 }
 
@@ -287,6 +369,12 @@ func ykLoginNeeded(tx *scTx) bool {
 
 // Retries returns the number of attempts remaining to enter the correct PIN.
 func (yk *YubiKey) Retries() (int, error) {
+	// Latchwire patch: one PC/SC transaction per operation (see begin).
+	end, txErr := yk.begin()
+	if txErr != nil {
+		return 0, txErr
+	}
+	defer end()
 	return ykPINRetries(yk.tx)
 }
 
@@ -307,6 +395,12 @@ func ykPINRetries(tx *scTx) (int, error) {
 // and resetting the PIN, PUK, and Management Key to their default values. This
 // does NOT affect data on other applets, such as GPG or U2F.
 func (yk *YubiKey) Reset() error {
+	// Latchwire patch: one PC/SC transaction per operation (see begin).
+	end, txErr := yk.begin()
+	if txErr != nil {
+		return txErr
+	}
+	defer end()
 	return ykReset(yk.tx, yk.rand)
 }
 
@@ -541,6 +635,12 @@ func ykAuthenticate(tx *scTx, key []byte, rand io.Reader, version *version) erro
 //		// ...
 //	}
 func (yk *YubiKey) SetManagementKey(oldKey, newKey []byte) error {
+	// Latchwire patch: one PC/SC transaction per operation (see begin).
+	end, txErr := yk.begin()
+	if txErr != nil {
+		return txErr
+	}
+	defer end()
 	if err := ykAuthenticate(yk.tx, oldKey, yk.rand, yk.version); err != nil {
 		return fmt.Errorf("authenticating with old key: %w", err)
 	}
@@ -605,6 +705,12 @@ func ykSetManagementKey(tx *scTx, key []byte, touch bool, version *version) erro
 //		// ...
 //	}
 func (yk *YubiKey) SetPIN(oldPIN, newPIN string) error {
+	// Latchwire patch: one PC/SC transaction per operation (see begin).
+	end, txErr := yk.begin()
+	if txErr != nil {
+		return txErr
+	}
+	defer end()
 	return ykChangePIN(yk.tx, oldPIN, newPIN)
 }
 
@@ -628,6 +734,12 @@ func ykChangePIN(tx *scTx, oldPIN, newPIN string) error {
 
 // Unblock unblocks the PIN, setting it to a new value.
 func (yk *YubiKey) Unblock(puk, newPIN string) error {
+	// Latchwire patch: one PC/SC transaction per operation (see begin).
+	end, txErr := yk.begin()
+	if txErr != nil {
+		return txErr
+	}
+	defer end()
 	return ykUnblockPIN(yk.tx, puk, newPIN)
 }
 
@@ -665,6 +777,12 @@ func ykUnblockPIN(tx *scTx, puk, newPIN string) error {
 //		// ...
 //	}
 func (yk *YubiKey) SetPUK(oldPUK, newPUK string) error {
+	// Latchwire patch: one PC/SC transaction per operation (see begin).
+	end, txErr := yk.begin()
+	if txErr != nil {
+		return txErr
+	}
+	defer end()
 	return ykChangePUK(yk.tx, oldPUK, newPUK)
 }
 
@@ -700,6 +818,12 @@ func ykChangePUK(tx *scTx, oldPUK, newPUK string) error {
 //		// ...
 //	}
 func (yk *YubiKey) SetRetries(managementKey []byte, pin string, pinRetries int, pukRetries int) error {
+	// Latchwire patch: one PC/SC transaction per operation (see begin).
+	end, txErr := yk.begin()
+	if txErr != nil {
+		return txErr
+	}
+	defer end()
 	return ykSetRetries(yk.tx, managementKey, pin, pinRetries, pukRetries, yk.rand, yk.version)
 }
 
@@ -777,6 +901,12 @@ func ykSerial(tx *scTx, v *version) (uint32, error) {
 // Metadata returns protected data stored on the card. This can be used to
 // retrieve PIN protected management keys.
 func (yk *YubiKey) Metadata(pin string) (*Metadata, error) {
+	// Latchwire patch: one PC/SC transaction per operation (see begin).
+	end, txErr := yk.begin()
+	if txErr != nil {
+		return nil, txErr
+	}
+	defer end()
 	m, err := ykGetProtectedMetadata(yk.tx, pin)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -791,6 +921,12 @@ func (yk *YubiKey) Metadata(pin string) (*Metadata, error) {
 // store the management key on the smart card instead of managing the PIN and
 // management key seperately.
 func (yk *YubiKey) SetMetadata(key []byte, m *Metadata) error {
+	// Latchwire patch: one PC/SC transaction per operation (see begin).
+	end, txErr := yk.begin()
+	if txErr != nil {
+		return txErr
+	}
+	defer end()
 	return ykSetProtectedMetadata(yk.tx, key, m, yk.rand, yk.version)
 }
 
@@ -810,16 +946,19 @@ func (m *Metadata) marshal() ([]byte, error) {
 		if m.ManagementKey == nil {
 			return []byte{0x88, 0x00}, nil
 		}
-		return append([]byte{
-			0x88,
-			26,
-			0x89,
-			24,
-		}, *m.ManagementKey...), nil
+		// Latchwire patch: use the real key length (upstream hard-coded 24,
+		// corrupting 16- and 32-byte keys).
+		if err := checkManagementKeyLen(*m.ManagementKey); err != nil {
+			return nil, err
+		}
+		return marshalASN1(0x88, marshalASN1(0x89, *m.ManagementKey)), nil
 	}
 
 	if m.ManagementKey == nil {
 		return m.raw, nil
+	}
+	if err := checkManagementKeyLen(*m.ManagementKey); err != nil {
+		return nil, err
 	}
 
 	var metadata asn1.RawValue
@@ -849,9 +988,17 @@ func (m *Metadata) marshal() ([]byte, error) {
 		}
 		metadata.Bytes = append(metadata.Bytes, v.FullBytes...)
 	}
-	metadata.Bytes = append(metadata.Bytes, 0x89, 24)
-	metadata.Bytes = append(metadata.Bytes, *m.ManagementKey...)
+	// Latchwire patch: real key length, see above.
+	metadata.Bytes = append(metadata.Bytes, marshalASN1(0x89, *m.ManagementKey)...)
 	return asn1.Marshal(metadata)
+}
+
+func checkManagementKeyLen(k []byte) error {
+	switch len(k) {
+	case 16, 24, 32:
+		return nil
+	}
+	return fmt.Errorf("invalid management key length: %d", len(k))
 }
 
 func (m *Metadata) unmarshal(b []byte) error {

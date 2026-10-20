@@ -15,15 +15,9 @@ import (
 )
 
 // managementKeyLen is the length of the random management key set on a
-// factory-fresh card: AES-192, which is also what ykman picks by default on
-// firmware 5.7.
-//
-// It is not AES-256 (32 bytes) because piv-go v2.5.0/v2.6.0 cannot store a
-// 32-byte key in the PIN-protected data object: Metadata.marshal writes the
-// TLV header 0x88 0x1A 0x89 0x18 (24 bytes) whatever the key length, so a
-// 32-byte key would be stored corrupted and read back truncated, and the new
-// management key would be lost.
-const managementKeyLen = 24
+// factory-fresh card: AES-256. (Upstream piv-go stored only 24-byte keys
+// correctly in the protected data object; the vendored copy is patched.)
+const managementKeyLen = 32
 
 // minSecretLen and maxSecretLen bound a new PIN or PUK.
 const (
@@ -60,6 +54,9 @@ func (c *Card) Generate(o GenerateOptions) (keyref.Ref, [32]byte, error) {
 	var pub [32]byte
 	if o.Slot != 0 && !retired(o.Slot) {
 		return keyref.Ref{}, pub, fmt.Errorf(msg.PIVSlotOutOfRangeFmt, o.Slot)
+	}
+	if len(o.PIN) > maxSecretLen || len(o.CurrentPUK) > maxSecretLen {
+		return keyref.Ref{}, pub, errors.New(msg.PIVSecretTooLong)
 	}
 
 	c.sem <- struct{}{}
@@ -181,55 +178,72 @@ func (c *Card) managementKey(o GenerateOptions) ([]byte, error) {
 
 func validSecret(s string) bool { return len(s) >= minSecretLen && len(s) <= maxSecretLen }
 
-// harden secures a card that still uses the factory management key: it sets
-// the caller's new PIN and PUK, then a random management key stored under
-// the PIN in the data object ykman uses (0x5FC109). The key is stored and
-// read back before it replaces the default key, so a failed write cannot
-// leave a management key that nobody knows.
+// harden secures a card that still uses the factory management key.
+//
+// Order:
+//  1. The current PUK is checked (changed to itself) before anything else,
+//     so a wrong PUK aborts with the PIN untouched.
+//  2. PIN, then PUK, are changed to the caller's new values.
+//  3. A random AES-256 management key is stored under the PIN in ykman's
+//     protected data object (0x5FC109) and read back, before it replaces the
+//     default key: a failed write cannot leave a key nobody knows.
+//  4. The management key is changed, then ykman's PIVMAN flag
+//     "management key stored" is set with the new key.
+//
+// Errors after step 2 began say which secrets already have their new value.
 func (c *Card) harden(o GenerateOptions) ([]byte, error) {
 	if o.PIN == "" || o.CurrentPUK == "" || !validSecret(o.NewPIN) || !validSecret(o.NewPUK) ||
 		o.NewPIN == piv.DefaultPIN || o.NewPUK == piv.DefaultPUK {
 		return nil, ErrFreshCard
 	}
+	if err := c.c.SetPUK(o.CurrentPUK, o.CurrentPUK); err != nil {
+		return nil, mapPUKErr(err)
+	}
 	if err := c.c.SetPIN(o.PIN, o.NewPIN); err != nil {
 		return nil, mapCardErr(err)
 	}
 	if err := c.c.SetPUK(o.CurrentPUK, o.NewPUK); err != nil {
-		return nil, mapPUKErr(err)
+		return nil, fmt.Errorf("%s: %w", msg.PIVPINAlreadyChanged, mapPUKErr(err))
+	}
+	changed := func(err error) error {
+		return fmt.Errorf("%s: %w", msg.PIVPINAndPUKAlreadyChanged, err)
 	}
 
 	mk := make([]byte, managementKeyLen)
 	if _, err := rand.Read(mk); err != nil {
-		return nil, err
+		return nil, changed(err)
 	}
+	fail := func(err error) ([]byte, error) {
+		clear(mk)
+		return nil, changed(err)
+	}
+
 	stored := append([]byte(nil), mk...)
 	err := c.c.SetMetadata(piv.DefaultManagementKey, &piv.Metadata{ManagementKey: &stored})
 	clear(stored)
 	if err != nil {
-		clear(mk)
-		return nil, mapCardErr(err)
+		return fail(mapCardErr(err))
 	}
 	md, err := c.c.Metadata(o.NewPIN)
 	if err != nil {
-		clear(mk)
-		return nil, mapCardErr(err)
+		return fail(mapCardErr(err))
 	}
 	if md.ManagementKey == nil || subtle.ConstantTimeCompare(*md.ManagementKey, mk) != 1 {
 		if md.ManagementKey != nil {
 			clear(*md.ManagementKey)
 		}
-		clear(mk)
-		return nil, errors.New(msg.PIVStoredKeyMismatch)
+		return fail(errors.New(msg.PIVStoredKeyMismatch))
 	}
 	clear(*md.ManagementKey)
 
 	if err := c.c.SetManagementKey(piv.DefaultManagementKey, mk); err != nil {
-		clear(mk)
-		return nil, mapCardErr(err)
+		return fail(mapCardErr(err))
+	}
+	if err := c.c.SetPIVManFlags(mk, piv.PIVManFlagMgmtKeyStored); err != nil {
+		return fail(fmt.Errorf("%s: %w", msg.PIVPIVManFlagFailed, mapCardErr(err)))
 	}
 	if err := c.c.AuthenticateManagementKey(mk); err != nil {
-		clear(mk)
-		return nil, mapCardErr(err)
+		return fail(mapCardErr(err))
 	}
 	return mk, nil
 }
