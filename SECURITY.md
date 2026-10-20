@@ -50,7 +50,9 @@ In scope, for example:
 - Latchwire trying a factory default PIN, PUK or management key on a card in a
   way the [threat model](docs/threat-model.md) says it does not.
 - A local user (or a fake agent or daemon) binding, rebinding, disconnecting,
-  adding or removing a tunnel it should not be able to, or posing as your card.
+  adding or removing a tunnel it should not be able to according to the
+  [threat model](docs/threat-model.md), or posing as your card without access
+  to it.
 - A tunnel configuration that is accepted although it carries a private key, or
   that makes the daemon run commands.
 - A bypass of the handshake rate limits and in-flight caps, or a way to make a
@@ -65,8 +67,11 @@ Out of scope:
 - The limits listed in "What Latchwire does NOT protect against" in the
   [threat model](docs/threat-model.md), for example malware running as you
   while the card is plugged in and the PIN has been entered, or other programs
-  using a PIN-verified card. These are known, documented behaviour. If you think
-  the documentation understates them, that is worth a report.
+  using a PIN-verified card, including other local users where the platform's
+  PC/SC access policy lets them reach your card (they pass the proof of
+  possession and can bind your unbound tunnels). These are known, documented
+  behaviour. If you think the documentation understates them, that is worth a
+  report.
 - Problems in wireguard-go, piv-go, the Go standard library, the operating
   system, or YubiKey firmware that Latchwire does not make worse. Please report
   those to the upstream project. If a Latchwire change makes them reachable,
