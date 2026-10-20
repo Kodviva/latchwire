@@ -36,7 +36,10 @@ var (
 
 // Identity is one hardware key and the addresses used while it is selected.
 type Identity struct {
-	Ref       keyref.Ref
+	Ref keyref.Ref
+	// PublicKey is the key the slot must hold. It is configured, never
+	// learned from the card, so an agent cannot substitute another key.
+	PublicKey [32]byte
 	Addresses []netip.Prefix
 }
 
@@ -100,6 +103,7 @@ type parser struct {
 	sec     section
 	seenIf  bool
 	ifRef   *keyref.Ref
+	ifPub   *[32]byte
 	ifAddrs []netip.Prefix
 
 	cur      *Identity // identity being filled, nil unless sec == secIdentity
@@ -199,6 +203,9 @@ func (p *parser) endSection() error {
 		if !p.seen["keyref"] {
 			return fmt.Errorf(msg.ConfigMissingKeyFmt, secIdentity, "KeyRef")
 		}
+		if !p.seen["publickey"] {
+			return fmt.Errorf(msg.ConfigMissingKeyFmt, secIdentity, "PublicKey")
+		}
 		p.t.Identities = append(p.t.Identities, *p.cur)
 		p.cur = nil
 	case secPeer:
@@ -220,11 +227,17 @@ func (p *parser) endSection() error {
 // finish decides the identity list once every section has been read.
 func (p *parser) finish() error {
 	shorthand := p.ifRef != nil
+	if !shorthand && p.ifPub != nil {
+		return errors.New(msg.ConfigPublicKeyWithoutKeyRef)
+	}
 	if shorthand {
 		if len(p.t.Identities) > 0 {
 			return errors.New(msg.ConfigMixedIdentities)
 		}
-		p.t.Identities = []Identity{{Ref: *p.ifRef, Addresses: p.ifAddrs}}
+		if p.ifPub == nil {
+			return fmt.Errorf(msg.ConfigMissingKeyFmt, secInterface, "PublicKey")
+		}
+		p.t.Identities = []Identity{{Ref: *p.ifRef, PublicKey: *p.ifPub, Addresses: p.ifAddrs}}
 	} else if len(p.ifAddrs) > 0 && len(p.t.Identities) > 0 {
 		return errors.New(msg.ConfigMixedIdentities)
 	}
@@ -267,6 +280,15 @@ func (p *parser) interfaceKey(key, val string) error {
 			return err
 		}
 		p.ifRef = &ref
+	case "publickey":
+		if err := p.once(key, "PublicKey"); err != nil {
+			return err
+		}
+		k, err := parseIdentityKey(val)
+		if err != nil {
+			return err
+		}
+		p.ifPub = &k
 	case "address":
 		addrs, err := parsePrefixes(val, "Address")
 		if err != nil {
@@ -318,6 +340,15 @@ func (p *parser) identityKey(key, val string) error {
 			return err
 		}
 		p.cur.Ref = ref
+	case "publickey":
+		if err := p.once(key, "PublicKey"); err != nil {
+			return err
+		}
+		k, err := parseIdentityKey(val)
+		if err != nil {
+			return err
+		}
+		p.cur.PublicKey = k
 	case "address":
 		addrs, err := parsePrefixes(val, "Address")
 		if err != nil {
@@ -439,6 +470,16 @@ func parseKey(v, canon string) ([32]byte, error) {
 	}
 	copy(k[:], b)
 	return k, nil
+}
+
+// parseIdentityKey decodes an identity's PublicKey; the all-zero key is
+// refused.
+func parseIdentityKey(v string) ([32]byte, error) {
+	k, err := parseKey(v, "PublicKey")
+	if err == nil && k == ([32]byte{}) {
+		err = fmt.Errorf(msg.ConfigInvalidValueFmt, "PublicKey")
+	}
+	return k, err
 }
 
 // validHostname reports whether s is a plausible DNS name: at most 253 bytes,
