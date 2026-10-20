@@ -39,6 +39,10 @@ type provider struct {
 
 	closeOnce sync.Once
 	closer    func() error // set by Backend; nil for Card.Provider
+	// onUnavailable is called (without sem) after an operation failed with
+	// keyprovider.ErrUnavailable; set by Backend to drop the dead
+	// connection so that the card is opened afresh.
+	onUnavailable func()
 
 	// Per-operation state, guarded by sem.
 	opCtx     context.Context
@@ -150,8 +154,18 @@ func isLowOrder(peer [32]byte) bool {
 
 // X25519 runs the Diffie-Hellman operation on the card. Waiting for the card
 // is abandoned when ctx ends; a card command already sent cannot be
-// interrupted and finishes before the card is used again.
+// interrupted and finishes before the card is used again. After a transport
+// error (keyprovider.ErrUnavailable) a Backend provider's connection is
+// dropped: this provider keeps failing and a new one must be made.
 func (p *provider) X25519(ctx context.Context, peer [32]byte) ([32]byte, error) {
+	out, err := p.x25519(ctx, peer)
+	if errors.Is(err, keyprovider.ErrUnavailable) && p.onUnavailable != nil {
+		p.onUnavailable()
+	}
+	return out, err
+}
+
+func (p *provider) x25519(ctx context.Context, peer [32]byte) ([32]byte, error) {
 	var out [32]byte
 	if err := ctx.Err(); err != nil {
 		return out, err
@@ -241,10 +255,14 @@ type statusErr interface{ Status() uint16 }
 // mapCardErr turns piv-go errors into keyprovider errors (Ruling R2):
 // wrong PIN -> *PINError, blocked PIN -> ErrPINBlocked, security status not
 // satisfied -> ErrPINRequired, other card status words -> as is, anything
-// else (PC/SC transport: card removed, reader gone) -> ErrUnavailable.
+// else (PC/SC transport: card removed, reader gone; another card in the
+// reader after a reset, piv.ErrCardChanged) -> ErrUnavailable.
 func mapCardErr(err error) error {
 	if err == nil {
 		return nil
+	}
+	if errors.Is(err, piv.ErrCardChanged) {
+		return fmt.Errorf("%w: %w", keyprovider.ErrUnavailable, err)
 	}
 	var ae piv.AuthErr
 	if errors.As(err, &ae) {

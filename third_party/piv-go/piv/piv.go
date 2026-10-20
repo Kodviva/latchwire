@@ -126,6 +126,12 @@ type YubiKey struct {
 	// begins and ends the PC/SC transaction. Like the rest of YubiKey, this
 	// is not safe for concurrent use.
 	txDepth int
+
+	// Latchwire patch: the serial read when the connection was opened.
+	// After a reset, begin checks that the card answering is still this
+	// one (see sameCard). serialKnown is false if it could not be read.
+	serial      uint32
+	serialKnown bool
 }
 
 // Close releases the connection to the smart card.
@@ -184,11 +190,18 @@ func (c *client) Open(card string) (*YubiKey, error) {
 		return nil, fmt.Errorf("beginning smart card transaction: %w", err)
 	}
 	v, err := ykVersion(yk.tx)
-	end()
 	if err != nil {
+		end()
 		yk.Close()
 		return nil, fmt.Errorf("getting yubikey version: %w", err)
 	}
+	// Latchwire patch: remember the serial so that begin can tell, after a
+	// reset, whether the same card is still in the reader. A card without a
+	// readable serial still opens, but does not survive a reset.
+	if s, err := ykSerial(yk.tx, v); err == nil {
+		yk.serial, yk.serialKnown = s, true
+	}
+	end()
 	yk.version = v
 	if c.Rand != nil {
 		yk.rand = c.Rand
@@ -202,6 +215,29 @@ func (c *client) Open(card string) (*YubiKey, error) {
 // last transaction.
 const rcResetCard = 0x80100068
 
+// ErrCardChanged is returned (wrapped) by every card operation when, after
+// a reset, the card in the reader is not the one the connection was opened
+// to, or its serial cannot be confirmed (Latchwire patch). The connection
+// must be closed; open the card again.
+var ErrCardChanged = errors.New("smart card changed after reset: not the card this connection was opened to")
+
+// sameCard decides whether the card answering after a reconnect is the one
+// seen at Open. want/known come from Open; got/err from reading the serial
+// again. Anything but a confirmed match fails. The card's error is kept as
+// text only, so the result never looks like a card status (wrong PIN,
+// security status not satisfied, ...).
+func sameCard(want uint32, known bool, got uint32, err error) error {
+	switch {
+	case err != nil:
+		return fmt.Errorf("%w (reading serial: %v)", ErrCardChanged, err)
+	case !known:
+		return fmt.Errorf("%w (serial unknown since open)", ErrCardChanged)
+	case got != want:
+		return ErrCardChanged
+	}
+	return nil
+}
+
 // begin starts a PC/SC transaction for one operation and makes sure the PIV
 // applet is selected. The returned function ends the transaction.
 //
@@ -213,7 +249,11 @@ const rcResetCard = 0x80100068
 //   - the applet check follows libykpiv's _ykpiv_ensure_application_selected:
 //     an empty VERIFY answers 9000 or 63Cx/6983 only when PIV is selected,
 //     and, unlike SELECT, it keeps the PIN verification state. Only if it
-//     fails is PIV selected again.
+//     fails is PIV selected again;
+//   - after a reconnect the serial is read again inside the new transaction
+//     and the operation fails with ErrCardChanged unless it matches the
+//     serial read at Open, so nothing (a PIN in particular) meant for one
+//     card is sent to another card that took its place.
 func (yk *YubiKey) begin() (func(), error) {
 	if yk.txDepth > 0 {
 		yk.txDepth++
@@ -221,10 +261,12 @@ func (yk *YubiKey) begin() (func(), error) {
 	}
 	tx, err := yk.h.Begin()
 	var sc *scErr
+	reconnected := false
 	if err != nil && errors.As(err, &sc) && sc.rc == rcResetCard {
 		if err := yk.h.Reconnect(); err != nil {
 			return nil, fmt.Errorf("reconnecting after card reset: %w", err)
 		}
+		reconnected = true
 		tx, err = yk.h.Begin()
 	}
 	if err != nil {
@@ -241,6 +283,14 @@ func (yk *YubiKey) begin() (func(), error) {
 	if err := ykEnsureSelected(tx); err != nil {
 		end()
 		return nil, err
+	}
+	// yk.version is nil only inside Open, which reads the serial itself.
+	if reconnected && yk.version != nil {
+		got, err := ykSerial(tx, yk.version)
+		if err := sameCard(yk.serial, yk.serialKnown, got, err); err != nil {
+			end()
+			return nil, err
+		}
 	}
 	return end, nil
 }

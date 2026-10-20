@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/go-piv/piv-go/v2/piv"
 
@@ -110,7 +111,8 @@ func (c *Card) Close() error {
 // List returns every connected YubiKey. Presence comes from the PC/SC reader
 // list only: a reader is opened (briefly, in shared mode) only the first
 // time it appears, and its serial and firmware are cached until the reader
-// disappears. Cards are never queried on later calls.
+// disappears. Cards are never queried on later calls. A reader that opens
+// but whose serial cannot be read is retried at most every 10 seconds.
 func List() ([]Device, error) {
 	regMu.Lock()
 	defer regMu.Unlock()
@@ -161,9 +163,11 @@ func openSerialLocked(serial uint32) (*Card, error) {
 		c, err := newCard(cc, r)
 		if err != nil {
 			cc.Close()
+			failed[r] = now().Add(serialRetryInterval)
 			lastErr = err
 			continue
 		}
+		delete(failed, r)
 		seen[r] = c.device()
 		if c.serial == serial {
 			return c, nil
@@ -185,6 +189,10 @@ func (c *Card) device() Device {
 // closed when the last of them is closed. The connection is in shared mode
 // with a PC/SC transaction only per operation, so holding it does not keep
 // other programs (macOS smart-card login, ykman, ...) from using the card.
+// When an operation fails with keyprovider.ErrUnavailable (transport error,
+// or another card in the reader after a reset) the connection and the
+// reader's cached serial are dropped: providers made from it keep failing,
+// and the next Serials or Provider call opens the reader again.
 type Backend struct{}
 
 // Serials lists the serial numbers of connected YubiKeys (see List: no card
@@ -231,7 +239,12 @@ func (Backend) Provider(ref keyref.Ref, prompt func(retriesLeft int) (string, er
 
 	kp, err := sh.card.Provider(ref, prompt)
 	if err != nil {
-		if sh.refs == 0 {
+		switch {
+		case errors.Is(err, keyprovider.ErrUnavailable):
+			// The connection is dead (for example the card was re-seated
+			// between two polls): forget it so the next call reopens.
+			sh.forgetLocked()
+		case sh.refs == 0:
 			delete(registry, sh.card.reader)
 			sh.card.Close()
 		}
@@ -239,6 +252,11 @@ func (Backend) Provider(ref keyref.Ref, prompt func(retriesLeft int) (string, er
 	}
 	p := kp.(*provider)
 	sh.refs++
+	p.onUnavailable = func() {
+		regMu.Lock()
+		defer regMu.Unlock()
+		sh.forgetLocked()
+	}
 	p.closer = func() error {
 		regMu.Lock()
 		defer regMu.Unlock()
@@ -261,10 +279,18 @@ type shared struct {
 	dead bool // reader gone; already closed and dropped from the registry
 }
 
+// serialRetryInterval is how long a reader that opened but whose serial
+// could not be read is left alone by presence polling.
+const serialRetryInterval = 10 * time.Second
+
+// now is the clock; tests replace it.
+var now = time.Now
+
 var (
 	regMu    sync.Mutex
-	registry = map[string]*shared{} // held connections, by reader name
-	seen     = map[string]Device{}  // reader -> card read when the reader appeared
+	registry = map[string]*shared{}   // held connections, by reader name
+	seen     = map[string]Device{}    // reader -> card read when the reader appeared
+	failed   = map[string]time.Time{} // reader -> no serial read retry before this time
 )
 
 func resetRegistry() {
@@ -272,6 +298,19 @@ func resetRegistry() {
 	defer regMu.Unlock()
 	registry = map[string]*shared{}
 	seen = map[string]Device{}
+	failed = map[string]time.Time{}
+}
+
+// forgetLocked drops a connection that failed with a transport error, and
+// the serial cached for its reader, so that the next Serials or Provider
+// call opens the reader again. It does nothing if the connection was
+// already dropped or replaced.
+func (sh *shared) forgetLocked() {
+	if sh.dead || registry[sh.card.reader] != sh {
+		return
+	}
+	sh.dropLocked()
+	delete(seen, sh.card.reader)
 }
 
 // sweepLocked forgets readers that are no longer listed: their cached
@@ -285,6 +324,11 @@ func sweepLocked(readers []string) {
 	for r := range seen {
 		if !present[r] {
 			delete(seen, r)
+		}
+	}
+	for r := range failed {
+		if !present[r] {
+			delete(failed, r)
 		}
 	}
 	for r, sh := range registry {
@@ -333,6 +377,9 @@ func listLocked() ([]Device, error) {
 			devs = append(devs, d)
 			continue
 		}
+		if t, ok := failed[r]; ok && now().Before(t) {
+			continue
+		}
 		cc, err := sys.Open(r)
 		if err != nil {
 			continue // not a PIV card, or not ready; retried on the next call
@@ -341,8 +388,12 @@ func listLocked() ([]Device, error) {
 		v := cc.Version()
 		cc.Close()
 		if err != nil {
+			// Opens but does not answer: retried every serialRetryInterval
+			// rather than on every poll.
+			failed[r] = now().Add(serialRetryInterval)
 			continue
 		}
+		delete(failed, r)
 		d := Device{Serial: serial, Firmware: firmwareString(v), Reader: r, Supported: supported(v)}
 		seen[r] = d
 		devs = append(devs, d)

@@ -51,6 +51,11 @@ type fakeCard struct {
 	ecdhErr    error // returned by ECDH instead of computing
 	ecdhZero   bool  // ECDH returns all zeros
 	retriesErr error
+	serialErr  error // returned by Serial
+	// handleDead simulates a connection whose card was pulled out and put
+	// back between two polls: every command fails with errRemoved until the
+	// reader is opened again (fakeSystem.Open clears it).
+	handleDead bool
 
 	calls    []string
 	pinsSent []string // every PIN/PUK value sent as the *current* secret
@@ -184,8 +189,11 @@ func (f *fakeCard) Serial() (uint32, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.record("Serial")
-	if f.closed {
+	if f.closed || f.handleDead {
 		return 0, errRemoved
+	}
+	if f.serialErr != nil {
+		return 0, f.serialErr
 	}
 	return f.serial, nil
 }
@@ -194,6 +202,9 @@ func (f *fakeCard) Retries() (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.record("Retries")
+	if f.handleDead {
+		return 0, errRemoved
+	}
 	if f.retriesErr != nil {
 		return 0, f.retriesErr
 	}
@@ -310,6 +321,9 @@ func (f *fakeCard) KeyInfo(slot piv.Slot) (piv.KeyInfo, error) {
 	defer f.mu.Unlock()
 	f.record("KeyInfo")
 	f.checkSlot(slot)
+	if f.handleDead {
+		return piv.KeyInfo{}, errRemoved
+	}
 	ki, ok := f.slots[slot.Key]
 	if !ok {
 		return piv.KeyInfo{}, fmt.Errorf("command failed: %w", piv.ErrNotFound)
@@ -396,6 +410,9 @@ func (k *fakeX25519) ECDH(peer *ecdh.PublicKey) ([]byte, error) {
 	defer f.mu.Unlock()
 	f.record("ECDH")
 	f.ecdhN++
+	if f.handleDead {
+		return nil, errRemoved
+	}
 	if f.ecdhErr != nil {
 		return nil, fmt.Errorf("command failed: %w", f.ecdhErr)
 	}
@@ -426,6 +443,7 @@ func (s *fakeSystem) Open(reader string) (card, error) {
 	}
 	c.mu.Lock()
 	c.closed = false
+	c.handleDead = false
 	c.verified = false
 	c.mu.Unlock()
 	return c, nil

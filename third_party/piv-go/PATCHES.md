@@ -91,6 +91,27 @@ short keys. New `checkManagementKeyLen` refuses lengths other than 16, 24,
   (`PivmanProtectedData`, `Tlv(0x88, Tlv(0x89, key))`).
 - `piv/pivman_test.go`: unit tests for 4 and 5 (no card).
 
+## 6. Same card after a reset (`piv/piv.go`, Ruling R16)
+
+A shared connection survives another program resetting the card
+(`SCARD_W_RESET_CARD`, patch 2), but after `SCardReconnect` the card in the
+reader is not necessarily the one the handle was opened to. A PIN meant for
+card A must never be sent to card B.
+
+- `client.Open` reads the serial (`ykSerial`) in its first transaction and
+  keeps it in `YubiKey.serial` (`serialKnown` false if it could not be
+  read; Open still succeeds then).
+- `begin`: after a reconnect, inside the new transaction and after
+  `ykEnsureSelected`, the serial is read again; `sameCard` fails the
+  operation unless it equals the serial from Open. Because every operation
+  (including `KeyAuth.pinFor`'s check and `KeyAuth.do`, which sends the
+  PIN) starts with `begin`, nothing is transmitted to a different card.
+- New exported `ErrCardChanged`, returned wrapped. The card's own error,
+  if reading the serial failed, is kept as text only (`%v`), so callers
+  never mistake it for a card status such as 6982 or a wrong PIN; Latchwire
+  maps it to "card unavailable" and reopens the reader.
+- `piv/reset_test.go`: unit test for `sameCard` (no card).
+
 ## Tests
 
 `cd third_party/piv-go && go test ./...` runs only the unit tests: every
