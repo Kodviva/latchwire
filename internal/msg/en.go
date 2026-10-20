@@ -69,3 +69,28 @@ const (
 	// AgentUntrustedDaemonFmt takes the uid of the socket's owner process.
 	AgentUntrustedDaemonFmt = "refusing the service socket: it is served by uid %d, not by root or this user"
 )
+
+// Network configuration.
+const (
+	NetFullTunnelUnsupported = "routing all traffic through the tunnel (AllowedIPs 0.0.0.0/0 or ::/0) is not supported yet; list the networks to reach instead"
+	NetAlreadyApplied        = "network configuration is already applied to this interface"
+)
+
+// Tunnel daemon. None of these formats take key material or a PIN.
+const (
+	DaemonAdminOnly      = "permission denied: only an administrator can add or remove tunnels"
+	DaemonForbidden      = "permission denied: run this as an administrator, or start latchwire agent as this user first"
+	DaemonBadRequest     = "malformed request"
+	DaemonTunnelNotFound = "no tunnel with that name"
+	DaemonTunnelExists   = "a tunnel with that name already exists; remove it first"
+	DaemonInvalidName    = "invalid tunnel name: use 1-15 letters, digits or _=+.- and do not start with a dot"
+	DaemonNoCard         = "none of the tunnel's YubiKeys is available: plug one in and make sure latchwire agent is running"
+	DaemonAgentGone      = "the agent holding the YubiKey is not connected"
+	DaemonBadAgentReply  = "the agent sent a malformed reply"
+	DaemonConnectAborted = "connecting was interrupted: the tunnel was disconnected or its YubiKey was removed"
+	// DaemonResolveFmt takes the endpoint host name.
+	DaemonResolveFmt = "cannot resolve the endpoint host %s"
+	// DaemonConnectFailedFmt and DaemonStoreFailedFmt take an error.
+	DaemonConnectFailedFmt = "could not bring the tunnel up: %v"
+	DaemonStoreFailedFmt   = "could not save the tunnel configuration: %v"
+)
