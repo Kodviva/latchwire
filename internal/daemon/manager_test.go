@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -194,12 +196,13 @@ func (p *fakePrompter) count() int {
 // ---- client TUN: netstack plus a recording Configurer ----
 
 type recCfg struct {
-	mu      sync.Mutex
-	iface   string
-	addrs   []netip.Prefix
-	routes  []netip.Prefix
-	applied bool
-	removed int
+	mu       sync.Mutex
+	iface    string
+	addrs    []netip.Prefix
+	routes   []netip.Prefix
+	applied  bool
+	removed  int
+	onRemove func()
 }
 
 func (c *recCfg) Apply(iface string, addrs, routes []netip.Prefix) error {
@@ -213,11 +216,15 @@ func (c *recCfg) Remove() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.removed++
+	if c.onRemove != nil {
+		c.onRemove()
+	}
 	return nil
 }
 
 type netFactory struct {
-	addrs []netip.Addr
+	addrs    []netip.Addr
+	onRemove func() // given to every Configurer
 
 	mu   sync.Mutex
 	nets []*netstack.Net
@@ -229,7 +236,7 @@ func (f *netFactory) make(name string, mtu int) (tun.Device, netcfg.Configurer, 
 	if err != nil {
 		return nil, nil, err
 	}
-	c := &recCfg{}
+	c := &recCfg{onRemove: f.onRemove}
 	f.mu.Lock()
 	f.nets = append(f.nets, tnet)
 	f.cfgs = append(f.cfgs, c)
@@ -338,16 +345,16 @@ func get(tnet *netstack.Net, timeout time.Duration) error {
 // ---- environment ----
 
 type env struct {
-	t       *testing.T
-	m       *Manager
-	socket  string
-	store   string
-	b       *fakeBackend
-	p       *fakePrompter
-	f       *netFactory
-	cli     *ipc.Conn
-	poll    time.Duration
-	isAdmin bool
+	t      *testing.T
+	m      *Manager
+	socket string
+	store  string
+	b      *fakeBackend
+	p      *fakePrompter
+	f      *netFactory
+	cli    *ipc.Conn
+	poll   time.Duration
+	admin  func(uint32) bool
 
 	agentMu     sync.Mutex
 	agentCancel context.CancelFunc
@@ -358,6 +365,7 @@ type envOpts struct {
 	present    []uint32
 	clientAddr []string // netstack addresses; default 10.0.0.2
 	notAdmin   bool
+	admin      func(uint32) bool // overrides notAdmin
 	poll       time.Duration
 	pin        string
 	noAgent    bool
@@ -383,7 +391,11 @@ func newEnv(t *testing.T, o envOpts) *env {
 
 	e := &env{t: t, socket: filepath.Join(dir, "s"), store: filepath.Join(dir, "tunnels"),
 		b: newFakeBackend(t, o.present...), p: &fakePrompter{pin: o.pin}, f: &netFactory{},
-		poll: o.poll, isAdmin: !o.notAdmin}
+		poll: o.poll, admin: o.admin}
+	if e.admin == nil {
+		all := !o.notAdmin
+		e.admin = func(uint32) bool { return all }
+	}
 	for _, a := range o.clientAddr {
 		e.f.addrs = append(e.f.addrs, netip.MustParseAddr(a))
 	}
@@ -391,7 +403,7 @@ func newEnv(t *testing.T, o envOpts) *env {
 		Socket:   e.socket,
 		StoreDir: e.store,
 		TUN:      e.f.make,
-		IsAdmin:  func(uint32) (bool, error) { return e.isAdmin, nil },
+		IsAdmin:  func(uid uint32) (bool, error) { return e.admin(uid), nil },
 	})
 	if o.hook != nil {
 		o.hook(e.m)
@@ -550,7 +562,12 @@ func connected(t *testing.T, o envOpts) (*env, *server) {
 	}
 	e := newEnv(t, o)
 	srv := newServer(t, e.b.pub(serialA), "10.0.0.2")
-	e.add(clientConfig([]keyref.Ref{refA}, []string{"10.0.0.2"}, srv, ""))
+	cfg := clientConfig([]keyref.Ref{refA}, []string{"10.0.0.2"}, srv, "")
+	if e.admin(uidA) {
+		e.add(cfg)
+	} else if err := e.m.add(tunName, cfg); err != nil {
+		t.Fatal(err)
+	}
 	e.waitCard(serialA, true)
 	if st := e.connect(); st.State != StateConnected {
 		t.Fatalf("connect state %q, want connected", st.State)
@@ -585,8 +602,24 @@ func TestConnectHTTPOverTunnel(t *testing.T) {
 }
 
 func TestCardRemovalTearsDownWithin2s(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		order []string
+	)
+	note := func(s string) { mu.Lock(); order = append(order, s); mu.Unlock() }
+	hook := func(m *Manager) {
+		real := m.ops.close
+		m.ops.close = func(d *device.Device) { note("close"); real(d) }
+	}
 	// Production poll interval: the 2 s budget includes the agent's poll.
-	e, _ := connected(t, envOpts{poll: time.Second})
+	e, _ := connected(t, envOpts{poll: time.Second, hook: hook})
+	e.f.mu.Lock()
+	for _, c := range e.f.cfgs {
+		c.mu.Lock()
+		c.onRemove = func() { note("remove") }
+		c.mu.Unlock()
+	}
+	e.f.mu.Unlock()
 	tnet, cfg := e.f.last()
 	if err := get(tnet, 5*time.Second); err != nil {
 		t.Fatalf("GET before removal: %v", err)
@@ -594,9 +627,24 @@ func TestCardRemovalTearsDownWithin2s(t *testing.T) {
 	start := time.Now()
 	e.b.setPresent(serialA, false)
 	e.waitState(StateCardRemoved, 3*time.Second)
+	// The teardown is done once the routes are removed (after the device
+	// is closed): that is what must happen within 2 s.
+	for {
+		cfg.mu.Lock()
+		removed := cfg.removed
+		cfg.mu.Unlock()
+		if removed > 0 {
+			break
+		}
+		if time.Since(start) > 3*time.Second {
+			t.Fatal("Configurer.Remove not called")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	if d := time.Since(start); d > 2*time.Second {
 		t.Fatalf("teardown took %v, want <= 2s", d)
 	}
+	t.Logf("teardown complete %v after removal", time.Since(start).Round(time.Millisecond))
 	if err := get(tnet, time.Second); err == nil {
 		t.Fatal("GET succeeded after the card was removed")
 	}
@@ -605,6 +653,11 @@ func TestCardRemovalTearsDownWithin2s(t *testing.T) {
 	cfg.mu.Unlock()
 	if removed != 1 {
 		t.Errorf("Configurer.Remove called %d times, want 1", removed)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.Equal(order, []string{"close", "remove"}) {
+		t.Errorf("teardown order %v, want [close remove]: the device stops before routes go", order)
 	}
 }
 
@@ -1056,5 +1109,341 @@ func assertCode(t *testing.T, err error, code string) {
 	var ie *ipc.Error
 	if !errors.As(err, &ie) || ie.Code != code {
 		t.Fatalf("error %v, want code %q", err, code)
+	}
+}
+
+// ---- several users (R19, R20) ----
+
+var (
+	uidA     = uint32(os.Getuid()) // the test process: CLI and real agent
+	uidB     = uidA + 1000         // another local user, fake agent
+	uidAdmin = uint32(4242)        // an administrator without an agent
+)
+
+func onlyAdmin(uid uint32) bool { return uid == uidAdmin }
+
+// fakeAgent is an agent connection registered as uid. It answers key.public
+// and key.x25519 with key, whatever the card serial: it may be lying.
+type fakeAgent struct {
+	dc      *ipc.Conn // daemon side
+	ac      *ipc.Conn // agent side
+	publics atomic.Int32
+	x25519s atomic.Int32
+}
+
+func newFakeAgent(t *testing.T, e *env, uid uint32, key *softkey.Key, serials ...uint32) *fakeAgent {
+	t.Helper()
+	path := filepath.Join(filepath.Dir(e.socket), fmt.Sprintf("f%d", uid))
+	l, err := ipc.Listen(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted := make(chan *ipc.Conn, 1)
+	go func() {
+		c, err := ipc.Accept(l)
+		if err != nil {
+			close(accepted)
+			return
+		}
+		accepted <- c
+	}()
+	ac, err := ipc.Dial(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dc := <-accepted
+	l.Close()
+	if dc == nil {
+		t.Fatal("accept failed")
+	}
+	fa := &fakeAgent{dc: dc, ac: ac}
+	pub := key.PublicKey()
+	ac.Handle(ipc.MethodKeyPublic, func(context.Context, uint32, json.RawMessage) (any, error) {
+		fa.publics.Add(1)
+		return ipc.KeyPublicResult{Public: base64.StdEncoding.EncodeToString(pub[:])}, nil
+	})
+	ac.Handle(ipc.MethodKeyX25519, func(ctx context.Context, _ uint32, params json.RawMessage) (any, error) {
+		fa.x25519s.Add(1)
+		var req ipc.KeyRequest
+		json.Unmarshal(params, &req)
+		b, _ := base64.StdEncoding.DecodeString(req.Peer)
+		var peer [32]byte
+		copy(peer[:], b)
+		ss, err := key.X25519(ctx, peer)
+		if err != nil {
+			return nil, &ipc.Error{Code: ipc.CodeLowOrderPoint, Message: "x"}
+		}
+		return ipc.KeyX25519Result{Shared: base64.StdEncoding.EncodeToString(ss[:])}, nil
+	})
+	go ac.Serve(context.Background())
+	go func() { dc.Serve(context.Background()); e.m.dropAgent(dc) }()
+	t.Cleanup(func() { ac.Close(); dc.Close() })
+	e.m.agentRegister(dc, uid, serials)
+	return fa
+}
+
+func (e *env) tunnel() *tunnel {
+	e.m.mu.Lock()
+	defer e.m.mu.Unlock()
+	return e.m.tunnels[tunName]
+}
+
+func (e *env) boundUID() uint32 {
+	e.m.mu.Lock()
+	defer e.m.mu.Unlock()
+	return e.m.tunnels[tunName].uid
+}
+
+func (e *env) pinPath() string { return filepath.Join(e.store, tunName+pinExt) }
+
+// waitPin waits until the identity key of ref is pinned on disk.
+func (e *env) waitPin(ref keyref.Ref, want [32]byte) {
+	e.t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		pins, err := e.m.store.loadPins(tunName)
+		if err == nil && pins[ref] == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			e.t.Fatalf("pin for %s not written (pins %v, err %v)", ref, pins, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func otherKey(t *testing.T) *softkey.Key {
+	k, err := softkey.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return k
+}
+
+// B's agent claims A's card: B can neither take the tunnel over nor touch
+// it, and B's card events and pin_ready do not affect it.
+func TestOtherUserCannotTouchTunnel(t *testing.T) {
+	e, srv := connected(t, envOpts{admin: onlyAdmin})
+	tnet, _ := e.f.last()
+	if err := get(tnet, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	fb := newFakeAgent(t, e, uidB, otherKey(t), serialA)
+	ctx := context.Background()
+
+	_, err := e.m.requestDisconnect(uidB, tunName)
+	assertCode(t, err, ipc.CodeForbidden)
+	_, err = e.m.requestConnect(ctx, uidB, tunName)
+	assertCode(t, err, ipc.CodeForbidden)
+
+	before := e.b.callsFor(srv.pub)
+	e.m.agentEvent(fb.dc, uidB, ipc.AgentEvent{Type: ipc.EventCardRemoved, Serial: serialA})
+	e.m.agentEvent(fb.dc, uidB, ipc.AgentEvent{Type: ipc.EventCardInserted, Serial: serialA})
+	e.m.agentEvent(fb.dc, uidB, ipc.AgentEvent{Type: ipc.EventPINReady, Serial: serialA})
+	e.m.agentRegister(fb.dc, uidB, nil) // B "loses" the card
+	time.Sleep(200 * time.Millisecond)
+
+	if st := e.status(); st.State != StateConnected {
+		t.Fatalf("state %q after B's events, want connected", st.State)
+	}
+	if u := e.boundUID(); u != uidA {
+		t.Fatalf("tunnel bound to uid %d, want %d", u, uidA)
+	}
+	if n := e.b.callsFor(srv.pub); n != before {
+		t.Errorf("B's pin_ready caused %d DH calls on A's card", n-before)
+	}
+	if n := fb.publics.Load() + fb.x25519s.Load(); n != 0 {
+		t.Errorf("B's agent got %d key calls", n)
+	}
+	if n := e.f.count(); n != 1 {
+		t.Errorf("%d devices, want 1", n)
+	}
+	if err := get(tnet, 5*time.Second); err != nil {
+		t.Fatalf("A's tunnel broken: %v", err)
+	}
+}
+
+// A non-admin connect uses only the caller's own agent, in both directions.
+func TestNonAdminConnectUsesOnlyOwnAgent(t *testing.T) {
+	e := newEnv(t, envOpts{present: []uint32{}, admin: onlyAdmin})
+	srv := newServer(t, e.b.pub(serialA), "10.0.0.2")
+	if err := e.m.add(tunName, clientConfig([]keyref.Ref{refA}, []string{"10.0.0.2"}, srv, "")); err != nil {
+		t.Fatal(err)
+	}
+	e.waitAgentRegistered(uidA)
+	// B holds the card (the real key); A's agent sees nothing.
+	fb := newFakeAgent(t, e, uidB, e.b.cards[serialA].key, serialA)
+
+	assertCode(t, e.call(ipc.MethodTunnelConnect, ipc.TunnelName{Name: tunName}, nil), ipc.CodeUnavailable)
+	if n := fb.publics.Load(); n != 0 {
+		t.Fatalf("A's connect asked B's agent (%d key.public)", n)
+	}
+
+	st, err := e.m.requestConnect(context.Background(), uidB, tunName)
+	if err != nil || st.State != StateConnected {
+		t.Fatalf("B's connect with its own agent: %+v %v", st, err)
+	}
+	if u := e.boundUID(); u != uidB {
+		t.Fatalf("bound to %d, want B", u)
+	}
+	// A may not disconnect B's tunnel.
+	assertCode(t, e.call(ipc.MethodTunnelDisconnect, ipc.TunnelName{Name: tunName}, nil), ipc.CodeForbidden)
+	if _, err := e.m.requestDisconnect(uidB, tunName); err != nil {
+		t.Fatalf("B disconnects its own tunnel: %v", err)
+	}
+
+	// Now only A's agent has the card: B's connect must not use it.
+	e.m.agentRegister(fb.dc, uidB, nil)
+	e.b.setPresent(serialA, true)
+	e.waitCard(serialA, true)
+	prompts := e.p.count()
+	_, err = e.m.requestConnect(context.Background(), uidB, tunName)
+	assertCode(t, err, ipc.CodeUnavailable)
+	if n := e.p.count(); n != prompts {
+		t.Fatalf("B's connect made A's agent prompt for a PIN")
+	}
+	if n := e.b.callsFor(srv.pub); n != 0 {
+		t.Fatalf("B's connect used A's card (%d DH calls)", n)
+	}
+}
+
+// After a successful handshake the identity key is pinned; an agent with a
+// different key.public is refused, for users and admins alike, and an admin
+// without a pin must leave the first connect to the card owner.
+func TestPinRefusesDifferentKey(t *testing.T) {
+	e := newEnv(t, envOpts{present: []uint32{serialA}, admin: onlyAdmin})
+	srv := newServer(t, e.b.pub(serialA), "10.0.0.2")
+	if err := e.m.add(tunName, clientConfig([]keyref.Ref{refA}, []string{"10.0.0.2"}, srv, "")); err != nil {
+		t.Fatal(err)
+	}
+	e.waitCard(serialA, true)
+	ctx := context.Background()
+
+	// No pin yet: an admin cannot use another user's agent.
+	_, err := e.m.requestConnect(ctx, uidAdmin, tunName)
+	assertCode(t, err, ipc.CodeForbidden)
+	if !strings.Contains(err.Error(), "owner") {
+		t.Errorf("error %q does not ask for the card owner", err)
+	}
+	if n := e.f.count(); n != 0 {
+		t.Fatalf("%d devices", n)
+	}
+
+	e.connect() // A, own agent
+	tnet, _ := e.f.last()
+	if err := get(tnet, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	e.waitPin(refA, e.b.pub(serialA))
+	if err := e.call(ipc.MethodTunnelDisconnect, ipc.TunnelName{Name: tunName}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// A's agent goes away; B's agent claims A's card with another key.
+	e.stopAgent()
+	e.waitCard(serialA, false)
+	fb := newFakeAgent(t, e, uidB, otherKey(t), serialA)
+
+	_, err = e.m.requestConnect(ctx, uidB, tunName)
+	assertCode(t, err, ipc.CodeForbidden)
+	if !strings.Contains(err.Error(), refA.String()) {
+		t.Errorf("error %q does not name %s", err, refA)
+	}
+	_, err = e.m.requestConnect(ctx, uidAdmin, tunName)
+	assertCode(t, err, ipc.CodeForbidden)
+	if fb.publics.Load() != 2 || fb.x25519s.Load() != 0 {
+		t.Errorf("B's agent: %d key.public, %d x25519; want 2, 0", fb.publics.Load(), fb.x25519s.Load())
+	}
+	if n := e.f.count(); n != 1 {
+		t.Fatalf("%d devices, want no new one for a mismatched key", n)
+	}
+
+	// A's agent returns: the admin connect skips B's agent and uses A's.
+	// (waitCard would not do: B's agent already claims serialA.)
+	e.startAgent()
+	e.waitAgentRegistered(uidA)
+	st, err := e.m.requestConnect(ctx, uidAdmin, tunName)
+	if err != nil || st.State != StateConnected {
+		t.Fatalf("admin connect via the pinned key: %+v %v", st, err)
+	}
+	if u := e.boundUID(); u != uidA {
+		t.Fatalf("bound to %d, want A", u)
+	}
+	tnet, _ = e.f.last()
+	if err := get(tnet, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// R20: an agent that comes back without the card (pulled while the agent
+// was down) takes the tunnel down at registration.
+func TestReregisterWithoutCardTearsDown(t *testing.T) {
+	e, _ := connected(t, envOpts{})
+	e.stopAgent()
+	e.waitCard(serialA, false)
+	if st := e.status(); st.State != StateConnected {
+		t.Fatalf("state %q", st.State)
+	}
+	e.b.setPresent(serialA, false)
+	start := time.Now()
+	e.startAgent()
+	e.waitAgentRegistered(uidA)
+	e.waitState(StateCardRemoved, 3*time.Second)
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("teardown %v after the agent came back, want <= 2s", d)
+	}
+
+	// Same with the card still there: nothing changes.
+	e2, _ := connected(t, envOpts{})
+	e2.stopAgent()
+	e2.waitCard(serialA, false)
+	e2.startAgent()
+	e2.waitCard(serialA, true)
+	time.Sleep(200 * time.Millisecond)
+	if st := e2.status(); st.State != StateConnected {
+		t.Fatalf("state %q after re-register with the card, want connected", st.State)
+	}
+}
+
+func TestPinPersistsAndRemovedWithTunnel(t *testing.T) {
+	e, _ := connected(t, envOpts{})
+	tnet, _ := e.f.last()
+	if err := get(tnet, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	e.waitPin(refA, e.b.pub(serialA))
+	fi, err := os.Stat(e.pinPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Errorf("pin file mode %v, want 0600", fi.Mode().Perm())
+	}
+
+	m2 := NewManager(Options{Socket: e.socket + "2", StoreDir: e.store, TUN: e.f.make})
+	if err := m2.load(); err != nil {
+		t.Fatal(err)
+	}
+	if got := m2.tunnels[tunName].pins[refA]; got != e.b.pub(serialA) {
+		t.Fatalf("pin not loaded after restart")
+	}
+
+	if err := e.call(ipc.MethodTunnelRemove, ipc.TunnelName{Name: tunName}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(e.pinPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("pin file still there after remove: %v", err)
+	}
+}
+
+// waitAgentRegistered waits until an agent of uid has registered.
+func (e *env) waitAgentRegistered(uid uint32) {
+	e.t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !e.m.agentUser(uid) {
+		if time.Now().After(deadline) {
+			e.t.Fatalf("no agent of uid %d registered", uid)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

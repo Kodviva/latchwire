@@ -88,6 +88,10 @@ const (
 	DaemonAgentGone      = "the agent holding the YubiKey is not connected"
 	DaemonBadAgentReply  = "the agent sent a malformed reply"
 	DaemonConnectAborted = "connecting was interrupted: the tunnel was disconnected or its YubiKey was removed"
+	DaemonNotYourTunnel  = "permission denied: this tunnel is in use with another user's YubiKey"
+	DaemonConnectAsOwner = "the tunnel's YubiKey is held by another user's agent and the tunnel has no recorded key yet: connect it once as the card's owner"
+	// DaemonKeyMismatchFmt takes the KeyRef.
+	DaemonKeyMismatchFmt = "the YubiKey answering for %s has a different public key than the one this tunnel used before; refusing to connect (remove and add the tunnel again if the key was replaced on purpose)"
 	// DaemonResolveFmt takes the endpoint host name.
 	DaemonResolveFmt = "cannot resolve the endpoint host %s"
 	// DaemonConnectFailedFmt and DaemonStoreFailedFmt take an error.

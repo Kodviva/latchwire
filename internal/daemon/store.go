@@ -1,15 +1,18 @@
 package daemon
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/Kodviva/latchwire/internal/config"
+	"github.com/Kodviva/latchwire/internal/keyref"
 )
 
 // DefaultSocket is the daemon's socket path.
@@ -24,7 +27,12 @@ func DefaultStoreDir() string {
 	return "/etc/latchwire/tunnels"
 }
 
-const confExt = ".conf"
+const (
+	confExt = ".conf"
+	// pinExt files hold the identity public keys pinned after a tunnel's
+	// first successful handshake, one "<KeyRef> <base64>" line each.
+	pinExt = ".pins"
+)
 
 // validName accepts wg-quick style interface names: 1-15 of [A-Za-z0-9_=+.-],
 // not starting with a dot. The name is also the file name in the store, so
@@ -87,11 +95,17 @@ func (s *store) load() (map[string]*config.Tunnel, error) {
 	return out, nil
 }
 
-// save writes text atomically (temporary file, fsync, rename).
+// save writes a tunnel's configuration.
 func (s *store) save(name, text string) error {
 	if !validName(name) {
 		return errors.New("invalid name")
 	}
+	return s.writeAtomic(name+confExt, text)
+}
+
+// writeAtomic writes file in the store with mode 0600 (temporary file,
+// fsync, rename).
+func (s *store) writeAtomic(file, text string) error {
 	if err := s.ensureDir(); err != nil {
 		return err
 	}
@@ -116,14 +130,67 @@ func (s *store) save(name, text string) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp, filepath.Join(s.dir, name+confExt))
+	return os.Rename(tmp, filepath.Join(s.dir, file))
 }
 
+// loadPins returns the pinned identity keys of a tunnel (empty if none).
+func (s *store) loadPins(name string) (map[keyref.Ref][32]byte, error) {
+	pins := map[keyref.Ref][32]byte{}
+	if !validName(name) {
+		return pins, errors.New("invalid name")
+	}
+	data, err := os.ReadFile(filepath.Join(s.dir, name+pinExt))
+	if errors.Is(err, os.ErrNotExist) {
+		return pins, nil
+	}
+	if err != nil {
+		return pins, err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if line = strings.TrimSpace(line); line == "" {
+			continue
+		}
+		refStr, keyStr, ok := strings.Cut(line, " ")
+		ref, rerr := keyref.Parse(refStr)
+		key, kerr := base64.StdEncoding.DecodeString(keyStr)
+		if !ok || rerr != nil || kerr != nil || len(key) != 32 {
+			return map[keyref.Ref][32]byte{}, errors.New("malformed pin file")
+		}
+		pins[ref] = [32]byte(key)
+	}
+	return pins, nil
+}
+
+func (s *store) savePins(name string, pins map[keyref.Ref][32]byte) error {
+	if !validName(name) {
+		return errors.New("invalid name")
+	}
+	lines := make([]string, 0, len(pins))
+	for ref, key := range pins {
+		lines = append(lines, ref.String()+" "+base64.StdEncoding.EncodeToString(key[:])+"\n")
+	}
+	slices.Sort(lines)
+	return s.writeAtomic(name+pinExt, strings.Join(lines, ""))
+}
+
+// remove deletes a tunnel's configuration and its pins.
 func (s *store) remove(name string) error {
 	if !validName(name) {
 		return fmt.Errorf("invalid name")
 	}
-	err := os.Remove(filepath.Join(s.dir, name+confExt))
+	var first error
+	for _, ext := range []string{confExt, pinExt} {
+		err := os.Remove(filepath.Join(s.dir, name+ext))
+		if err != nil && !errors.Is(err, os.ErrNotExist) && first == nil {
+			first = err
+		}
+	}
+	return first
+}
+
+// removePins deletes stale pins, for example before a name is reused.
+func (s *store) removePins(name string) error {
+	err := os.Remove(filepath.Join(s.dir, name+pinExt))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
