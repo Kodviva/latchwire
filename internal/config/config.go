@@ -56,6 +56,7 @@ type Tunnel struct {
 	ListenPort int
 	MTU        int
 	DNS        []netip.Addr // parsed, not applied yet
+	DNSSearch  []string     // search domains from the DNS line, not applied yet
 	Identities []Identity
 	Peers      []Peer
 }
@@ -292,11 +293,13 @@ func (p *parser) interfaceKey(key, val string) error {
 		p.t.MTU = int(n)
 	case "dns":
 		for _, item := range splitList(val) {
-			a, err := netip.ParseAddr(item)
-			if err != nil {
+			if a, err := netip.ParseAddr(item); err == nil {
+				p.t.DNS = append(p.t.DNS, a)
+			} else if validHostname(item) {
+				p.t.DNSSearch = append(p.t.DNSSearch, item)
+			} else {
 				return fmt.Errorf(msg.ConfigInvalidValueFmt, "DNS")
 			}
-			p.t.DNS = append(p.t.DNS, a)
 		}
 	default:
 		return unknownKey(key, p.sec)
@@ -438,6 +441,30 @@ func parseKey(v, canon string) ([32]byte, error) {
 	return k, nil
 }
 
+// validHostname reports whether s is a plausible DNS name: at most 253 bytes,
+// dot-separated labels of 1-63 letters, digits or hyphens, none starting or
+// ending with a hyphen. A name whose last label is all digits is refused so
+// that malformed IPv4 literals such as 10.0.0.256 are not taken for domains.
+func validHostname(s string) bool {
+	if s == "" || len(s) > 253 {
+		return false
+	}
+	labels := strings.Split(s, ".")
+	for _, l := range labels {
+		if l == "" || len(l) > 63 || l[0] == '-' || l[len(l)-1] == '-' {
+			return false
+		}
+		for i := 0; i < len(l); i++ {
+			c := l[i]
+			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-') {
+				return false
+			}
+		}
+	}
+	last := labels[len(labels)-1]
+	return strings.Trim(last, "0123456789") != ""
+}
+
 // checkEndpoint requires host:port with a port in 1-65535. The host may be a
 // name; resolving it is the caller's job.
 func checkEndpoint(v string) error {
@@ -454,6 +481,10 @@ func checkEndpoint(v string) error {
 // UAPI renders the configuration in wireguard-go's UAPI set format: the
 // listen port, then each peer. It never contains a private key; the key is
 // supplied separately through the key provider.
+//
+// Every Peer.Endpoint must already be a literal IP:port. Parse accepts
+// hostnames, so the daemon resolves them (and replaces Peer.Endpoint) before
+// calling UAPI; wireguard-go does not resolve names itself.
 func (t *Tunnel) UAPI() string {
 	var b strings.Builder
 	if t.ListenPort > 0 {
