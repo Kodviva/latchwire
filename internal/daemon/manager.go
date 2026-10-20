@@ -12,13 +12,15 @@ package daemon
 import (
 	"cmp"
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
-	"maps"
 	"net"
 	"net/netip"
+	"os"
 	"runtime"
 	"slices"
 	"strconv"
@@ -26,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/crypto/curve25519"
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun"
@@ -51,8 +54,6 @@ const (
 const (
 	defaultMTU     = 1420
 	resolveTimeout = 10 * time.Second
-	// pinPoll is how often a new device is checked for its first handshake.
-	pinPoll = 200 * time.Millisecond
 )
 
 // TUNFactory creates the TUN device for a tunnel and the Configurer for its
@@ -145,7 +146,16 @@ type tunnel struct {
 	dev    *device.Device
 	cfgr   netcfg.Configurer
 	devGen uint64
-	pins   map[keyref.Ref][32]byte
+	// abort is cancelled by every teardown: a connect still proving an
+	// agent (and maybe waiting for a PIN) then gives up.
+	abort       context.Context
+	abortCancel context.CancelFunc
+}
+
+func newTunnel(name string, cfg *config.Tunnel) *tunnel {
+	t := &tunnel{name: name, cfg: cfg, state: StateDisconnected}
+	t.abort, t.abortCancel = context.WithCancel(context.Background())
+	return t
 }
 
 // NewManager returns a manager; it does nothing until Serve.
@@ -191,12 +201,7 @@ func (m *Manager) load() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for name, cfg := range ts {
-		pins, err := m.store.loadPins(name)
-		if err != nil {
-			// Unreadable pins: the next handshake pins again (TOFU).
-			log.Printf("daemon: tunnel %s: pins: %v", name, err)
-		}
-		m.tunnels[name] = &tunnel{name: name, cfg: cfg, state: StateDisconnected, pins: pins}
+		m.tunnels[name] = newTunnel(name, cfg)
 	}
 	return nil
 }
@@ -272,7 +277,6 @@ var (
 	errNoCard     = &ipc.Error{Code: ipc.CodeUnavailable, Message: msg.DaemonNoCard}
 	errAborted    = &ipc.Error{Code: ipc.CodeUnavailable, Message: msg.DaemonConnectAborted}
 	errNotYours   = &ipc.Error{Code: ipc.CodeForbidden, Message: msg.DaemonNotYourTunnel}
-	errAsOwner    = &ipc.Error{Code: ipc.CodeForbidden, Message: msg.DaemonConnectAsOwner}
 )
 
 func decode(params json.RawMessage, v any) error {
@@ -312,10 +316,11 @@ func (m *Manager) agentUser(uid uint32) bool {
 	return false
 }
 
-// requestConnect is tunnel.connect from uid (R19). An administrator may use
-// another user's agent only when its key matches the tunnel's pinned key; a
-// non-administrator only ever uses its own agent and may not take over a
-// tunnel bound to another user.
+// requestConnect is tunnel.connect from uid (R19, R21). A non-administrator
+// only ever uses its own agent and may not take over a tunnel bound to
+// another user; an administrator tries its own agents first, then other
+// users'. Either way an agent is used only after it proved it holds the
+// configured key.
 func (m *Manager) requestConnect(ctx context.Context, uid uint32, name string) (ipc.TunnelStatus, error) {
 	admin := m.admin(uid)
 	if !admin && !m.agentUser(uid) {
@@ -415,15 +420,11 @@ func (m *Manager) add(name, text string) error {
 	if m.tunnels[name] != nil {
 		return &ipc.Error{Code: ipc.CodeBadRequest, Message: msg.DaemonTunnelExists}
 	}
-	if err := m.store.removePins(name); err != nil {
-		log.Printf("daemon: store %s: %v", name, err)
-		return &ipc.Error{Code: ipc.CodeInternal, Message: fmt.Sprintf(msg.DaemonStoreFailedFmt, err)}
-	}
 	if err := m.store.save(name, text); err != nil {
 		log.Printf("daemon: store %s: %v", name, err)
 		return &ipc.Error{Code: ipc.CodeInternal, Message: fmt.Sprintf(msg.DaemonStoreFailedFmt, err)}
 	}
-	m.tunnels[name] = &tunnel{name: name, cfg: cfg, state: StateDisconnected}
+	m.tunnels[name] = newTunnel(name, cfg)
 	log.Printf("daemon: tunnel %s added", name)
 	return nil
 }
@@ -723,46 +724,47 @@ func (m *Manager) uidsWithSerialLocked(serial, except uint32) []uint32 {
 	return uids
 }
 
-// pick is the identity chosen for a connect and the users whose agents may
-// serve it, in order of preference.
-type pick struct {
-	id   config.Identity
-	uids []uint32
+// candidate is one identity of a tunnel and a user whose agent may serve it.
+type candidate struct {
+	id  config.Identity
+	uid uint32
 }
 
-// pickLocked chooses the tunnel's first identity whose card an agent of uid
-// reports. Only an administrator may fall back to other users' agents, and
-// only for an identity with a pinned key, which build then checks (R19).
-func (m *Manager) pickLocked(t *tunnel, uid uint32, admin bool) (pick, error) {
-	ownerNeeded := false
-	for _, id := range t.cfg.Identities {
+// candidatesLocked lists who may serve cfg for a connect by uid, in order of
+// preference. A non-administrator gets only its own agent for the first
+// identity that agent reports. An administrator gets its own agents for every
+// identity first, then other users' agents (identity order, earliest
+// registration first). Every candidate still has to pass prove.
+func (m *Manager) candidatesLocked(cfg *config.Tunnel, uid uint32, admin bool) []candidate {
+	var out []candidate
+	for _, id := range cfg.Identities {
 		if m.agentForLocked(id.Ref.Serial, uid) != nil {
-			return pick{id: id, uids: []uint32{uid}}, nil
+			out = append(out, candidate{id: id, uid: uid})
+			if !admin {
+				return out
+			}
 		}
-		if !admin {
-			continue
-		}
-		others := m.uidsWithSerialLocked(id.Ref.Serial, uid)
-		if len(others) == 0 {
-			continue
-		}
-		if _, pinned := t.pins[id.Ref]; !pinned {
-			ownerNeeded = true
-			continue
-		}
-		return pick{id: id, uids: others}, nil
 	}
-	if ownerNeeded {
-		return pick{}, errAsOwner
+	if !admin {
+		return out
 	}
-	return pick{}, errNoCard
+	for _, id := range cfg.Identities {
+		for _, u := range m.uidsWithSerialLocked(id.Ref.Serial, uid) {
+			out = append(out, candidate{id: id, uid: u})
+		}
+	}
+	return out
 }
 
 // ---- connect and teardown ----
 
-// connect brings tunnel name up. caller, if not nil, is the requester's
-// context: the attempt is abandoned when it ends. A non-empty onlyFrom makes
-// connect a no-op unless the tunnel is in that state (automatic reconnect).
+// connect brings tunnel name up. caller is the requester's context: the
+// attempt is abandoned when it ends. A non-empty onlyFrom makes connect a
+// no-op unless the tunnel is in that state (automatic reconnect).
+//
+// Nothing about the tunnel changes until an agent has proved it holds the
+// configured key (R21), so a failed or stalled connect by another user can
+// neither bind nor block the tunnel.
 func (m *Manager) connect(caller context.Context, name string, uid uint32, admin bool, onlyFrom string) (ipc.TunnelStatus, error) {
 	m.mu.Lock()
 	t := m.tunnels[name]
@@ -782,34 +784,57 @@ func (m *Manager) connect(caller context.Context, name string, uid uint32, admin
 		m.mu.Unlock()
 		return m.status(t), nil
 	}
+	cands := m.candidatesLocked(t.cfg, uid, admin)
+	cfg, gen0, abort := t.cfg, t.gen, t.abort
+	m.mu.Unlock()
+
+	if len(cands) == 0 {
+		m.failUnbound(t, uid, gen0)
+		return ipc.TunnelStatus{}, errNoCard
+	}
+	proving, cancelProving := context.WithCancel(m.ctx)
+	defer cancelProving()
+	defer context.AfterFunc(caller, cancelProving)()
+	defer context.AfterFunc(abort, cancelProving)()
+	c, err := m.prove(proving, name, cands)
+	if err != nil {
+		m.failUnbound(t, uid, gen0)
+		log.Printf("daemon: tunnel %s: connect: %v", name, err)
+		return ipc.TunnelStatus{}, userErr(err)
+	}
+
+	// Bind the tunnel to the proven agent's user.
+	m.mu.Lock()
+	switch {
+	case m.tunnels[name] != t:
+		m.mu.Unlock()
+		return ipc.TunnelStatus{}, errAborted // removed meanwhile
+	case !admin && t.bound() && t.uid != uid:
+		m.mu.Unlock()
+		return ipc.TunnelStatus{}, errNotYours
+	case t.state == StateConnecting || t.state == StateConnected:
+		m.mu.Unlock()
+		return m.status(t), nil // a concurrent connect won
+	case t.gen != gen0:
+		m.mu.Unlock()
+		return ipc.TunnelStatus{}, errAborted // disconnected or card removed meanwhile
+	}
 	t.gen++
 	gen := t.gen
-	p, err := m.pickLocked(t, uid, admin)
-	if err != nil {
-		t.state, t.hasRef = StateError, false
-		m.mu.Unlock()
-		return ipc.TunnelStatus{}, err
-	}
-	id := p.id
-	pin, pinned := t.pins[id.Ref]
 	t.state = StateConnecting
-	t.ref, t.hasRef, t.uid = id.Ref, true, p.uids[0]
+	t.ref, t.hasRef, t.uid = c.id.Ref, true, c.uid
 	life, cancelLife := context.WithCancel(m.ctx)
 	attempt, cancelAttempt := context.WithCancel(life)
 	t.cancel = cancelLife
-	cfg := t.cfg
 	m.mu.Unlock()
 	defer cancelAttempt()
-	if caller != nil {
-		stop := context.AfterFunc(caller, cancelAttempt)
-		defer stop()
-	}
+	defer context.AfterFunc(caller, cancelAttempt)()
 
 	t.op.Lock()
 	defer t.op.Unlock()
 	m.reap(t)
 
-	dev, cfgr, pub, err := m.build(attempt, life, t, gen, cfg, p, pin, pinned)
+	dev, cfgr, err := m.build(attempt, life, cfg, c)
 	m.mu.Lock()
 	if t.gen != gen {
 		err = errAborted // disconnected, removed or card removed meanwhile
@@ -818,10 +843,7 @@ func (m *Manager) connect(caller context.Context, name string, uid uint32, admin
 		t.dev, t.cfgr, t.devGen = dev, cfgr, gen
 		t.state = StateConnected
 		m.mu.Unlock()
-		if !pinned {
-			go m.pinAfterHandshake(t, life, id.Ref, pub, dev)
-		}
-		log.Printf("daemon: tunnel %s connected with %s", name, id.Ref)
+		log.Printf("daemon: tunnel %s connected with %s (uid %d)", name, c.id.Ref, c.uid)
 		return m.status(t), nil
 	}
 	if t.gen == gen {
@@ -836,46 +858,106 @@ func (m *Manager) connect(caller context.Context, name string, uid uint32, admin
 	return ipc.TunnelStatus{}, userErr(err)
 }
 
-// build makes the device for one connect attempt: resolve endpoints, get
-// and check the public key, warm up the card (the PIN is asked here, not
-// inside a 3 s handshake), then NewDevice, SetStaticKey (once, before Up),
+// failUnbound records a connect that failed before binding. Only the owner's
+// own reconnect (a tunnel bound to uid waiting for its card) changes the
+// state; anybody else's failure leaves the tunnel as it was.
+func (m *Manager) failUnbound(t *tunnel, uid uint32, gen0 uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if t.gen == gen0 && t.state == StateCardRemoved && t.uid == uid {
+		t.state = StateError
+	}
+}
+
+// prove tries the candidates in order and returns the first whose agent
+// proves it holds the configured key.
+func (m *Manager) prove(ctx context.Context, name string, cands []candidate) (candidate, error) {
+	var lastErr error = errNoCard
+	for _, c := range cands {
+		err := m.proveOne(ctx, c)
+		if err == nil {
+			return c, nil
+		}
+		log.Printf("daemon: tunnel %s: agent of uid %d for %s: %v", name, c.uid, c.id.Ref, err)
+		lastErr = err
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return candidate{}, lastErr
+}
+
+// proveOne checks that c's agent serves the configured public key and can
+// use the matching private key (R21). key.public must equal the configured
+// key; then the agent computes X25519 with a fresh ephemeral public key,
+// which must equal X25519(ephemeral private, configured key). This call is
+// also where the card asks for its PIN, so it gets the warm-up timeout.
+func (m *Manager) proveOne(ctx context.Context, c candidate) error {
+	ref, want := c.id.Ref, c.id.PublicKey
+	conn := m.agentFor(ref.Serial, c.uid)
+	if conn == nil {
+		return errNoCard
+	}
+	pub, err := fetchPublic(ctx, conn, ref)
+	if err != nil {
+		return err
+	}
+	if subtle.ConstantTimeCompare(pub[:], want[:]) != 1 {
+		return &ipc.Error{Code: ipc.CodeForbidden, Message: fmt.Sprintf(msg.DaemonKeyMismatchFmt, ref)}
+	}
+
+	var priv [32]byte
+	defer clear(priv[:])
+	if _, err := rand.Read(priv[:]); err != nil {
+		return err
+	}
+	ephPub, err := curve25519.X25519(priv[:], curve25519.Basepoint)
+	if err != nil {
+		return err
+	}
+	expect, err := curve25519.X25519(priv[:], want[:])
+	if err != nil { // low-order configured key: nothing can prove it
+		return &ipc.Error{Code: ipc.CodeForbidden, Message: fmt.Sprintf(msg.DaemonProofFailedFmt, ref)}
+	}
+	defer clear(expect)
+
+	key := &remoteKey{ref: ref, pub: want, uid: c.uid, find: m.agentFor, life: ctx}
+	wctx, cancel := context.WithTimeout(ctx, warmUpTimeout)
+	defer cancel()
+	got, err := key.X25519(wctx, [32]byte(ephPub))
+	defer clear(got[:])
+	if err != nil {
+		return err
+	}
+	if subtle.ConstantTimeCompare(got[:], expect) != 1 {
+		return &ipc.Error{Code: ipc.CodeForbidden, Message: fmt.Sprintf(msg.DaemonProofFailedFmt, ref)}
+	}
+	return nil
+}
+
+// build makes the device for one connect attempt after the agent proved its
+// key: resolve endpoints, then NewDevice, SetStaticKey (once, before Up),
 // IpcSet, addresses and routes, Up. life bounds the key's calls for the
-// device's whole lifetime; attempt only this connect. It returns the
-// identity public key in use.
-func (m *Manager) build(attempt, life context.Context, t *tunnel, gen uint64, cfg *config.Tunnel, p pick, pin [32]byte, pinned bool) (*device.Device, netcfg.Configurer, [32]byte, error) {
-	var none [32]byte
-	id := p.id
+// device's whole lifetime; attempt only this connect.
+func (m *Manager) build(attempt, life context.Context, cfg *config.Tunnel, c candidate) (*device.Device, netcfg.Configurer, error) {
+	id := c.id
 	var routes []netip.Prefix
 	for _, peer := range cfg.Peers {
 		routes = append(routes, peer.AllowedIPs...)
 	}
 	for _, r := range routes {
 		if r.Bits() == 0 {
-			return nil, nil, none, netcfg.ErrFullTunnelUnsupported
+			return nil, nil, netcfg.ErrFullTunnelUnsupported
 		}
 	}
 	rt, err := m.resolveTunnel(attempt, cfg)
 	if err != nil {
-		return nil, nil, none, err
-	}
-
-	pub, uid, err := m.selectKey(attempt, t, gen, id.Ref, p.uids, pin, pinned)
-	if err != nil {
-		return nil, nil, none, err
-	}
-	key := &remoteKey{ref: id.Ref, pub: pub, uid: uid, find: m.agentFor, life: life}
-	if len(rt.Peers) > 0 {
-		wctx, cancel := context.WithTimeout(attempt, warmUpTimeout)
-		ss, err := key.X25519(wctx, rt.Peers[0].PublicKey)
-		cancel()
-		clear(ss[:])
-		if err != nil {
-			return nil, nil, none, err
-		}
+		return nil, nil, err
 	}
 	if err := attempt.Err(); err != nil {
-		return nil, nil, none, err
+		return nil, nil, err
 	}
+	key := &remoteKey{ref: id.Ref, pub: id.PublicKey, uid: c.uid, find: m.agentFor, life: life}
 
 	mtu := cfg.MTU
 	if mtu == 0 {
@@ -883,17 +965,17 @@ func (m *Manager) build(attempt, life context.Context, t *tunnel, gen uint64, cf
 	}
 	tdev, cfgr, err := m.tun(cfg.Name, mtu)
 	if err != nil {
-		return nil, nil, none, err
+		return nil, nil, err
 	}
 	iface, err := tdev.Name()
 	if err != nil {
 		tdev.Close()
-		return nil, nil, none, err
+		return nil, nil, err
 	}
 	dev := device.NewDevice(tdev, m.bind(), device.NewLogger(device.LogLevelError, fmt.Sprintf("latchwire(%s): ", cfg.Name)))
-	fail := func(err error) (*device.Device, netcfg.Configurer, [32]byte, error) {
+	fail := func(err error) (*device.Device, netcfg.Configurer, error) {
 		m.closeDevice(dev, cfgr)
-		return nil, nil, none, err
+		return nil, nil, err
 	}
 	if err := m.ops.setStaticKey(dev, wgadapter.New(key, wgadapter.DefaultLimits)); err != nil {
 		return fail(err)
@@ -907,71 +989,7 @@ func (m *Manager) build(attempt, life context.Context, t *tunnel, gen uint64, cf
 	if err := m.ops.up(dev); err != nil {
 		return fail(err)
 	}
-	return dev, cfgr, pub, nil
-}
-
-// selectKey asks the agents of uids, in order, for ref's public key and
-// takes the first one that matches the pin (any, when nothing is pinned).
-// The tunnel is then bound to that agent's user.
-func (m *Manager) selectKey(ctx context.Context, t *tunnel, gen uint64, ref keyref.Ref, uids []uint32, pin [32]byte, pinned bool) ([32]byte, uint32, error) {
-	var lastErr error = errNoCard
-	for _, uid := range uids {
-		c := m.agentFor(ref.Serial, uid)
-		if c == nil {
-			continue
-		}
-		pub, err := fetchPublic(ctx, c, ref)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		if pinned && pub != pin {
-			log.Printf("daemon: tunnel %s: agent of uid %d offered another key for %s", t.name, uid, ref)
-			lastErr = &ipc.Error{Code: ipc.CodeForbidden, Message: fmt.Sprintf(msg.DaemonKeyMismatchFmt, ref)}
-			continue
-		}
-		m.mu.Lock()
-		if t.gen == gen {
-			t.uid = uid
-		}
-		m.mu.Unlock()
-		return pub, uid, nil
-	}
-	return [32]byte{}, 0, lastErr
-}
-
-// pinAfterHandshake records pub as the identity key of ref once the device
-// completes a handshake: the server accepted the key, so a later agent
-// offering another key for ref is refused (TOFU, R19).
-func (m *Manager) pinAfterHandshake(t *tunnel, life context.Context, ref keyref.Ref, pub [32]byte, dev *device.Device) {
-	tick := time.NewTicker(pinPoll)
-	defer tick.Stop()
-	for lastHandshake(dev) == "" {
-		select {
-		case <-life.Done():
-			return
-		case <-tick.C:
-		}
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.tunnels[t.name] != t { // removed meanwhile
-		return
-	}
-	if _, ok := t.pins[ref]; ok {
-		return
-	}
-	pins := maps.Clone(t.pins)
-	if pins == nil {
-		pins = map[keyref.Ref][32]byte{}
-	}
-	pins[ref] = pub
-	if err := m.store.savePins(t.name, pins); err != nil {
-		log.Printf("daemon: tunnel %s: saving pin: %v", t.name, err)
-		return
-	}
-	t.pins = pins
-	log.Printf("daemon: tunnel %s: pinned the public key of %s", t.name, ref)
+	return dev, cfgr, nil
 }
 
 // resolveTunnel returns a copy of cfg whose endpoints are literal IP:port.
@@ -1027,6 +1045,8 @@ func (m *Manager) teardown(t *tunnel, state string, cond func(*tunnel) bool) boo
 		t.cancel()
 		t.cancel = nil
 	}
+	t.abortCancel()
+	t.abort, t.abortCancel = context.WithCancel(context.Background())
 	m.mu.Unlock()
 	t.op.Lock()
 	m.reap(t)
@@ -1049,10 +1069,22 @@ func (m *Manager) reap(t *tunnel) {
 
 // closeDevice stops the tunnel first, so no packet uses it once this starts
 // (R20), then removes addresses and routes. Removal is best effort: closing
-// the TUN usually takes them with the interface, so its errors are expected.
+// the TUN usually takes them with the interface, so its errors are expected
+// and only logged in debug mode.
 func (m *Manager) closeDevice(dev *device.Device, cfgr netcfg.Configurer) {
 	m.ops.close(dev)
-	_ = cfgr.Remove()
+	if err := cfgr.Remove(); err != nil {
+		debugf("daemon: removing routes after close: %v", err)
+	}
+}
+
+// debug enables debug logging; set LATCHWIRE_DEBUG=1.
+var debug = os.Getenv("LATCHWIRE_DEBUG") != ""
+
+func debugf(format string, args ...any) {
+	if debug {
+		log.Printf(format, args...)
+	}
 }
 
 // userErr turns a connect failure into the error the requester sees.

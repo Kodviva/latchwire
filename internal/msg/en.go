@@ -8,24 +8,25 @@ const (
 	KeyRefInvalidFmt = "invalid key reference %q: expected piv://<decimal serial>/<slot 82-95>"
 
 	ConfigPrivateKeyNotAllowed = "PrivateKey is not allowed: the private key stays in the hardware token, use KeyRef = piv://<serial>/<slot>"
-	ConfigNoIdentity           = "no hardware key configured: add KeyRef = piv://<serial>/<slot> to [Interface] or an [Identity] section"
+	ConfigNoIdentity           = "no hardware key configured: add KeyRef = piv://<serial>/<slot> and its PublicKey to [Interface] or an [Identity] section"
 	ConfigTooLargeFmt          = "configuration is larger than %d bytes"
 
 	// ConfigLineFmt takes a line number and a wrapped error.
 	ConfigLineFmt = "line %d: %w"
 
 	// The formats below take a key or section name, never a value.
-	ConfigHookNotSupportedFmt = "%s is not supported: Latchwire never runs commands from tunnel configurations"
-	ConfigUnknownKeyFmt       = "unknown key %s in [%s]"
-	ConfigUnknownSectionFmt   = "unknown section [%s]"
-	ConfigKeyOutsideSection   = "key found before any section header"
-	ConfigMalformedLine       = "expected Key = Value or [Section]"
-	ConfigDuplicateKeyFmt     = "%s is set more than once"
-	ConfigInvalidValueFmt     = "invalid value for %s"
-	ConfigMissingKeyFmt       = "[%s] section is missing %s"
-	ConfigDuplicateSectionFmt = "[%s] section appears more than once"
-	ConfigDuplicatePeer       = "the same PublicKey is used by more than one [Peer]"
-	ConfigMixedIdentities     = "KeyRef and Address belong in [Interface] or in [Identity] sections, not both"
+	ConfigHookNotSupportedFmt    = "%s is not supported: Latchwire never runs commands from tunnel configurations"
+	ConfigUnknownKeyFmt          = "unknown key %s in [%s]"
+	ConfigUnknownSectionFmt      = "unknown section [%s]"
+	ConfigKeyOutsideSection      = "key found before any section header"
+	ConfigMalformedLine          = "expected Key = Value or [Section]"
+	ConfigDuplicateKeyFmt        = "%s is set more than once"
+	ConfigInvalidValueFmt        = "invalid value for %s"
+	ConfigMissingKeyFmt          = "[%s] section is missing %s"
+	ConfigDuplicateSectionFmt    = "[%s] section appears more than once"
+	ConfigDuplicatePeer          = "the same PublicKey is used by more than one [Peer]"
+	ConfigMixedIdentities        = "KeyRef and Address belong in [Interface] or in [Identity] sections, not both"
+	ConfigPublicKeyWithoutKeyRef = "PublicKey in [Interface] is the public key of the KeyRef there; with [Identity] sections put each PublicKey in its section"
 
 	// YubiKey PIV backend. None of these formats take a PIN, PUK or key.
 	PIVCardNotFound          = "no YubiKey with that serial number was found (is it plugged in, or in use by another program?)"
@@ -89,9 +90,9 @@ const (
 	DaemonBadAgentReply  = "the agent sent a malformed reply"
 	DaemonConnectAborted = "connecting was interrupted: the tunnel was disconnected or its YubiKey was removed"
 	DaemonNotYourTunnel  = "permission denied: this tunnel is in use with another user's YubiKey"
-	DaemonConnectAsOwner = "the tunnel's YubiKey is held by another user's agent and the tunnel has no recorded key yet: connect it once as the card's owner"
-	// DaemonKeyMismatchFmt takes the KeyRef.
-	DaemonKeyMismatchFmt = "the YubiKey answering for %s has a different public key than the one this tunnel used before; refusing to connect (remove and add the tunnel again if the key was replaced on purpose)"
+	// DaemonKeyMismatchFmt and DaemonProofFailedFmt take the KeyRef.
+	DaemonKeyMismatchFmt = "the YubiKey answering for %s does not hold the PublicKey configured for this tunnel; refusing to connect"
+	DaemonProofFailedFmt = "the agent answering for %s could not prove that it holds the private key of the configured PublicKey; refusing to connect"
 	// DaemonResolveFmt takes the endpoint host name.
 	DaemonResolveFmt = "cannot resolve the endpoint host %s"
 	// DaemonConnectFailedFmt and DaemonStoreFailedFmt take an error.

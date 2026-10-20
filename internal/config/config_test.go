@@ -16,7 +16,12 @@ var (
 	pubA = bytes32(0x11)
 	pubB = bytes32(0x22)
 	psk  = bytes32(0x33)
+	idA  = bytes32(0x55) // identity (card) public keys
+	idB  = bytes32(0x66)
 )
+
+// idKey is the identity PublicKey line for idA.
+var idKey = "PublicKey = " + b64(idA) + "\n"
 
 func bytes32(b byte) [32]byte {
 	var k [32]byte
@@ -47,6 +52,7 @@ func TestParseShorthand(t *testing.T) {
 	tun := mustParse(t, `
 [Interface]
 KeyRef = piv://40727512/82
+PublicKey = `+b64(idA)+`
 Address = 10.0.0.2/32, fd00::2/128
 ListenPort = 51820
 MTU = 1380
@@ -110,10 +116,12 @@ ListenPort = 1234
 
 [Identity]
 KeyRef = piv://111/83
+PublicKey = `+b64(idA)+`
 Address = 10.0.0.2/32
 
 [Identity]
 KeyRef = piv://222/82
+PublicKey = `+b64(idB)+`
 Address = 10.0.1.2/32, fd00::2/128
 
 [Peer]
@@ -188,7 +196,7 @@ func TestParseRejectsHooks(t *testing.T) {
 	if _, err := parse(t, "[Identity]\nKeyRef = piv://1/82\nPostUp = true\n"); err == nil {
 		t.Error("PostUp in [Identity] accepted")
 	}
-	if _, err := parse(t, "[Interface]\nKeyRef = piv://1/82\n[Peer]\nPublicKey = "+b64(pubA)+"\nPostUp = true\n"); err == nil {
+	if _, err := parse(t, "[Interface]\nKeyRef = piv://1/82\n"+idKey+"[Peer]\nPublicKey = "+b64(pubA)+"\nPostUp = true\n"); err == nil {
 		t.Error("PostUp in [Peer] accepted")
 	}
 }
@@ -198,6 +206,7 @@ func TestParseRobustness(t *testing.T) {
 		"\r\n"+
 		"[interface]   # trailing\r\n"+
 		"  keyref=piv://7/95   \r\n"+
+		"  publickey = "+b64(idA)+"\r\n"+
 		"ADDRESS =10.9.0.2/24 ,  fd09::2/64\r\n"+
 		"Address = 10.9.1.2/24\r\n"+
 		"\r\n"+
@@ -226,7 +235,7 @@ func TestParseRobustness(t *testing.T) {
 }
 
 func TestParseRejectsInvalid(t *testing.T) {
-	id := "[Interface]\nKeyRef = piv://1/82\n"
+	id := "[Interface]\nKeyRef = piv://1/82\n" + idKey
 	peer := "[Peer]\nPublicKey = " + b64(pubA) + "\n"
 	cases := map[string]string{
 		"unknown section":            "[Foo]\n",
@@ -266,6 +275,7 @@ func TestUAPINeverContainsPrivateKey(t *testing.T) {
 	tun := mustParse(t, `
 [Interface]
 KeyRef = piv://40727512/82
+PublicKey = `+b64(idA)+`
 Address = 10.0.0.2/32
 ListenPort = 51820
 
@@ -304,14 +314,14 @@ AllowedIPs = 0.0.0.0/0
 }
 
 func TestUAPIOmitsZeroListenPort(t *testing.T) {
-	tun := mustParse(t, "[Interface]\nKeyRef = piv://1/82\n[Peer]\nPublicKey = "+b64(pubA)+"\n")
+	tun := mustParse(t, "[Interface]\nKeyRef = piv://1/82\n"+idKey+"[Peer]\nPublicKey = "+b64(pubA)+"\n")
 	if strings.Contains(tun.UAPI(), "listen_port") {
 		t.Fatalf("unexpected listen_port:\n%s", tun.UAPI())
 	}
 }
 
 func TestParseDNSSearchDomains(t *testing.T) {
-	tun := mustParse(t, "[Interface]\nKeyRef = piv://1/82\n"+
+	tun := mustParse(t, "[Interface]\nKeyRef = piv://1/82\n"+idKey+
 		"DNS = 10.0.0.1, corp.example, fd00::1\n"+
 		"DNS = Lab-1.internal.example.com\n")
 	if len(tun.DNS) != 2 || tun.DNS[0] != netip.MustParseAddr("10.0.0.1") || tun.DNS[1] != netip.MustParseAddr("fd00::1") {
@@ -327,9 +337,49 @@ func TestParseDNSSearchDomains(t *testing.T) {
 		strings.Repeat("a", 64) + ".example",
 		strings.Repeat("a.", 127) + "a",
 	} {
-		_, err := parse(t, "[Interface]\nKeyRef = piv://1/82\nDNS = 10.0.0.1, "+bad+"\n")
+		_, err := parse(t, "[Interface]\nKeyRef = piv://1/82\n"+idKey+"DNS = 10.0.0.1, "+bad+"\n")
 		if err == nil {
 			t.Errorf("DNS item %q accepted", bad)
+		}
+	}
+}
+
+func TestParseRequiresIdentityPublicKey(t *testing.T) {
+	peer := "[Peer]\nPublicKey = " + b64(pubA) + "\n"
+	for name, conf := range map[string]string{
+		"shorthand": "[Interface]\nKeyRef = piv://1/82\n" + peer,
+		"identity":  "[Identity]\nKeyRef = piv://1/82\n" + peer,
+		"second identity": "[Identity]\nKeyRef = piv://1/82\n" + idKey +
+			"[Identity]\nKeyRef = piv://2/82\n" + peer,
+	} {
+		_, err := parse(t, conf)
+		if err == nil || !strings.Contains(err.Error(), "PublicKey") {
+			t.Errorf("%s: err = %v, want missing PublicKey", name, err)
+		}
+	}
+	tun := mustParse(t, "[Identity]\nKeyRef = piv://1/82\n"+idKey+
+		"[Identity]\nKeyRef = piv://2/82\nPublicKey = "+b64(idB)+"\n"+peer)
+	if tun.Identities[0].PublicKey != idA || tun.Identities[1].PublicKey != idB {
+		t.Fatalf("identity keys %x %x", tun.Identities[0].PublicKey, tun.Identities[1].PublicKey)
+	}
+	tun = mustParse(t, "[Interface]\nKeyRef = piv://1/82\n"+idKey+peer)
+	if tun.Identities[0].PublicKey != idA {
+		t.Fatalf("shorthand identity key %x", tun.Identities[0].PublicKey)
+	}
+}
+
+func TestParseRejectsBadIdentityPublicKey(t *testing.T) {
+	for name, conf := range map[string]string{
+		"not base64":    "[Interface]\nKeyRef = piv://1/82\nPublicKey = zz!\n",
+		"short":         "[Interface]\nKeyRef = piv://1/82\nPublicKey = " + base64.StdEncoding.EncodeToString(make([]byte, 31)) + "\n",
+		"all zero":      "[Interface]\nKeyRef = piv://1/82\nPublicKey = " + b64([32]byte{}) + "\n",
+		"identity":      "[Identity]\nKeyRef = piv://1/82\nPublicKey = abc\n",
+		"duplicate":     "[Interface]\nKeyRef = piv://1/82\n" + idKey + idKey,
+		"without ref":   "[Interface]\n" + idKey + "[Identity]\nKeyRef = piv://1/82\n" + idKey,
+		"no ref at all": "[Interface]\n" + idKey,
+	} {
+		if _, err := parse(t, conf); err == nil {
+			t.Errorf("%s: accepted", name)
 		}
 	}
 }

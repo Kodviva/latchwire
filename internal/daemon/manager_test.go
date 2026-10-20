@@ -540,11 +540,15 @@ func (e *env) clientDev() *device.Device {
 	return t.dev
 }
 
-func clientConfig(ids []keyref.Ref, addrs []string, srv *server, endpoint string) string {
+// config renders a client configuration whose identities carry the fake
+// cards' public keys.
+func (e *env) config(ids []keyref.Ref, addrs []string, srv *server, endpoint string) string {
 	var b strings.Builder
 	b.WriteString("[Interface]\nMTU = 1420\n")
 	for i, r := range ids {
-		fmt.Fprintf(&b, "[Identity]\nKeyRef = %s\nAddress = %s/32\n", r, addrs[i])
+		pub := e.b.pub(r.Serial)
+		fmt.Fprintf(&b, "[Identity]\nKeyRef = %s\nPublicKey = %s\nAddress = %s/32\n",
+			r, base64.StdEncoding.EncodeToString(pub[:]), addrs[i])
 	}
 	if endpoint == "" {
 		endpoint = fmt.Sprintf("127.0.0.1:%d", srv.port)
@@ -562,7 +566,7 @@ func connected(t *testing.T, o envOpts) (*env, *server) {
 	}
 	e := newEnv(t, o)
 	srv := newServer(t, e.b.pub(serialA), "10.0.0.2")
-	cfg := clientConfig([]keyref.Ref{refA}, []string{"10.0.0.2"}, srv, "")
+	cfg := e.config([]keyref.Ref{refA}, []string{"10.0.0.2"}, srv, "")
 	if e.admin(uidA) {
 		e.add(cfg)
 	} else if err := e.m.add(tunName, cfg); err != nil {
@@ -822,7 +826,7 @@ func TestInitiationFloodDoesNotStarveHandshake(t *testing.T) {
 
 func TestNonAdminCannotAddTunnel(t *testing.T) {
 	e := newEnv(t, envOpts{present: []uint32{serialA}, notAdmin: true, noAgent: true})
-	cfg := clientConfig([]keyref.Ref{refA}, []string{"10.0.0.2"}, &server{port: 51820}, "")
+	cfg := e.config([]keyref.Ref{refA}, []string{"10.0.0.2"}, &server{port: 51820}, "")
 	err := e.call(ipc.MethodTunnelAdd, ipc.TunnelAdd{Name: tunName, Config: cfg}, nil)
 	assertCode(t, err, ipc.CodeForbidden)
 	assertCode(t, e.call(ipc.MethodTunnelRemove, ipc.TunnelName{Name: tunName}, nil), ipc.CodeForbidden)
@@ -843,7 +847,7 @@ func TestNonAdminCannotAddTunnel(t *testing.T) {
 func TestSelectsFirstPresentIdentity(t *testing.T) {
 	e := newEnv(t, envOpts{present: []uint32{serialB}, clientAddr: []string{"10.0.0.3"}})
 	srv := newServer(t, e.b.pub(serialB), "10.0.0.3")
-	e.add(clientConfig([]keyref.Ref{refA, refB}, []string{"10.0.0.2", "10.0.0.3"}, srv, ""))
+	e.add(e.config([]keyref.Ref{refA, refB}, []string{"10.0.0.2", "10.0.0.3"}, srv, ""))
 	e.waitCard(serialB, true)
 	st := e.connect()
 	if st.Identity != refB.String() {
@@ -924,12 +928,12 @@ func TestStaticKeySetOnceBeforeUp(t *testing.T) {
 	}
 }
 
-// R17: the PIN is asked by a warm-up X25519 before any device exists, and
-// agent error codes reach the caller.
-func TestWarmUpBeforeDeviceAndWrongPIN(t *testing.T) {
+// R17/R21: the PIN is asked by the proof-of-possession X25519 before any
+// device exists, and agent error codes reach the caller.
+func TestProofOfPossessionBeforeDeviceAndWrongPIN(t *testing.T) {
 	e := newEnv(t, envOpts{present: []uint32{serialA}, pin: wrongPIN})
 	srv := newServer(t, e.b.pub(serialA), "10.0.0.2")
-	e.add(clientConfig([]keyref.Ref{refA}, []string{"10.0.0.2"}, srv, ""))
+	e.add(e.config([]keyref.Ref{refA}, []string{"10.0.0.2"}, srv, ""))
 	e.waitCard(serialA, true)
 	err := e.call(ipc.MethodTunnelConnect, ipc.TunnelName{Name: tunName}, nil)
 	assertCode(t, err, ipc.CodeWrongPIN)
@@ -939,20 +943,20 @@ func TestWarmUpBeforeDeviceAndWrongPIN(t *testing.T) {
 	if n := e.f.count(); n != 0 {
 		t.Fatalf("%d TUN devices made after a failed warm-up, want 0", n)
 	}
-	if st := e.status(); st.State != StateError {
-		t.Fatalf("state %q, want error", st.State)
+	if st := e.status(); st.State != StateDisconnected || st.Identity != "" {
+		t.Fatalf("status %+v, want an unbound disconnected tunnel", st)
 	}
 
-	// The right PIN then connects; the warm-up used the first peer's key.
+	// The right PIN then connects. The proof of possession used a fresh
+	// ephemeral key, so the only DH with the server key is the precompute.
 	e.p.mu.Lock()
 	e.p.pin = testPIN
 	e.p.mu.Unlock()
 	if st := e.connect(); st.State != StateConnected {
 		t.Fatalf("state %q", st.State)
 	}
-	// warm-up + static-static precompute when the peer is added
-	if n := e.b.callsFor(srv.pub); n != 2 {
-		t.Errorf("%d DH calls against the server key, want 2 (warm-up, precompute)", n)
+	if n := e.b.callsFor(srv.pub); n != 1 {
+		t.Errorf("%d DH calls against the server key, want 1 (precompute)", n)
 	}
 }
 
@@ -995,7 +999,7 @@ func TestEndpointHostnameResolvedAtConnect(t *testing.T) {
 	}
 	e := newEnv(t, envOpts{present: []uint32{serialA}, hook: hook})
 	srv := newServer(t, e.b.pub(serialA), "10.0.0.2")
-	e.add(clientConfig([]keyref.Ref{refA}, []string{"10.0.0.2"}, srv, fmt.Sprintf("vpn.example.test:%d", srv.port)))
+	e.add(e.config([]keyref.Ref{refA}, []string{"10.0.0.2"}, srv, fmt.Sprintf("vpn.example.test:%d", srv.port)))
 	e.waitCard(serialA, true)
 	e.connect()
 	tnet, _ := e.f.last()
@@ -1029,7 +1033,7 @@ func TestEndpointHostnameResolvedAtConnect(t *testing.T) {
 
 func TestStorePersistsTunnels(t *testing.T) {
 	e := newEnv(t, envOpts{noAgent: true})
-	cfg := clientConfig([]keyref.Ref{refA}, []string{"10.0.0.2"}, &server{port: 51820}, "")
+	cfg := e.config([]keyref.Ref{refA}, []string{"10.0.0.2"}, &server{port: 51820}, "")
 	e.add(cfg)
 	assertCode(t, e.call(ipc.MethodTunnelAdd, ipc.TunnelAdd{Name: tunName, Config: cfg}, nil), ipc.CodeBadRequest)
 	assertCode(t, e.call(ipc.MethodTunnelAdd, ipc.TunnelAdd{Name: "../x", Config: cfg}, nil), ipc.CodeBadRequest)
@@ -1065,7 +1069,7 @@ func TestStorePersistsTunnels(t *testing.T) {
 
 func TestConnectWithoutCard(t *testing.T) {
 	e := newEnv(t, envOpts{present: []uint32{serialB}})
-	cfg := clientConfig([]keyref.Ref{refA}, []string{"10.0.0.2"}, &server{port: 51820}, "")
+	cfg := e.config([]keyref.Ref{refA}, []string{"10.0.0.2"}, &server{port: 51820}, "")
 	e.add(cfg)
 	e.waitCard(serialB, true)
 	assertCode(t, e.call(ipc.MethodTunnelConnect, ipc.TunnelName{Name: tunName}, nil), ipc.CodeUnavailable)
@@ -1123,15 +1127,21 @@ var (
 func onlyAdmin(uid uint32) bool { return uid == uidAdmin }
 
 // fakeAgent is an agent connection registered as uid. It answers key.public
-// and key.x25519 with key, whatever the card serial: it may be lying.
+// with pub and key.x25519 with key's DH, whatever the card serial: it may be
+// lying about either. gate, if set, holds every key.x25519 until closed.
 type fakeAgent struct {
 	dc      *ipc.Conn // daemon side
 	ac      *ipc.Conn // agent side
 	publics atomic.Int32
 	x25519s atomic.Int32
+	gate    chan struct{}
 }
 
 func newFakeAgent(t *testing.T, e *env, uid uint32, key *softkey.Key, serials ...uint32) *fakeAgent {
+	return newLyingAgent(t, e, uid, key.PublicKey(), key, nil, serials...)
+}
+
+func newLyingAgent(t *testing.T, e *env, uid uint32, pub [32]byte, key *softkey.Key, gate chan struct{}, serials ...uint32) *fakeAgent {
 	t.Helper()
 	path := filepath.Join(filepath.Dir(e.socket), fmt.Sprintf("f%d", uid))
 	l, err := ipc.Listen(path)
@@ -1156,14 +1166,20 @@ func newFakeAgent(t *testing.T, e *env, uid uint32, key *softkey.Key, serials ..
 	if dc == nil {
 		t.Fatal("accept failed")
 	}
-	fa := &fakeAgent{dc: dc, ac: ac}
-	pub := key.PublicKey()
+	fa := &fakeAgent{dc: dc, ac: ac, gate: gate}
 	ac.Handle(ipc.MethodKeyPublic, func(context.Context, uint32, json.RawMessage) (any, error) {
 		fa.publics.Add(1)
 		return ipc.KeyPublicResult{Public: base64.StdEncoding.EncodeToString(pub[:])}, nil
 	})
 	ac.Handle(ipc.MethodKeyX25519, func(ctx context.Context, _ uint32, params json.RawMessage) (any, error) {
 		fa.x25519s.Add(1)
+		if fa.gate != nil {
+			select {
+			case <-fa.gate:
+			case <-ctx.Done():
+				return nil, &ipc.Error{Code: ipc.CodeUnavailable, Message: "x"}
+			}
+		}
 		var req ipc.KeyRequest
 		json.Unmarshal(params, &req)
 		b, _ := base64.StdEncoding.DecodeString(req.Peer)
@@ -1192,24 +1208,6 @@ func (e *env) boundUID() uint32 {
 	e.m.mu.Lock()
 	defer e.m.mu.Unlock()
 	return e.m.tunnels[tunName].uid
-}
-
-func (e *env) pinPath() string { return filepath.Join(e.store, tunName+pinExt) }
-
-// waitPin waits until the identity key of ref is pinned on disk.
-func (e *env) waitPin(ref keyref.Ref, want [32]byte) {
-	e.t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		pins, err := e.m.store.loadPins(tunName)
-		if err == nil && pins[ref] == want {
-			return
-		}
-		if time.Now().After(deadline) {
-			e.t.Fatalf("pin for %s not written (pins %v, err %v)", ref, pins, err)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
 }
 
 func otherKey(t *testing.T) *softkey.Key {
@@ -1267,7 +1265,7 @@ func TestOtherUserCannotTouchTunnel(t *testing.T) {
 func TestNonAdminConnectUsesOnlyOwnAgent(t *testing.T) {
 	e := newEnv(t, envOpts{present: []uint32{}, admin: onlyAdmin})
 	srv := newServer(t, e.b.pub(serialA), "10.0.0.2")
-	if err := e.m.add(tunName, clientConfig([]keyref.Ref{refA}, []string{"10.0.0.2"}, srv, "")); err != nil {
+	if err := e.m.add(tunName, e.config([]keyref.Ref{refA}, []string{"10.0.0.2"}, srv, "")); err != nil {
 		t.Fatal(err)
 	}
 	e.waitAgentRegistered(uidA)
@@ -1307,74 +1305,6 @@ func TestNonAdminConnectUsesOnlyOwnAgent(t *testing.T) {
 	}
 }
 
-// After a successful handshake the identity key is pinned; an agent with a
-// different key.public is refused, for users and admins alike, and an admin
-// without a pin must leave the first connect to the card owner.
-func TestPinRefusesDifferentKey(t *testing.T) {
-	e := newEnv(t, envOpts{present: []uint32{serialA}, admin: onlyAdmin})
-	srv := newServer(t, e.b.pub(serialA), "10.0.0.2")
-	if err := e.m.add(tunName, clientConfig([]keyref.Ref{refA}, []string{"10.0.0.2"}, srv, "")); err != nil {
-		t.Fatal(err)
-	}
-	e.waitCard(serialA, true)
-	ctx := context.Background()
-
-	// No pin yet: an admin cannot use another user's agent.
-	_, err := e.m.requestConnect(ctx, uidAdmin, tunName)
-	assertCode(t, err, ipc.CodeForbidden)
-	if !strings.Contains(err.Error(), "owner") {
-		t.Errorf("error %q does not ask for the card owner", err)
-	}
-	if n := e.f.count(); n != 0 {
-		t.Fatalf("%d devices", n)
-	}
-
-	e.connect() // A, own agent
-	tnet, _ := e.f.last()
-	if err := get(tnet, 5*time.Second); err != nil {
-		t.Fatal(err)
-	}
-	e.waitPin(refA, e.b.pub(serialA))
-	if err := e.call(ipc.MethodTunnelDisconnect, ipc.TunnelName{Name: tunName}, nil); err != nil {
-		t.Fatal(err)
-	}
-
-	// A's agent goes away; B's agent claims A's card with another key.
-	e.stopAgent()
-	e.waitCard(serialA, false)
-	fb := newFakeAgent(t, e, uidB, otherKey(t), serialA)
-
-	_, err = e.m.requestConnect(ctx, uidB, tunName)
-	assertCode(t, err, ipc.CodeForbidden)
-	if !strings.Contains(err.Error(), refA.String()) {
-		t.Errorf("error %q does not name %s", err, refA)
-	}
-	_, err = e.m.requestConnect(ctx, uidAdmin, tunName)
-	assertCode(t, err, ipc.CodeForbidden)
-	if fb.publics.Load() != 2 || fb.x25519s.Load() != 0 {
-		t.Errorf("B's agent: %d key.public, %d x25519; want 2, 0", fb.publics.Load(), fb.x25519s.Load())
-	}
-	if n := e.f.count(); n != 1 {
-		t.Fatalf("%d devices, want no new one for a mismatched key", n)
-	}
-
-	// A's agent returns: the admin connect skips B's agent and uses A's.
-	// (waitCard would not do: B's agent already claims serialA.)
-	e.startAgent()
-	e.waitAgentRegistered(uidA)
-	st, err := e.m.requestConnect(ctx, uidAdmin, tunName)
-	if err != nil || st.State != StateConnected {
-		t.Fatalf("admin connect via the pinned key: %+v %v", st, err)
-	}
-	if u := e.boundUID(); u != uidA {
-		t.Fatalf("bound to %d, want A", u)
-	}
-	tnet, _ = e.f.last()
-	if err := get(tnet, 5*time.Second); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // R20: an agent that comes back without the card (pulled while the agent
 // was down) takes the tunnel down at registration.
 func TestReregisterWithoutCardTearsDown(t *testing.T) {
@@ -1405,37 +1335,6 @@ func TestReregisterWithoutCardTearsDown(t *testing.T) {
 	}
 }
 
-func TestPinPersistsAndRemovedWithTunnel(t *testing.T) {
-	e, _ := connected(t, envOpts{})
-	tnet, _ := e.f.last()
-	if err := get(tnet, 5*time.Second); err != nil {
-		t.Fatal(err)
-	}
-	e.waitPin(refA, e.b.pub(serialA))
-	fi, err := os.Stat(e.pinPath())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fi.Mode().Perm() != 0o600 {
-		t.Errorf("pin file mode %v, want 0600", fi.Mode().Perm())
-	}
-
-	m2 := NewManager(Options{Socket: e.socket + "2", StoreDir: e.store, TUN: e.f.make})
-	if err := m2.load(); err != nil {
-		t.Fatal(err)
-	}
-	if got := m2.tunnels[tunName].pins[refA]; got != e.b.pub(serialA) {
-		t.Fatalf("pin not loaded after restart")
-	}
-
-	if err := e.call(ipc.MethodTunnelRemove, ipc.TunnelName{Name: tunName}, nil); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(e.pinPath()); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("pin file still there after remove: %v", err)
-	}
-}
-
 // waitAgentRegistered waits until an agent of uid has registered.
 func (e *env) waitAgentRegistered(uid uint32) {
 	e.t.Helper()
@@ -1445,5 +1344,197 @@ func (e *env) waitAgentRegistered(uid uint32) {
 			e.t.Fatalf("no agent of uid %d registered", uid)
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// ---- configured identity keys and proof of possession (R21) ----
+
+// unbound asserts the tunnel was never bound by a failed connect.
+func (e *env) unbound() {
+	e.t.Helper()
+	e.m.mu.Lock()
+	defer e.m.mu.Unlock()
+	t := e.m.tunnels[tunName]
+	if t.hasRef || t.state != StateDisconnected || t.dev != nil {
+		e.t.Fatalf("tunnel touched by a failed connect: state %q hasRef %v uid %d", t.state, t.hasRef, t.uid)
+	}
+}
+
+func (e *env) addA(srv *server) {
+	e.t.Helper()
+	if err := e.m.add(tunName, e.config([]keyref.Ref{refA}, []string{"10.0.0.2"}, srv, "")); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+func TestFakeAgentWithWrongPublicKeyRefused(t *testing.T) {
+	e := newEnv(t, envOpts{present: []uint32{}, admin: onlyAdmin})
+	srv := newServer(t, e.b.pub(serialA), "10.0.0.2")
+	e.addA(srv)
+	fb := newFakeAgent(t, e, uidB, otherKey(t), serialA)
+	ctx := context.Background()
+
+	for _, uid := range []uint32{uidB, uidAdmin} {
+		_, err := e.m.requestConnect(ctx, uid, tunName)
+		assertCode(t, err, ipc.CodeForbidden)
+		if !strings.Contains(err.Error(), refA.String()) || !strings.Contains(err.Error(), "PublicKey") {
+			t.Errorf("uid %d: error %q does not name the KeyRef and the configured key", uid, err)
+		}
+		e.unbound()
+	}
+	if fb.publics.Load() != 2 || fb.x25519s.Load() != 0 {
+		t.Errorf("fake agent got %d key.public, %d x25519; want 2, 0", fb.publics.Load(), fb.x25519s.Load())
+	}
+	if n := e.f.count(); n != 0 {
+		t.Fatalf("%d devices made", n)
+	}
+}
+
+// The fake agent echoes the configured public key but cannot do the DH: the
+// proof fails, nothing is bound, and the real owner then connects.
+func TestFakeAgentEchoingRightPublicKeyFailsPoP(t *testing.T) {
+	e := newEnv(t, envOpts{present: []uint32{}, admin: onlyAdmin})
+	srv := newServer(t, e.b.pub(serialA), "10.0.0.2")
+	e.addA(srv)
+	fb := newLyingAgent(t, e, uidB, e.b.pub(serialA), otherKey(t), nil, serialA)
+	ctx := context.Background()
+
+	for _, uid := range []uint32{uidB, uidAdmin} {
+		_, err := e.m.requestConnect(ctx, uid, tunName)
+		assertCode(t, err, ipc.CodeForbidden)
+		if !strings.Contains(err.Error(), "prove") {
+			t.Errorf("uid %d: error %q is not the proof failure", uid, err)
+		}
+		e.unbound()
+	}
+	if fb.x25519s.Load() != 2 {
+		t.Errorf("fake agent got %d x25519 (the proofs), want 2", fb.x25519s.Load())
+	}
+	if n := e.f.count(); n != 0 {
+		t.Fatalf("%d devices made for an unproven agent", n)
+	}
+	// The DH it was asked for was never the server's key: an agent learns
+	// nothing that helps it pose as the server.
+	if n := e.b.callsFor(srv.pub); n != 0 {
+		t.Fatalf("server key used %d times", n)
+	}
+
+	e.b.setPresent(serialA, true)
+	e.waitAgentRegistered(uidA)
+	deadline := time.Now().Add(5 * time.Second)
+	for e.m.agentFor(serialA, uidA) == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("A's agent never reported the card")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if st := e.connect(); st.State != StateConnected {
+		t.Fatalf("owner connect: %+v", st)
+	}
+	if u := e.boundUID(); u != uidA {
+		t.Fatalf("bound to %d, want A", u)
+	}
+	tnet, _ := e.f.last()
+	if err := get(tnet, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A non-admin's failing connect never binds the tunnel, and one stalled in
+// its proof (a fake agent "waiting for a PIN") does not block the owner.
+func TestNonAdminCannotSquatTunnel(t *testing.T) {
+	e := newEnv(t, envOpts{present: []uint32{serialA}, admin: onlyAdmin})
+	srv := newServer(t, e.b.pub(serialA), "10.0.0.2")
+	e.addA(srv)
+	e.waitAgentRegistered(uidA)
+	gate := make(chan struct{})
+	fb := newLyingAgent(t, e, uidB, e.b.pub(serialA), otherKey(t), gate, serialA)
+
+	bDone := make(chan error, 1)
+	go func() {
+		_, err := e.m.requestConnect(context.Background(), uidB, tunName)
+		bDone <- err
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for fb.x25519s.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("B's proof never reached its agent")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if st := e.status(); st.State != StateDisconnected || st.Identity != "" {
+		t.Fatalf("status %+v while B is proving, want untouched", st)
+	}
+	// B cannot disconnect what it does not hold.
+	_, err := e.m.requestDisconnect(uidB, tunName)
+	assertCode(t, err, ipc.CodeForbidden)
+
+	// The owner connects while B is stalled.
+	if st := e.connect(); st.State != StateConnected {
+		t.Fatalf("owner connect during B's stalled proof: %+v", st)
+	}
+	close(gate)
+	select {
+	case err := <-bDone:
+		assertCode(t, err, ipc.CodeForbidden)
+	case <-time.After(5 * time.Second):
+		t.Fatal("B's connect did not return")
+	}
+	if u := e.boundUID(); u != uidA {
+		t.Fatalf("bound to %d, want A", u)
+	}
+	tnet, _ := e.f.last()
+	if err := get(tnet, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if n := e.f.count(); n != 1 {
+		t.Errorf("%d devices, want 1", n)
+	}
+}
+
+// An administrator's own agents come first across all identities, even when
+// an earlier identity is offered (truthfully) by another user's agent.
+func TestAdminTriesOwnAgentsAcrossAllIdentitiesFirst(t *testing.T) {
+	isA := func(uid uint32) bool { return uid == uidA }
+	e := newEnv(t, envOpts{present: []uint32{serialB}, clientAddr: []string{"10.0.0.3"}, admin: isA})
+	srv := newServer(t, e.b.pub(serialB), "10.0.0.3")
+	if err := e.m.add(tunName, e.config([]keyref.Ref{refA, refB}, []string{"10.0.0.2", "10.0.0.3"}, srv, "")); err != nil {
+		t.Fatal(err)
+	}
+	e.waitCard(serialB, true)
+	// B really holds card A (right key, can prove it).
+	fb := newFakeAgent(t, e, uidB, e.b.cards[serialA].key, serialA)
+
+	st := e.connect() // A is the admin
+	if st.Identity != refB.String() {
+		t.Fatalf("identity %q, want %s from the admin's own agent", st.Identity, refB)
+	}
+	if u := e.boundUID(); u != uidA {
+		t.Fatalf("bound to %d, want the admin's uid", u)
+	}
+	if n := fb.publics.Load() + fb.x25519s.Load(); n != 0 {
+		t.Fatalf("other user's agent was asked %d times", n)
+	}
+	tnet, _ := e.f.last()
+	if err := get(tnet, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+
+	// Without its own card the admin falls back to B's agent, which proves
+	// its key: identity A, bound to B.
+	if _, err := e.m.requestDisconnect(uidA, tunName); err != nil {
+		t.Fatal(err)
+	}
+	e.b.setPresent(serialB, false)
+	e.waitCard(serialB, false)
+	st, err := e.m.requestConnect(context.Background(), uidA, tunName)
+	if err != nil || st.Identity != refA.String() {
+		t.Fatalf("admin fallback: %+v %v, want identity %s", st, err, refA)
+	}
+	if u := e.boundUID(); u != uidB {
+		t.Fatalf("bound to %d, want B (whose agent proved the key)", u)
+	}
+	if fb.x25519s.Load() < 1 {
+		t.Fatal("B's agent did not get the proof")
 	}
 }
