@@ -99,3 +99,100 @@ const (
 	DaemonConnectFailedFmt = "could not bring the tunnel up: %v"
 	DaemonStoreFailedFmt   = "could not save the tunnel configuration: %v"
 )
+
+// Command line. None of these formats take a PIN, PUK or key; the ones that
+// show a public key say so in their name.
+const (
+	CLIUsage = `usage: latchwire <command> [arguments]
+
+commands:
+  devices                       list connected YubiKeys
+  keygen --serial N [--slot 82] [--force] [--address IP]
+                                generate an X25519 key on a YubiKey
+  pubkey <keyref>               print the public key of a key on a YubiKey
+  agent                         run the user agent (asks for the PIN)
+  daemon                        run the tunnel daemon (root)
+  add <name> <file>             add a tunnel configuration (administrator)
+  remove <name>                 remove a tunnel (administrator)
+  up <name>                     connect a tunnel
+  down <name>                   disconnect a tunnel
+  status [name]                 show tunnels`
+
+	CLIUnknownCommandFmt = "unknown command %q"
+	CLIUsageErrorFmt     = "usage: latchwire %s"
+	CLIErrorFmt          = "latchwire: %v"
+
+	CLIDaemonNotRunning = "the Latchwire daemon is not running (start it with: sudo latchwire daemon)"
+
+	// devices
+	DevicesNone      = "no YubiKey found"
+	DevicesHeaderFmt = "YubiKey %d"
+	DevicesFirmware  = "  Firmware:  %s"
+	DevicesSupported = "  Supported: %s"
+	DevicesReader    = "  Reader:    %s"
+	DevicesYes       = "yes"
+	DevicesNo        = "no (firmware 5.7.0 or later is needed for X25519)"
+
+	// keygen
+	KeygenSerialRequired    = "keygen needs --serial (see: latchwire devices)"
+	KeygenBadSlotFmt        = "invalid --slot %q: use a retired slot from 82 to 95 (hexadecimal)"
+	KeygenBadAddressFmt     = "invalid --address %q: use the tunnel IP address of this client, for example 10.8.0.2"
+	KeygenPINPromptFmt      = "PIN for YubiKey %d: "
+	KeygenPUKPrompt         = "Current PUK: "
+	KeygenNewPINPrompt      = "New PIN (6-8 characters): "
+	KeygenNewPINAgain       = "New PIN again: "
+	KeygenNewPUKPrompt      = "New PUK (6-8 characters): "
+	KeygenNewPUKAgain       = "New PUK again: "
+	KeygenSecretMismatch    = "the two entries differ, try again"
+	KeygenSecretRules       = "use 6 to 8 characters, try again"
+	KeygenSecretGaveUp      = "no valid new PIN or PUK was entered; nothing was changed on the YubiKey"
+	KeygenFreshRejected     = "the new PIN or PUK was not accepted: it must have 6 to 8 characters and differ from the factory values; nothing was changed on the YubiKey"
+	KeygenSlotOccupiedFmt   = "slot %02x on YubiKey %d already holds an X25519 key (PublicKey = %s)"
+	KeygenSlotOccupiedOther = "slot %02x on YubiKey %d already holds a key that Latchwire cannot use (%v)"
+	KeygenSlotOccupiedStop  = "nothing was changed; run again with --force to destroy that key and generate a new one"
+	KeygenWrongPINFmt       = "wrong PIN, %d attempts left; run the command again to retry"
+	KeygenDoneFmt           = "Generated an X25519 key on YubiKey %d, slot %02x. The private key never leaves the YubiKey."
+	KeygenKeyRefFmt         = "KeyRef: %s"
+	KeygenIdentityHeader    = "Add these lines to the tunnel configuration (in [Interface] or in an [Identity] section):"
+	KeygenIdentityLinesFmt  = "KeyRef = %s\nPublicKey = %s"
+	KeygenPeerHeader        = "Add this client as a peer on the server:"
+	KeygenPeerBlockFmt      = "[Peer]\nPublicKey = %s\nAllowedIPs = %s/%d"
+	KeygenTunnelIP          = "<tunnel IP>"
+	KeygenAddressHint       = "Replace <tunnel IP> with the tunnel address of this client, or pass --address next time."
+
+	// FreshCardExplain is shown when the YubiKey still has factory secrets.
+	FreshCardExplain = `This YubiKey still uses its factory management key, so it must be secured first.
+Without that, anyone who knows the factory settings could replace the key that
+is about to be created. Latchwire will:
+  1. change the PIN and the PUK to the new values you choose now (the PIN you
+     just entered is taken as the current PIN),
+  2. generate a random management key and store it on the YubiKey, protected by
+     your PIN (ykman shows this as "stored on the YubiKey, protected by PIN").
+Enter the current PUK, then choose a new PIN and a new PUK. The factory values
+are never tried automatically.`
+
+	// pubkey
+	PubkeyUsage = "pubkey <keyref>   (for example piv://40727512/82)"
+
+	// agent and daemon
+	DaemonMustBeRoot = "the daemon creates network interfaces and must run as root: use sudo latchwire daemon"
+	AgentStartedFmt  = "latchwire agent: using %s; press Ctrl-C to stop"
+	DaemonStartedFmt = "latchwire daemon: serving on %s"
+
+	// add and remove
+	AddReadFailedFmt = "cannot read %s: %v"
+	AddedFmt         = "tunnel %s added"
+	RemovedFmt       = "tunnel %s removed"
+
+	// up and down
+	UpWaitingFmt   = "connecting %s; if the YubiKey needs its PIN, enter it in the terminal where latchwire agent runs"
+	UpDoneFmt      = "tunnel %s is %s"
+	DownAlreadyFmt = "tunnel %s is already disconnected"
+	DownDoneFmt    = "tunnel %s disconnected"
+	StatusNone     = "no tunnels configured"
+	StatusHeader   = "NAME\tSTATE\tIDENTITY\tLAST HANDSHAKE"
+	StatusRowFmt   = "%s\t%s\t%s\t%s"
+	StatusDash     = "-"
+	// CLIUntrustedDaemonFmt takes the uid of the socket's owner process.
+	CLIUntrustedDaemonFmt = "refusing the service socket: it is served by uid %d, not by root or this user"
+)
