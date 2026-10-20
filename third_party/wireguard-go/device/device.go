@@ -51,6 +51,7 @@ type Device struct {
 		sync.RWMutex
 		key       StaticKey
 		publicKey NoisePublicKey
+		gen       uint64 // bumped by SetStaticKey; see RecomputeStaticStatic
 	}
 
 	peers struct {

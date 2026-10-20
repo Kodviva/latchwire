@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/tun/tuntest"
@@ -314,4 +315,155 @@ func TestRecomputeStaticStatic(t *testing.T) {
 	}
 	init, resp := fullHandshake(t, dev1, dev2, p12, p21)
 	assertKeypairsInteroperate(t, init, resp)
+}
+
+// gatedKey blocks every UseStaticStatic call (after announcing the peer on
+// entered) until release is closed. Other uses pass straight through.
+type gatedKey struct {
+	*countingKey
+	block   atomic.Bool
+	entered chan NoisePublicKey
+	release chan struct{}
+}
+
+func (k *gatedKey) SharedSecret(peer NoisePublicKey, use KeyUse) ([NoisePublicKeySize]byte, error) {
+	if use == UseStaticStatic && k.block.Load() {
+		k.entered <- peer
+		<-k.release
+	}
+	return k.countingKey.SharedSecret(peer, use)
+}
+
+// RecomputeStaticStatic must not call the key while holding device locks:
+// a slow token would otherwise stall every handshake, and, because
+// ConsumeMessageResponse takes handshake lock then staticIdentity lock, a
+// pending handshake writer could deadlock the whole device.
+func TestRecomputeStaticStaticDoesNotBlockHandshakes(t *testing.T) {
+	gk := &gatedKey{
+		countingKey: newCountingKey(t),
+		entered:     make(chan NoisePublicKey, 16),
+		release:     make(chan struct{}),
+	}
+	dev1 := newKeyDevice(t, gk)
+
+	type remote struct {
+		dev  *Device
+		peer *Peer // peer on dev1 for this remote
+		resp *MessageResponse
+	}
+	remotes := map[NoisePublicKey]*remote{}
+	for i := 0; i < 2; i++ {
+		d := randDevice(t)
+		defer d.Close()
+		p12, p21 := handshakePeers(t, dev1, d)
+		msg1, err := dev1.CreateMessageInitiation(p12)
+		assertNil(t, err)
+		if d.ConsumeMessageInitiation(msg1) == nil {
+			t.Fatal("initiation not consumed")
+		}
+		msg2, err := d.CreateMessageResponse(p21)
+		assertNil(t, err)
+		remotes[d.staticIdentity.publicKey] = &remote{dev: d, peer: p12, resp: msg2}
+	}
+
+	// A slow token: Recompute blocks inside the key for the first peer it visits.
+	gk.block.Store(true)
+	recomputed := make(chan int, 1)
+	go func() { recomputed <- dev1.RecomputeStaticStatic() }()
+
+	var blockedPK NoisePublicKey
+	select {
+	case blockedPK = <-gk.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RecomputeStaticStatic never called the key")
+	}
+	var other *remote
+	for pk, r := range remotes {
+		if pk != blockedPK {
+			other = r
+		}
+	}
+
+	// While the token is busy, the other peer's handshake response must go through.
+	consumed := make(chan *Peer, 1)
+	go func() { consumed <- dev1.ConsumeMessageResponse(other.resp) }()
+	select {
+	case p := <-consumed:
+		if p == nil {
+			t.Fatal("handshake response rejected")
+		}
+	case <-time.After(5 * time.Second):
+		close(gk.release)
+		t.Fatal("DEADLOCK/STALL: handshake blocked while RecomputeStaticStatic waits for the key")
+	}
+
+	// A handshake writer on the other peer while Recompute is still waiting.
+	expired := make(chan struct{})
+	go func() { other.peer.ExpireCurrentKeypairs(); close(expired) }()
+	select {
+	case <-expired:
+	case <-time.After(5 * time.Second):
+		close(gk.release)
+		t.Fatal("DEADLOCK/STALL: ExpireCurrentKeypairs blocked behind RecomputeStaticStatic")
+	}
+
+	close(gk.release)
+	select {
+	case n := <-recomputed:
+		if n != 0 {
+			t.Fatalf("RecomputeStaticStatic = %d, want 0", n)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("DEADLOCK: RecomputeStaticStatic never returned")
+	}
+	for pk, r := range remotes {
+		if r.peer.handshake.remoteStatic != pk || isZero(r.peer.handshake.precomputedStaticStatic[:]) {
+			t.Fatal("static-static secret not recomputed")
+		}
+	}
+}
+
+// A key change that lands while RecomputeStaticStatic waits for the old key
+// must not be overwritten with secrets from the old key.
+func TestRecomputeStaticStaticKeyChangedConcurrently(t *testing.T) {
+	gk := &gatedKey{
+		countingKey: newCountingKey(t),
+		entered:     make(chan NoisePublicKey, 16),
+		release:     make(chan struct{}),
+	}
+	dev1 := newKeyDevice(t, gk)
+	remote := randDevice(t)
+	defer remote.Close()
+	p, err := dev1.NewPeer(remote.staticIdentity.publicKey)
+	assertNil(t, err)
+
+	gk.block.Store(true)
+	done := make(chan int, 1)
+	go func() { done <- dev1.RecomputeStaticStatic() }()
+	select {
+	case <-gk.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RecomputeStaticStatic never called the key")
+	}
+
+	newKey := newCountingKey(t)
+	set := make(chan error, 1)
+	go func() { set <- dev1.SetStaticKey(newKey) }()
+	select {
+	case err := <-set:
+		assertNil(t, err)
+	case <-time.After(5 * time.Second):
+		close(gk.release)
+		t.Fatal("STALL: SetStaticKey blocked behind RecomputeStaticStatic")
+	}
+	want, err := newKey.inner.SharedSecret(remote.staticIdentity.publicKey, UseStaticStatic)
+	assertNil(t, err)
+
+	close(gk.release)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RecomputeStaticStatic never returned")
+	}
+	assertEqual(t, p.handshake.precomputedStaticStatic[:], want[:])
 }
