@@ -1,0 +1,1060 @@
+package daemon
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/binary"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"net/netip"
+	"os"
+	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"golang.zx2c4.com/wireguard/conn"
+	"golang.zx2c4.com/wireguard/device"
+	"golang.zx2c4.com/wireguard/tun"
+	"golang.zx2c4.com/wireguard/tun/netstack"
+
+	"github.com/Kodviva/latchwire/internal/agent"
+	"github.com/Kodviva/latchwire/internal/ipc"
+	"github.com/Kodviva/latchwire/internal/keyprovider"
+	"github.com/Kodviva/latchwire/internal/keyprovider/softkey"
+	"github.com/Kodviva/latchwire/internal/keyref"
+	"github.com/Kodviva/latchwire/internal/netcfg"
+)
+
+const (
+	serialA = 40727512
+	serialB = 40727513
+
+	testPIN  = "731905"
+	wrongPIN = "135799"
+
+	fastPoll = 50 * time.Millisecond
+	tunName  = "office"
+)
+
+var (
+	refA = keyref.Ref{Serial: serialA, Slot: 0x82}
+	refB = keyref.Ref{Serial: serialB, Slot: 0x82}
+
+	serverIP = netip.MustParseAddr("10.0.0.1")
+)
+
+func TestMain(m *testing.M) {
+	log.SetOutput(io.Discard) // the daemon and agent log every event
+	os.Exit(m.Run())
+}
+
+// ---- fake cards, behind a real agent.Agent ----
+
+type fakeCard struct {
+	key      *softkey.Key
+	verified bool
+}
+
+// fakeBackend is a softkey-backed agent.Backend. Every card needs the PIN
+// once after it is inserted; removing it forgets the verification.
+type fakeBackend struct {
+	mu      sync.Mutex
+	present map[uint32]bool
+	cards   map[uint32]*fakeCard
+	calls   map[[32]byte]int // X25519 calls by peer point
+}
+
+func newFakeBackend(t *testing.T, present ...uint32) *fakeBackend {
+	b := &fakeBackend{present: map[uint32]bool{}, cards: map[uint32]*fakeCard{}, calls: map[[32]byte]int{}}
+	for _, s := range []uint32{serialA, serialB} {
+		k, err := softkey.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.cards[s] = &fakeCard{key: k}
+	}
+	for _, s := range present {
+		b.present[s] = true
+	}
+	return b
+}
+
+func (b *fakeBackend) pub(serial uint32) [32]byte { return b.cards[serial].key.PublicKey() }
+
+func (b *fakeBackend) setPresent(serial uint32, on bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.present[serial] = on
+	if !on {
+		b.cards[serial].verified = false
+	}
+}
+
+// callsFor counts X25519 calls whose peer is in peers.
+func (b *fakeBackend) callsFor(peers ...[32]byte) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n := 0
+	for _, p := range peers {
+		n += b.calls[p]
+	}
+	return n
+}
+
+func (b *fakeBackend) Serials() ([]uint32, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var out []uint32
+	for s, on := range b.present {
+		if on {
+			out = append(out, s)
+		}
+	}
+	slices.Sort(out)
+	return out, nil
+}
+
+func (b *fakeBackend) Provider(ref keyref.Ref, prompt func(int) (string, error)) (keyprovider.Provider, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.present[ref.Serial] || ref.Slot != 0x82 {
+		return nil, keyprovider.ErrUnavailable
+	}
+	return &fakeProvider{b: b, serial: ref.Serial, prompt: prompt}, nil
+}
+
+type fakeProvider struct {
+	b      *fakeBackend
+	serial uint32
+	prompt func(int) (string, error)
+}
+
+func (p *fakeProvider) PublicKey() [32]byte { return p.b.pub(p.serial) }
+
+func (p *fakeProvider) Describe() keyprovider.Description {
+	return keyprovider.Description{Kind: "fake", Serial: p.serial, Slot: 0x82, Tier: keyprovider.Tier1}
+}
+
+func (p *fakeProvider) X25519(ctx context.Context, peer [32]byte) ([32]byte, error) {
+	b := p.b
+	b.mu.Lock()
+	c := b.cards[p.serial]
+	if !b.present[p.serial] {
+		b.mu.Unlock()
+		return [32]byte{}, keyprovider.ErrUnavailable
+	}
+	if !c.verified {
+		b.mu.Unlock()
+		pin, err := p.prompt(3)
+		if err != nil {
+			return [32]byte{}, fmt.Errorf("%w: %w", keyprovider.ErrPINRequired, err)
+		}
+		if pin != testPIN {
+			return [32]byte{}, &keyprovider.PINError{RetriesLeft: 2}
+		}
+		b.mu.Lock()
+		c.verified = true
+	}
+	b.calls[peer]++
+	b.mu.Unlock()
+	return c.key.X25519(ctx, peer)
+}
+
+type fakePrompter struct {
+	mu  sync.Mutex
+	pin string
+	n   int
+}
+
+func (p *fakePrompter) PIN(keyprovider.Description, int) (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.n++
+	return p.pin, nil
+}
+
+func (p *fakePrompter) Warn(string) {}
+
+func (p *fakePrompter) count() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.n
+}
+
+// ---- client TUN: netstack plus a recording Configurer ----
+
+type recCfg struct {
+	mu      sync.Mutex
+	iface   string
+	addrs   []netip.Prefix
+	routes  []netip.Prefix
+	applied bool
+	removed int
+}
+
+func (c *recCfg) Apply(iface string, addrs, routes []netip.Prefix) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.iface, c.addrs, c.routes, c.applied = iface, addrs, routes, true
+	return nil
+}
+
+func (c *recCfg) Remove() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.removed++
+	return nil
+}
+
+type netFactory struct {
+	addrs []netip.Addr
+
+	mu   sync.Mutex
+	nets []*netstack.Net
+	cfgs []*recCfg
+}
+
+func (f *netFactory) make(name string, mtu int) (tun.Device, netcfg.Configurer, error) {
+	tdev, tnet, err := netstack.CreateNetTUN(f.addrs, nil, mtu)
+	if err != nil {
+		return nil, nil, err
+	}
+	c := &recCfg{}
+	f.mu.Lock()
+	f.nets = append(f.nets, tnet)
+	f.cfgs = append(f.cfgs, c)
+	f.mu.Unlock()
+	return tdev, c, nil
+}
+
+func (f *netFactory) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.nets)
+}
+
+func (f *netFactory) last() (*netstack.Net, *recCfg) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.nets) == 0 {
+		return nil, nil
+	}
+	return f.nets[len(f.nets)-1], f.cfgs[len(f.cfgs)-1]
+}
+
+// ---- WireGuard server: stock device, software key, HTTP over netstack ----
+
+type server struct {
+	dev  *device.Device
+	pub  [32]byte
+	port int
+}
+
+func newServer(t *testing.T, clientPub [32]byte, clientAddr string) *server {
+	t.Helper()
+	// The server is a stock wireguard-go peer with an ordinary private key.
+	var priv [32]byte
+	if _, err := rand.Read(priv[:]); err != nil {
+		t.Fatal(err)
+	}
+	sk := softkey.FromPrivate(priv)
+
+	tdev, tnet, err := netstack.CreateNetTUN([]netip.Addr{serverIP}, nil, 1420)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dev := device.NewDevice(tdev, conn.NewDefaultBind(), device.NewLogger(device.LogLevelSilent, ""))
+	uapi := fmt.Sprintf("private_key=%s\nlisten_port=0\npublic_key=%s\nallowed_ip=%s/32\n",
+		hex.EncodeToString(priv[:]), hex.EncodeToString(clientPub[:]), clientAddr)
+	if err := dev.IpcSet(uapi); err != nil {
+		t.Fatal(err)
+	}
+	if err := dev.Up(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(dev.Close)
+
+	l, err := tnet.ListenTCP(&net.TCPAddr{Port: 80})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "ok")
+	})}
+	go srv.Serve(l)
+	t.Cleanup(func() { srv.Close() })
+
+	return &server{dev: dev, pub: sk.PublicKey(), port: uapiInt(t, dev, "listen_port")}
+}
+
+// uapiInt reads the first value of key from a device's UAPI dump.
+func uapiInt(t *testing.T, dev *device.Device, key string) int {
+	t.Helper()
+	s, err := dev.IpcGet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(s, "\n") {
+		if v, ok := strings.CutPrefix(line, key+"="); ok {
+			n, err := strconv.Atoi(v)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return n
+		}
+	}
+	t.Fatalf("%s not in UAPI dump", key)
+	return 0
+}
+
+// get fetches http://10.0.0.1/ through tnet.
+func get(tnet *netstack.Net, timeout time.Duration) error {
+	if tnet == nil {
+		return errors.New("no client network")
+	}
+	c := http.Client{Timeout: timeout, Transport: &http.Transport{DialContext: tnet.DialContext}}
+	resp, err := c.Get("http://" + serverIP.String() + "/")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || string(body) != "ok" {
+		return fmt.Errorf("status %d body %q", resp.StatusCode, body)
+	}
+	return nil
+}
+
+// ---- environment ----
+
+type env struct {
+	t       *testing.T
+	m       *Manager
+	socket  string
+	store   string
+	b       *fakeBackend
+	p       *fakePrompter
+	f       *netFactory
+	cli     *ipc.Conn
+	poll    time.Duration
+	isAdmin bool
+
+	agentMu     sync.Mutex
+	agentCancel context.CancelFunc
+	agentDone   chan struct{}
+}
+
+type envOpts struct {
+	present    []uint32
+	clientAddr []string // netstack addresses; default 10.0.0.2
+	notAdmin   bool
+	poll       time.Duration
+	pin        string
+	noAgent    bool
+	hook       func(m *Manager) // runs before Serve
+}
+
+func newEnv(t *testing.T, o envOpts) *env {
+	t.Helper()
+	if o.clientAddr == nil {
+		o.clientAddr = []string{"10.0.0.2"}
+	}
+	if o.poll == 0 {
+		o.poll = fastPoll
+	}
+	if o.pin == "" {
+		o.pin = testPIN
+	}
+	dir, err := os.MkdirTemp("", "lw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+
+	e := &env{t: t, socket: filepath.Join(dir, "s"), store: filepath.Join(dir, "tunnels"),
+		b: newFakeBackend(t, o.present...), p: &fakePrompter{pin: o.pin}, f: &netFactory{},
+		poll: o.poll, isAdmin: !o.notAdmin}
+	for _, a := range o.clientAddr {
+		e.f.addrs = append(e.f.addrs, netip.MustParseAddr(a))
+	}
+	e.m = NewManager(Options{
+		Socket:   e.socket,
+		StoreDir: e.store,
+		TUN:      e.f.make,
+		IsAdmin:  func(uint32) (bool, error) { return e.isAdmin, nil },
+	})
+	if o.hook != nil {
+		o.hook(e.m)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() { served <- e.m.Serve(ctx) }()
+	t.Cleanup(func() {
+		e.stopAgent()
+		cancel()
+		select {
+		case <-served:
+		case <-time.After(10 * time.Second):
+			t.Error("Serve did not return")
+		}
+	})
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c, err := ipc.Dial(e.socket)
+		if err == nil {
+			e.cli = c
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("daemon socket: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	go e.cli.Serve(context.Background())
+	t.Cleanup(func() { e.cli.Close() })
+
+	if !o.noAgent {
+		e.startAgent()
+	}
+	return e
+}
+
+func (e *env) startAgent() {
+	e.agentMu.Lock()
+	defer e.agentMu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	a := agent.New(e.socket, e.b, e.p, e.poll)
+	go func() { a.Run(ctx); close(done) }()
+	e.agentCancel, e.agentDone = cancel, done
+}
+
+func (e *env) stopAgent() {
+	e.agentMu.Lock()
+	defer e.agentMu.Unlock()
+	if e.agentCancel == nil {
+		return
+	}
+	e.agentCancel()
+	<-e.agentDone
+	e.agentCancel = nil
+}
+
+// waitCard waits until some registered agent reports serial.
+func (e *env) waitCard(serial uint32, want bool) {
+	e.t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for e.m.cardRegistered(serial) != want {
+		if time.Now().After(deadline) {
+			e.t.Fatalf("card %d registered=%v not reached", serial, want)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func (e *env) call(method string, params, result any) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return e.cli.Call(ctx, method, params, result)
+}
+
+func (e *env) add(cfg string) {
+	e.t.Helper()
+	if err := e.call(ipc.MethodTunnelAdd, ipc.TunnelAdd{Name: tunName, Config: cfg}, nil); err != nil {
+		e.t.Fatalf("tunnel.add: %v", err)
+	}
+}
+
+func (e *env) connect() ipc.TunnelStatus {
+	e.t.Helper()
+	var st ipc.TunnelStatus
+	if err := e.call(ipc.MethodTunnelConnect, ipc.TunnelName{Name: tunName}, &st); err != nil {
+		e.t.Fatalf("tunnel.connect: %v", err)
+	}
+	return st
+}
+
+func (e *env) status() ipc.TunnelStatus {
+	e.t.Helper()
+	var all []ipc.TunnelStatus
+	if err := e.call(ipc.MethodTunnelStatus, nil, &all); err != nil {
+		e.t.Fatalf("tunnel.status: %v", err)
+	}
+	for _, s := range all {
+		if s.Name == tunName {
+			return s
+		}
+	}
+	e.t.Fatalf("tunnel %s not in status %+v", tunName, all)
+	return ipc.TunnelStatus{}
+}
+
+// waitState polls the status until it is state and returns the time taken.
+func (e *env) waitState(state string, timeout time.Duration) time.Duration {
+	e.t.Helper()
+	start := time.Now()
+	for {
+		st := e.status()
+		if st.State == state {
+			return time.Since(start)
+		}
+		if time.Since(start) > timeout {
+			e.t.Fatalf("state %q not reached in %v (now %q)", state, timeout, st.State)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// clientDev returns the tunnel's live device (white box).
+func (e *env) clientDev() *device.Device {
+	e.t.Helper()
+	e.m.mu.Lock()
+	defer e.m.mu.Unlock()
+	t := e.m.tunnels[tunName]
+	if t == nil || t.dev == nil {
+		e.t.Fatal("tunnel has no device")
+	}
+	return t.dev
+}
+
+func clientConfig(ids []keyref.Ref, addrs []string, srv *server, endpoint string) string {
+	var b strings.Builder
+	b.WriteString("[Interface]\nMTU = 1420\n")
+	for i, r := range ids {
+		fmt.Fprintf(&b, "[Identity]\nKeyRef = %s\nAddress = %s/32\n", r, addrs[i])
+	}
+	if endpoint == "" {
+		endpoint = fmt.Sprintf("127.0.0.1:%d", srv.port)
+	}
+	fmt.Fprintf(&b, "[Peer]\nPublicKey = %s\nEndpoint = %s\nAllowedIPs = %s/32\n",
+		base64.StdEncoding.EncodeToString(srv.pub[:]), endpoint, serverIP)
+	return b.String()
+}
+
+// connected sets up a server for card A and a connected tunnel.
+func connected(t *testing.T, o envOpts) (*env, *server) {
+	t.Helper()
+	if o.present == nil {
+		o.present = []uint32{serialA}
+	}
+	e := newEnv(t, o)
+	srv := newServer(t, e.b.pub(serialA), "10.0.0.2")
+	e.add(clientConfig([]keyref.Ref{refA}, []string{"10.0.0.2"}, srv, ""))
+	e.waitCard(serialA, true)
+	if st := e.connect(); st.State != StateConnected {
+		t.Fatalf("connect state %q, want connected", st.State)
+	}
+	return e, srv
+}
+
+// ---- tests from the brief ----
+
+func TestConnectHTTPOverTunnel(t *testing.T) {
+	e, _ := connected(t, envOpts{})
+	tnet, cfg := e.f.last()
+	if err := get(tnet, 5*time.Second); err != nil {
+		t.Fatalf("GET over tunnel: %v", err)
+	}
+	st := e.status()
+	if st.State != StateConnected || st.Identity != refA.String() {
+		t.Fatalf("status %+v, want connected with %s", st, refA)
+	}
+	if st.LastHandshake == "" {
+		t.Error("status has no last handshake after traffic")
+	}
+	cfg.mu.Lock()
+	defer cfg.mu.Unlock()
+	if !cfg.applied || !slices.Equal(cfg.addrs, []netip.Prefix{netip.MustParsePrefix("10.0.0.2/32")}) ||
+		!slices.Equal(cfg.routes, []netip.Prefix{netip.MustParsePrefix("10.0.0.1/32")}) {
+		t.Fatalf("Configurer.Apply got addrs %v routes %v", cfg.addrs, cfg.routes)
+	}
+	if n := e.p.count(); n != 1 {
+		t.Errorf("PIN asked %d times, want 1 (warm-up at connect)", n)
+	}
+}
+
+func TestCardRemovalTearsDownWithin2s(t *testing.T) {
+	// Production poll interval: the 2 s budget includes the agent's poll.
+	e, _ := connected(t, envOpts{poll: time.Second})
+	tnet, cfg := e.f.last()
+	if err := get(tnet, 5*time.Second); err != nil {
+		t.Fatalf("GET before removal: %v", err)
+	}
+	start := time.Now()
+	e.b.setPresent(serialA, false)
+	e.waitState(StateCardRemoved, 3*time.Second)
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("teardown took %v, want <= 2s", d)
+	}
+	if err := get(tnet, time.Second); err == nil {
+		t.Fatal("GET succeeded after the card was removed")
+	}
+	cfg.mu.Lock()
+	removed := cfg.removed
+	cfg.mu.Unlock()
+	if removed != 1 {
+		t.Errorf("Configurer.Remove called %d times, want 1", removed)
+	}
+}
+
+func TestCardReinsertReconnects(t *testing.T) {
+	e, _ := connected(t, envOpts{})
+	e.b.setPresent(serialA, false)
+	e.waitState(StateCardRemoved, 3*time.Second)
+	e.b.setPresent(serialA, true)
+	e.waitState(StateConnected, 5*time.Second)
+	if n := e.f.count(); n != 2 {
+		t.Fatalf("%d TUN devices made, want 2 (reconnect builds a new device)", n)
+	}
+	tnet, _ := e.f.last()
+	if err := get(tnet, 5*time.Second); err != nil {
+		t.Fatalf("GET after reinsert: %v", err)
+	}
+	if n := e.p.count(); n != 2 {
+		t.Errorf("PIN asked %d times, want 2 (once per insertion)", n)
+	}
+}
+
+func TestAgentDisconnectFailsHandshakeCleanly(t *testing.T) {
+	e, srv := connected(t, envOpts{})
+	tnet, _ := e.f.last()
+	if err := get(tnet, 5*time.Second); err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	e.stopAgent()
+	e.waitCard(serialA, false)
+
+	// Force a fresh handshake from the client: its UseInitiator DH must go
+	// to the (gone) agent and fail.
+	peer := e.clientDev().LookupPeer(device.NoisePublicKey(srv.pub))
+	if peer == nil {
+		t.Fatal("client has no server peer")
+	}
+	peer.ExpireCurrentKeypairs()
+	if err := get(tnet, 2*time.Second); err == nil {
+		t.Fatal("GET succeeded without an agent")
+	}
+
+	// The daemon is still serving and the tunnel is still configured.
+	if st := e.status(); st.State != StateConnected {
+		t.Fatalf("state %q after agent loss, want connected (handshakes fail until it returns)", st.State)
+	}
+
+	// The agent comes back: handshakes work again on the same device.
+	e.startAgent()
+	e.waitCard(serialA, true)
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		err := get(tnet, time.Second)
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no recovery after the agent returned: %v", err)
+		}
+	}
+	if n := e.f.count(); n != 1 {
+		t.Errorf("%d devices made, want 1", n)
+	}
+}
+
+func TestInitiationFloodDoesNotStarveHandshake(t *testing.T) {
+	e, srv := connected(t, envOpts{})
+	tnet, _ := e.f.last()
+	if err := get(tnet, 5*time.Second); err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	clientPub := e.b.pub(serialA)
+	port := uapiInt(t, e.clientDev(), "listen_port")
+
+	udp, err := net.DialUDP("udp", nil, net.UDPAddrFromAddrPort(netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(port))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer udp.Close()
+
+	// Initiations with random content and a valid mac1 for the client's
+	// public key: each one makes the client do UseResponder DH with the
+	// (random) ephemeral before anything can be authenticated.
+	var gen device.CookieGenerator
+	gen.Init(device.NoisePublicKey(clientPub))
+	var (
+		mu    sync.Mutex
+		ephs  [][32]byte
+		sent  int
+		stop  = make(chan struct{})
+		flood = make(chan struct{})
+	)
+	const rate = 200
+	start := time.Now()
+	go func() {
+		defer close(flood)
+		// Paced by the clock rather than by ticks, so a slow scheduler (race
+		// detector) still sends rate packets per second on average.
+		tick := time.NewTicker(time.Second / rate)
+		defer tick.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-tick.C:
+			}
+			due := int(time.Since(start).Seconds() * rate)
+			mu.Lock()
+			behind := due - sent
+			mu.Unlock()
+			for ; behind > 0; behind-- {
+				pkt := make([]byte, device.MessageInitiationSize)
+				binary.LittleEndian.PutUint32(pkt, device.MessageInitiationType)
+				rand.Read(pkt[4:116])
+				gen.AddMacs(pkt)
+				var eph [32]byte
+				copy(eph[:], pkt[8:40])
+				mu.Lock()
+				ephs = append(ephs, eph)
+				sent++
+				mu.Unlock()
+				udp.Write(pkt)
+			}
+		}
+	}()
+
+	time.Sleep(time.Second)
+	// Our own handshake, started in the middle of the flood.
+	peer := e.clientDev().LookupPeer(device.NoisePublicKey(srv.pub))
+	peer.ExpireCurrentKeypairs()
+	hsStart := time.Now()
+	if err := get(tnet, 5*time.Second); err != nil {
+		t.Fatalf("own handshake during flood: %v", err)
+	}
+	hs := time.Since(hsStart)
+	time.Sleep(2 * time.Second)
+	close(stop)
+	<-flood
+	floodDur := time.Since(start)
+	time.Sleep(500 * time.Millisecond) // let in-flight calls land
+
+	mu.Lock()
+	n := e.b.callsFor(ephs...)
+	total := sent
+	mu.Unlock()
+	achieved := float64(total) / floodDur.Seconds()
+	limit := 10 + int(5*(floodDur+500*time.Millisecond).Seconds()) + 1
+	t.Logf("flood: %d initiations in %v (%.0f/s); responder card calls %d (limit %d); own handshake %v",
+		total, floodDur.Round(time.Millisecond), achieved, n, limit, hs.Round(time.Millisecond))
+	if achieved < 150 {
+		t.Errorf("flood rate %.0f/s, want about %d/s", achieved, rate)
+	}
+	if n < 5 {
+		t.Fatalf("only %d flood initiations reached the card: the flood is not exercising the responder path", n)
+	}
+	if n > limit {
+		t.Fatalf("%d responder card calls, limit %d (5/s + burst 10)", n, limit)
+	}
+	if hs > 5*time.Second {
+		t.Fatalf("own handshake took %v under flood, want <= 5s", hs)
+	}
+}
+
+func TestNonAdminCannotAddTunnel(t *testing.T) {
+	e := newEnv(t, envOpts{present: []uint32{serialA}, notAdmin: true, noAgent: true})
+	cfg := clientConfig([]keyref.Ref{refA}, []string{"10.0.0.2"}, &server{port: 51820}, "")
+	err := e.call(ipc.MethodTunnelAdd, ipc.TunnelAdd{Name: tunName, Config: cfg}, nil)
+	assertCode(t, err, ipc.CodeForbidden)
+	assertCode(t, e.call(ipc.MethodTunnelRemove, ipc.TunnelName{Name: tunName}, nil), ipc.CodeForbidden)
+	// Neither an admin nor an agent's user yet.
+	assertCode(t, e.call(ipc.MethodTunnelStatus, nil, nil), ipc.CodeForbidden)
+	assertCode(t, e.call(ipc.MethodTunnelConnect, ipc.TunnelName{Name: tunName}, nil), ipc.CodeForbidden)
+
+	e.startAgent()
+	e.waitCard(serialA, true)
+	var all []ipc.TunnelStatus
+	if err := e.call(ipc.MethodTunnelStatus, nil, &all); err != nil {
+		t.Fatalf("status as the agent's user: %v", err)
+	}
+	err = e.call(ipc.MethodTunnelAdd, ipc.TunnelAdd{Name: tunName, Config: cfg}, nil)
+	assertCode(t, err, ipc.CodeForbidden)
+}
+
+func TestSelectsFirstPresentIdentity(t *testing.T) {
+	e := newEnv(t, envOpts{present: []uint32{serialB}, clientAddr: []string{"10.0.0.3"}})
+	srv := newServer(t, e.b.pub(serialB), "10.0.0.3")
+	e.add(clientConfig([]keyref.Ref{refA, refB}, []string{"10.0.0.2", "10.0.0.3"}, srv, ""))
+	e.waitCard(serialB, true)
+	st := e.connect()
+	if st.Identity != refB.String() {
+		t.Fatalf("identity %q, want %s", st.Identity, refB)
+	}
+	tnet, cfg := e.f.last()
+	if err := get(tnet, 5*time.Second); err != nil {
+		t.Fatalf("GET with the second identity: %v", err)
+	}
+	cfg.mu.Lock()
+	defer cfg.mu.Unlock()
+	if !slices.Equal(cfg.addrs, []netip.Prefix{netip.MustParsePrefix("10.0.0.3/32")}) {
+		t.Fatalf("addresses %v, want the second identity's", cfg.addrs)
+	}
+}
+
+// ---- rulings and extra coverage ----
+
+// R7: SetStaticKey exactly once per device, before Up, never on a live
+// device; a reconnect builds a new device. UAPI never sets a private key.
+func TestStaticKeySetOnceBeforeUp(t *testing.T) {
+	var (
+		mu  sync.Mutex
+		ops = map[*device.Device][]string{}
+		seq []*device.Device
+	)
+	rec := func(d *device.Device, op string) {
+		mu.Lock()
+		defer mu.Unlock()
+		if _, ok := ops[d]; !ok {
+			seq = append(seq, d)
+		}
+		ops[d] = append(ops[d], op)
+	}
+	hook := func(m *Manager) {
+		real := m.ops
+		m.ops.setStaticKey = func(d *device.Device, k device.StaticKey) error {
+			rec(d, "setStaticKey")
+			return real.setStaticKey(d, k)
+		}
+		m.ops.ipcSet = func(d *device.Device, s string) error {
+			if strings.Contains(s, "private_key") {
+				rec(d, "private_key!")
+			}
+			rec(d, "ipcSet")
+			return real.ipcSet(d, s)
+		}
+		m.ops.up = func(d *device.Device) error {
+			rec(d, "up")
+			return real.up(d)
+		}
+	}
+	e, _ := connected(t, envOpts{hook: hook})
+	tnet, _ := e.f.last()
+	if err := get(tnet, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	// pin_ready on the live device must recompute, not set the key.
+	e.m.pinReady(serialA, uint32(os.Getuid()))
+	e.b.setPresent(serialA, false)
+	e.waitState(StateCardRemoved, 3*time.Second)
+	e.b.setPresent(serialA, true)
+	e.waitState(StateConnected, 5*time.Second)
+	tnet, _ = e.f.last()
+	if err := get(tnet, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seq) != 2 {
+		t.Fatalf("%d devices, want 2", len(seq))
+	}
+	for i, d := range seq {
+		if got := ops[d]; !slices.Equal(got, []string{"setStaticKey", "ipcSet", "up"}) {
+			t.Errorf("device %d ops %v, want [setStaticKey ipcSet up]", i, got)
+		}
+	}
+}
+
+// R17: the PIN is asked by a warm-up X25519 before any device exists, and
+// agent error codes reach the caller.
+func TestWarmUpBeforeDeviceAndWrongPIN(t *testing.T) {
+	e := newEnv(t, envOpts{present: []uint32{serialA}, pin: wrongPIN})
+	srv := newServer(t, e.b.pub(serialA), "10.0.0.2")
+	e.add(clientConfig([]keyref.Ref{refA}, []string{"10.0.0.2"}, srv, ""))
+	e.waitCard(serialA, true)
+	err := e.call(ipc.MethodTunnelConnect, ipc.TunnelName{Name: tunName}, nil)
+	assertCode(t, err, ipc.CodeWrongPIN)
+	if !strings.Contains(err.Error(), "2 attempts left") {
+		t.Errorf("error %q does not carry the retries left", err)
+	}
+	if n := e.f.count(); n != 0 {
+		t.Fatalf("%d TUN devices made after a failed warm-up, want 0", n)
+	}
+	if st := e.status(); st.State != StateError {
+		t.Fatalf("state %q, want error", st.State)
+	}
+
+	// The right PIN then connects; the warm-up used the first peer's key.
+	e.p.mu.Lock()
+	e.p.pin = testPIN
+	e.p.mu.Unlock()
+	if st := e.connect(); st.State != StateConnected {
+		t.Fatalf("state %q", st.State)
+	}
+	// warm-up + static-static precompute when the peer is added
+	if n := e.b.callsFor(srv.pub); n != 2 {
+		t.Errorf("%d DH calls against the server key, want 2 (warm-up, precompute)", n)
+	}
+}
+
+func TestPinReadyRecomputesStaticStatic(t *testing.T) {
+	e, srv := connected(t, envOpts{})
+	before := e.b.callsFor(srv.pub)
+	// Only the agent's own user may trigger it for its card.
+	e.m.pinReady(serialA, uint32(os.Getuid())+1)
+	time.Sleep(100 * time.Millisecond)
+	if n := e.b.callsFor(srv.pub); n != before {
+		t.Fatalf("pin_ready from another uid recomputed (%d -> %d calls)", before, n)
+	}
+	e.m.pinReady(serialA, uint32(os.Getuid()))
+	deadline := time.Now().Add(3 * time.Second)
+	for e.b.callsFor(srv.pub) != before+1 {
+		if time.Now().After(deadline) {
+			t.Fatalf("pin_ready did not recompute static-static (%d calls, want %d)", e.b.callsFor(srv.pub), before+1)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// R11: endpoint hostnames are resolved at every connect.
+func TestEndpointHostnameResolvedAtConnect(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		lookups []string
+		fail    bool
+	)
+	hook := func(m *Manager) {
+		m.resolve = func(ctx context.Context, host string) ([]netip.Addr, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			lookups = append(lookups, host)
+			if fail {
+				return nil, errors.New("no such host")
+			}
+			return []netip.Addr{netip.MustParseAddr("::1"), netip.MustParseAddr("127.0.0.1")}, nil
+		}
+	}
+	e := newEnv(t, envOpts{present: []uint32{serialA}, hook: hook})
+	srv := newServer(t, e.b.pub(serialA), "10.0.0.2")
+	e.add(clientConfig([]keyref.Ref{refA}, []string{"10.0.0.2"}, srv, fmt.Sprintf("vpn.example.test:%d", srv.port)))
+	e.waitCard(serialA, true)
+	e.connect()
+	tnet, _ := e.f.last()
+	if err := get(tnet, 5*time.Second); err != nil {
+		t.Fatalf("GET via resolved endpoint: %v", err)
+	}
+	e.b.setPresent(serialA, false)
+	e.waitState(StateCardRemoved, 3*time.Second)
+	e.b.setPresent(serialA, true)
+	e.waitState(StateConnected, 5*time.Second)
+	mu.Lock()
+	n := len(lookups)
+	fail = true
+	mu.Unlock()
+	if n != 2 || lookups[0] != "vpn.example.test" {
+		t.Fatalf("lookups %q, want vpn.example.test twice (once per connect)", lookups)
+	}
+
+	if err := e.call(ipc.MethodTunnelDisconnect, ipc.TunnelName{Name: tunName}, nil); err != nil {
+		t.Fatal(err)
+	}
+	err := e.call(ipc.MethodTunnelConnect, ipc.TunnelName{Name: tunName}, nil)
+	assertCode(t, err, ipc.CodeUnavailable)
+	if !strings.Contains(err.Error(), "vpn.example.test") {
+		t.Errorf("error %q does not name the host", err)
+	}
+	if n := e.f.count(); n != 2 {
+		t.Errorf("%d devices, want no new device after a failed lookup", n)
+	}
+}
+
+func TestStorePersistsTunnels(t *testing.T) {
+	e := newEnv(t, envOpts{noAgent: true})
+	cfg := clientConfig([]keyref.Ref{refA}, []string{"10.0.0.2"}, &server{port: 51820}, "")
+	e.add(cfg)
+	assertCode(t, e.call(ipc.MethodTunnelAdd, ipc.TunnelAdd{Name: tunName, Config: cfg}, nil), ipc.CodeBadRequest)
+	assertCode(t, e.call(ipc.MethodTunnelAdd, ipc.TunnelAdd{Name: "../x", Config: cfg}, nil), ipc.CodeBadRequest)
+	assertCode(t, e.call(ipc.MethodTunnelAdd, ipc.TunnelAdd{Name: "y", Config: "PrivateKey = abc"}, nil), ipc.CodeBadRequest)
+
+	fi, err := os.Stat(filepath.Join(e.store, tunName+".conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Errorf("config mode %v, want 0600", fi.Mode().Perm())
+	}
+	if di, _ := os.Stat(e.store); di.Mode().Perm() != 0o700 {
+		t.Errorf("store mode %v, want 0700", di.Mode().Perm())
+	}
+
+	m2 := NewManager(Options{Socket: e.socket + "2", StoreDir: e.store, TUN: e.f.make})
+	if err := m2.load(); err != nil {
+		t.Fatal(err)
+	}
+	if m2.tunnels[tunName] == nil {
+		t.Fatal("tunnel not loaded from the store")
+	}
+
+	if err := e.call(ipc.MethodTunnelRemove, ipc.TunnelName{Name: tunName}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(e.store, tunName+".conf")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("config still on disk after remove: %v", err)
+	}
+	assertCode(t, e.call(ipc.MethodTunnelConnect, ipc.TunnelName{Name: tunName}, nil), ipc.CodeNotFound)
+}
+
+func TestConnectWithoutCard(t *testing.T) {
+	e := newEnv(t, envOpts{present: []uint32{serialB}})
+	cfg := clientConfig([]keyref.Ref{refA}, []string{"10.0.0.2"}, &server{port: 51820}, "")
+	e.add(cfg)
+	e.waitCard(serialB, true)
+	assertCode(t, e.call(ipc.MethodTunnelConnect, ipc.TunnelName{Name: tunName}, nil), ipc.CodeUnavailable)
+	if n := e.f.count(); n != 0 {
+		t.Fatalf("%d devices made without a card", n)
+	}
+}
+
+func TestRemoteKeyErrorMapping(t *testing.T) {
+	cases := []struct {
+		in   error
+		want error
+	}{
+		{&ipc.Error{Code: ipc.CodePINBlocked, Message: "x"}, keyprovider.ErrPINBlocked},
+		{&ipc.Error{Code: ipc.CodePINRequired, Message: "x"}, keyprovider.ErrPINRequired},
+		{&ipc.Error{Code: ipc.CodeLowOrderPoint, Message: "x"}, keyprovider.ErrLowOrderPoint},
+		{&ipc.Error{Code: ipc.CodeUnavailable, Message: "x"}, keyprovider.ErrUnavailable},
+		{&ipc.Error{Code: ipc.CodeBadRequest, Message: "x"}, keyprovider.ErrUnavailable},
+		{&ipc.Error{Code: "something_new", Message: "x"}, keyprovider.ErrUnavailable},
+		{ipc.ErrClosed, keyprovider.ErrUnavailable},
+		{context.DeadlineExceeded, context.DeadlineExceeded},
+	}
+	for _, c := range cases {
+		if got := mapKeyErr(c.in); !errors.Is(got, c.want) {
+			t.Errorf("mapKeyErr(%v) = %v, want %v", c.in, got, c.want)
+		}
+	}
+	got := mapKeyErr(&ipc.Error{Code: ipc.CodeWrongPIN, Message: "wrong PIN, 1 attempts left"})
+	var pe *keyprovider.PINError
+	if !errors.As(got, &pe) || pe.RetriesLeft != 1 {
+		t.Errorf("wrong_pin mapped to %v, want *PINError{1}", got)
+	}
+	var ie *ipc.Error
+	if !errors.As(got, &ie) || ie.Code != ipc.CodeWrongPIN {
+		t.Errorf("mapped error lost the agent's ipc.Error: %v", got)
+	}
+}
+
+func assertCode(t *testing.T, err error, code string) {
+	t.Helper()
+	var ie *ipc.Error
+	if !errors.As(err, &ie) || ie.Code != code {
+		t.Fatalf("error %v, want code %q", err, code)
+	}
+}
