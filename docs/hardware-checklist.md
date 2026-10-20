@@ -107,9 +107,14 @@ LATCHWIRE_HW_PIN=<pin> go test -tags hardware ./internal/keyprovider/piv/ -run H
 - [ ] While the tunnel is up, run `ykman piv info`. It works, and Latchwire
       keeps working afterwards (the agent may ask for the PIN again if another
       program reset the verification; entering it restores the tunnel).
+- [ ] Verify who else can reach the card while it is PIN-verified: from a
+      second local user account (or an SSH session as another user) run
+      `ykman list` and `ykman piv info`. Record whether the card is visible;
+      update docs/threat-model.md if macOS does not restrict it.
 - [ ] Note for the threat model: after the PIN was entered, any process that
-      can reach the card (always the same user; on Linux, depending on the
-      pcscd/polkit configuration, possibly any local user) can use the
+      can reach the card (on macOS expected to be only the console user —
+      verify below; on Linux, depending on the pcscd/polkit configuration,
+      possibly any local user) can use the
       PIN-verified card until it is removed or reset, 9a included. For slot 9a
       prefer PIN policy `always`.
 

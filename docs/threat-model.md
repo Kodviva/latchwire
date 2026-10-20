@@ -127,7 +127,9 @@ Latchwire.
 card depends on the operating system's PC/SC access policy, which Latchwire
 does not change:
 
-- **macOS** restricts smart-card access to the console user's session.
+- **macOS** is expected to restrict smart-card access to the console user's
+  session. This has not been verified for Latchwire; check it on your system
+  (see the hardware checklist).
 - **Linux** depends on how `pcscd` is built and configured. With polkit, the
   `org.debian.pcsc-lite.access_pcsc` and `org.debian.pcsc-lite.access_card`
   actions decide, and their defaults differ between distributions; some allow
