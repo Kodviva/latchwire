@@ -354,6 +354,11 @@ in `internal/daemon/manager.go` (`build`).
   reads it back before replacing the factory key; and sets the flag that makes
   `ykman` report "Management key is stored on the YubiKey, protected by PIN",
   so you are never asked for a 24-byte key and `ykman` keeps working.
+- **A custom management key is asked for, never guessed.** If the card has a
+  management key that is neither the factory key nor stored under the PIN,
+  `latchwire keygen` asks for it on the terminal (no echo, hexadecimal, 16, 24
+  or 32 bytes), tries it once, and clears the decoded key afterwards. It is
+  never stored or printed.
 - **Errors after a change say what is already active.** If anything fails after
   the PIN has been changed, the error says that the PIN (and, if applicable,
   the PUK) now has the new value.

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -75,6 +76,21 @@ func cmdKeygen(_ context.Context, e *env, args []string) error {
 			return errors.New(msg.KeygenFreshRejected)
 		}
 	}
+	if errors.Is(err, piv.ErrManagementKeyRequired) {
+		// A custom management key that is not stored under the PIN (spec
+		// §5.4): ask for it once and try once more with it.
+		mk, aerr := askManagementKey(e)
+		if aerr != nil {
+			return aerr
+		}
+		opts.ManagementKey = mk
+		ref, pub, err = card.Generate(opts)
+		clear(mk)
+		opts.ManagementKey = nil
+		if errors.Is(err, piv.ErrManagementKeyRequired) {
+			return errors.New(msg.KeygenManagementKeyRejected)
+		}
+	}
 	if err != nil {
 		return keygenFailure(e, card, uint32(*serial), slot, err)
 	}
@@ -113,6 +129,30 @@ func askFreshCardSecrets(e *env, o *piv.GenerateOptions) error {
 	}
 	o.CurrentPUK, o.NewPIN, o.NewPUK = puk, newPIN, newPUK
 	return nil
+}
+
+// askManagementKey reads a management key in hexadecimal, without echo, and
+// returns it decoded; the caller clears it. Only AES-128, 3DES/AES-192 and
+// AES-256 lengths (16, 24, 32 bytes) are accepted. The error never contains
+// the input.
+func askManagementKey(e *env) ([]byte, error) {
+	s, err := e.readSecret(msg.KeygenManagementKeyPrompt)
+	if err != nil {
+		return nil, err
+	}
+	src := []byte(strings.TrimSpace(s))
+	defer clear(src)
+	switch len(src) {
+	case 32, 48, 64:
+	default:
+		return nil, errors.New(msg.KeygenBadManagementKey)
+	}
+	mk := make([]byte, len(src)/2)
+	if _, err := hex.Decode(mk, src); err != nil {
+		clear(mk)
+		return nil, errors.New(msg.KeygenBadManagementKey)
+	}
+	return mk, nil
 }
 
 func askNewSecret(e *env, first, again string) (string, error) {
