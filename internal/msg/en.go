@@ -51,4 +51,20 @@ const (
 	PIVUnsupportedPolicy       = "the key in this slot does not use PIN policy \"once\" and touch policy \"never\"; Latchwire only uses such keys"
 	PIVEmptyPIN                = "no PIN was entered"
 	PIVUnexpectedPublicKey     = "the YubiKey returned an unexpected public key type"
+
+	// User-session agent. None of these formats take a PIN or key material.
+	LastPINRetry = "warning: only one PIN attempt is left; a wrong PIN now blocks the PIV PIN and only the PUK can unblock it"
+	// AgentPINPromptFmt takes the serial, the slot and the retries left.
+	AgentPINPromptFmt = "Latchwire: PIN for YubiKey %d slot %02x (%d attempts left): "
+	// AgentWrongPINFmt takes the retries left.
+	AgentWrongPINFmt     = "wrong PIN, %d attempts left"
+	AgentPINBlocked      = "the YubiKey PIN is blocked; unblock it with the PUK (for example: ykman piv access unblock-pin)"
+	AgentPINRequired     = "the YubiKey PIN is needed but was not entered"
+	AgentCardUnavailable = "the YubiKey is not available (was it removed?)"
+	AgentBadPeer         = "peer must be the base64 encoding of a 32-byte X25519 public key"
+	AgentBadRequest      = "malformed request"
+	AgentLowOrderPeer    = "the peer public key is a low-order point"
+	AgentNoTTY           = "no terminal is available to ask for the PIN"
+	// AgentUntrustedDaemonFmt takes the uid of the socket's owner process.
+	AgentUntrustedDaemonFmt = "refusing the service socket: it is served by uid %d, not by root or this user"
 )

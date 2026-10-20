@@ -23,6 +23,14 @@ const (
 	CodeNotFound    = "not_found"
 	CodeInternal    = "internal"
 	CodeUnavailable = "unavailable"
+
+	// Codes the agent returns for key.public and key.x25519, so the daemon
+	// can tell PIN problems from a missing card.
+	CodeBadRequest    = "bad_request"     // malformed ref or peer
+	CodeWrongPIN      = "wrong_pin"       // keyprovider.PINError
+	CodePINBlocked    = "pin_blocked"     // keyprovider.ErrPINBlocked
+	CodePINRequired   = "pin_required"    // keyprovider.ErrPINRequired (not entered, cancelled)
+	CodeLowOrderPoint = "low_order_point" // keyprovider.ErrLowOrderPoint
 )
 
 // Event types for AgentEvent.Type.
