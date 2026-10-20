@@ -384,23 +384,33 @@ device, when the card is back (and you enter the PIN again).
 
 Limitations:
 
-- **A card removed while no agent is running is not noticed** until an agent
-  of that user registers with the daemon again. The daemon cannot see the card
-  itself.
-- **When the agent exits, the tunnel is not torn down.** The tunnel stays in
-  state `connected`; the daemon can no longer get card operations, so no new
-  handshake can succeed. The current session keeps working until WireGuard's
-  own expiry (at most 180 seconds from the session's creation), after which
-  traffic stops. When the agent returns it is used again. If it reports the
-  card missing, the tunnel is taken down then.
+- **When the agent exits, the tunnel is torn down after a 10-second grace
+  period.** Without an agent, nobody watches the card, so the daemon does not
+  let the session outlive it. For 10 seconds after the agent's connection
+  closes the tunnel stays up, so that restarting the agent does not cost a
+  reconnect; during that time no new handshake can succeed (the daemon has
+  nobody to ask for card operations), but the current session keeps carrying
+  traffic. If no agent of the same user reports the tunnel's card by then, the
+  daemon tears the tunnel down to state `card_removed` exactly as for a removed
+  card (device closed first, then routes). An agent that comes back later and
+  reports the card reconnects the tunnel; no PIN is asked if the card is still
+  PIN-verified. An agent that comes back reporting the card missing takes the
+  tunnel down at once.
+- **A card removed while no agent is running is noticed late**: at the latest
+  when the grace period ends (the tunnel is torn down then), or earlier if an
+  agent of that user registers again without the card. The daemon cannot see
+  the card itself, so a card pulled within the grace period leaves the current
+  session usable for up to those 10 seconds.
 - **Sleep and power loss.** If the card loses power, its PIN verification is
   lost and the PIN is asked again on the next use.
 
 Where this is enforced: `internal/agent/agent.go` (`session`, poll interval),
 `cmd/latchwire/main.go` (`agentPoll`), `internal/daemon/manager.go`
 (`agentRegister`, `reconcile`, `dropAgent`, `closeDevice`, `teardown`). Tests:
-`TestCardRemovalTearsDownWithin2s`, `TestAgentDisconnectFailsHandshakeCleanly`
-in `internal/daemon/manager_test.go`.
+`TestCardRemovalTearsDownWithin2s`, `TestAgentGoneFailsHandshakeDuringGrace`,
+`TestAgentExitTearsDownAfterGrace`, `TestAgentRestartWithinGraceKeepsTunnel`
+in `internal/daemon/manager_test.go` (`agentGrace` in `manager.go` is the
+10-second constant).
 
 ## 11. Verification you can do
 

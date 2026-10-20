@@ -6,7 +6,9 @@
 // the user whose card holds the key. When that agent reports the card
 // removed, the device is closed; when the card comes back, the tunnel is
 // rebuilt from scratch with a new device (SetStaticKey is only ever called
-// once per device, before Up).
+// once per device, before Up). When the agent itself goes away, its user's
+// tunnels are torn down the same way after agentGrace unless an agent of
+// that user reports the card again.
 package daemon
 
 import (
@@ -54,6 +56,12 @@ const (
 const (
 	defaultMTU     = 1420
 	resolveTimeout = 10 * time.Second
+
+	// agentGrace is how long a user's tunnels stay up after that user's
+	// agent connection closes. An agent restarted within it keeps them; after
+	// it, every tunnel of that user whose card no agent reports is torn down
+	// to card_removed (spec §5.5).
+	agentGrace = 10 * time.Second
 )
 
 // TUNFactory creates the TUN device for a tunnel and the Configurer for its
@@ -107,6 +115,8 @@ type Manager struct {
 	isAdmin func(uint32) (bool, error)
 	resolve func(ctx context.Context, host string) ([]netip.Addr, error)
 	ops     devOps
+	// agentGrace is the agentGrace constant; tests shorten it.
+	agentGrace time.Duration
 
 	mu      sync.Mutex
 	ctx     context.Context // Serve's ctx; tunnel lifetimes derive from it
@@ -161,15 +171,16 @@ func newTunnel(name string, cfg *config.Tunnel) *tunnel {
 // NewManager returns a manager; it does nothing until Serve.
 func NewManager(o Options) *Manager {
 	m := &Manager{
-		socket:  o.Socket,
-		store:   &store{dir: o.StoreDir},
-		tun:     o.TUN,
-		bind:    o.Bind,
-		isAdmin: o.IsAdmin,
-		ops:     defaultOps,
-		ctx:     context.Background(),
-		tunnels: map[string]*tunnel{},
-		agents:  map[*ipc.Conn]*agentState{},
+		socket:     o.Socket,
+		store:      &store{dir: o.StoreDir},
+		tun:        o.TUN,
+		bind:       o.Bind,
+		isAdmin:    o.IsAdmin,
+		ops:        defaultOps,
+		agentGrace: agentGrace,
+		ctx:        context.Background(),
+		tunnels:    map[string]*tunnel{},
+		agents:     map[*ipc.Conn]*agentState{},
 		resolve: func(ctx context.Context, host string) ([]netip.Addr, error) {
 			return net.DefaultResolver.LookupNetIP(ctx, "ip", host)
 		},
@@ -590,16 +601,23 @@ func (m *Manager) agentEvent(c *ipc.Conn, uid uint32, ev ipc.AgentEvent) {
 	}
 }
 
-// dropAgent forgets a closed agent connection. Its tunnels stay up: their
-// handshakes fail until an agent of the same user reports the card again.
+// dropAgent forgets a closed agent connection. The user's tunnels stay up
+// for agentGrace, so an agent restart does not cost a reconnect; meanwhile
+// their handshakes fail, since no agent serves the key. After the grace,
+// every tunnel of that user whose card no registered agent of the user
+// reports is torn down to card_removed: without an agent nobody watches the
+// card, so the session must not outlive it (spec §5.5). A later agent that
+// reports the card reconnects the tunnel.
 func (m *Manager) dropAgent(c *ipc.Conn) {
 	m.mu.Lock()
 	a := m.agents[c]
 	delete(m.agents, c)
 	m.mu.Unlock()
-	if a != nil && a.seq != 0 {
-		log.Printf("daemon: agent of uid %d disconnected", a.uid)
+	if a == nil || a.seq == 0 {
+		return
 	}
+	log.Printf("daemon: agent of uid %d disconnected", a.uid)
+	time.AfterFunc(m.agentGrace, func() { m.reconcile(a.uid) })
 }
 
 // uses reports whether t runs (or is getting) its key from serial of uid.
