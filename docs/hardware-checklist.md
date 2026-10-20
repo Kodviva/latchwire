@@ -93,6 +93,12 @@ LATCHWIRE_HW_PIN=<pin> go test -tags hardware ./internal/keyprovider/piv/ -run H
       `latchwire up` works afterwards.
 - [ ] Unplug and replug the other YubiKey (not used by the tunnel); the tunnel
       is not affected.
+- [ ] With the tunnel up, stop the agent (Ctrl-C) and start it again within a
+      few seconds: the tunnel stays `connected` and no PIN is asked.
+- [ ] With the tunnel up, stop the agent and wait: about 10 seconds later
+      `latchwire status` shows `card_removed` and traffic stops. Start the
+      agent again: the tunnel returns to `connected` (no PIN if the card was
+      not unplugged meanwhile).
 
 ## 7. Sharing the card with other programs
 
@@ -101,12 +107,17 @@ LATCHWIRE_HW_PIN=<pin> go test -tags hardware ./internal/keyprovider/piv/ -run H
 - [ ] While the tunnel is up, run `ykman piv info`. It works, and Latchwire
       keeps working afterwards (the agent may ask for the PIN again if another
       program reset the verification; entering it restores the tunnel).
-- [ ] Note for the threat model: after the PIN was entered, any process of the
-      same user can use the PIN-verified card until it is removed or reset, 9a
-      included. For slot 9a prefer PIN policy `always`.
+- [ ] Note for the threat model: after the PIN was entered, any process that
+      can reach the card (always the same user; on Linux, depending on the
+      pcscd/polkit configuration, possibly any local user) can use the
+      PIN-verified card until it is removed or reset, 9a included. For slot 9a
+      prefer PIN policy `always`.
 
 ## 8. Clean up
 
 - [ ] `sudo latchwire remove office`; stop the daemon with Ctrl-C and check
-      that no `utun`/`latchwire-*` interface and no route is left.
+      that no tunnel interface and no route is left. On Linux the interface
+      has the tunnel's name (`office`; `ip link show office` must fail); on
+      macOS it is a `utunN` (compare `ifconfig -l` with the list from before
+      the test: no extra `utun` may remain).
 - [ ] Remove the test peer from the server.
