@@ -10,11 +10,13 @@
 package daemon
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"net"
 	"net/netip"
 	"runtime"
@@ -49,6 +51,8 @@ const (
 const (
 	defaultMTU     = 1420
 	resolveTimeout = 10 * time.Second
+	// pinPoll is how often a new device is checked for its first handshake.
+	pinPoll = 200 * time.Millisecond
 )
 
 // TUNFactory creates the TUN device for a tunnel and the Configurer for its
@@ -83,12 +87,14 @@ type devOps struct {
 	setStaticKey func(*device.Device, device.StaticKey) error
 	ipcSet       func(*device.Device, string) error
 	up           func(*device.Device) error
+	close        func(*device.Device)
 }
 
 var defaultOps = devOps{
 	setStaticKey: (*device.Device).SetStaticKey,
 	ipcSet:       (*device.Device).IpcSet,
 	up:           (*device.Device).Up,
+	close:        (*device.Device).Close,
 }
 
 // Manager runs tunnels. Create it with NewManager and run Serve.
@@ -139,6 +145,7 @@ type tunnel struct {
 	dev    *device.Device
 	cfgr   netcfg.Configurer
 	devGen uint64
+	pins   map[keyref.Ref][32]byte
 }
 
 // NewManager returns a manager; it does nothing until Serve.
@@ -184,7 +191,12 @@ func (m *Manager) load() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for name, cfg := range ts {
-		m.tunnels[name] = &tunnel{name: name, cfg: cfg, state: StateDisconnected}
+		pins, err := m.store.loadPins(name)
+		if err != nil {
+			// Unreadable pins: the next handshake pins again (TOFU).
+			log.Printf("daemon: tunnel %s: pins: %v", name, err)
+		}
+		m.tunnels[name] = &tunnel{name: name, cfg: cfg, state: StateDisconnected, pins: pins}
 	}
 	return nil
 }
@@ -259,6 +271,8 @@ var (
 	errNotFound   = &ipc.Error{Code: ipc.CodeNotFound, Message: msg.DaemonTunnelNotFound}
 	errNoCard     = &ipc.Error{Code: ipc.CodeUnavailable, Message: msg.DaemonNoCard}
 	errAborted    = &ipc.Error{Code: ipc.CodeUnavailable, Message: msg.DaemonConnectAborted}
+	errNotYours   = &ipc.Error{Code: ipc.CodeForbidden, Message: msg.DaemonNotYourTunnel}
+	errAsOwner    = &ipc.Error{Code: ipc.CodeForbidden, Message: msg.DaemonConnectAsOwner}
 )
 
 func decode(params json.RawMessage, v any) error {
@@ -280,18 +294,46 @@ func (m *Manager) admin(uid uint32) bool {
 	return ok
 }
 
-// user reports whether uid may connect, disconnect and see status: an
-// administrator or the user of a registered agent.
+// user reports whether uid may see status: an administrator or the user of
+// a registered agent.
 func (m *Manager) user(uid uint32) bool {
+	return m.agentUser(uid) || m.admin(uid)
+}
+
+// agentUser reports whether an agent of uid is registered.
+func (m *Manager) agentUser(uid uint32) bool {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	for _, a := range m.agents {
 		if a.seq != 0 && a.uid == uid {
-			m.mu.Unlock()
 			return true
 		}
 	}
-	m.mu.Unlock()
-	return m.admin(uid)
+	return false
+}
+
+// requestConnect is tunnel.connect from uid (R19). An administrator may use
+// another user's agent only when its key matches the tunnel's pinned key; a
+// non-administrator only ever uses its own agent and may not take over a
+// tunnel bound to another user.
+func (m *Manager) requestConnect(ctx context.Context, uid uint32, name string) (ipc.TunnelStatus, error) {
+	admin := m.admin(uid)
+	if !admin && !m.agentUser(uid) {
+		return ipc.TunnelStatus{}, errForbidden
+	}
+	return m.connect(ctx, name, uid, admin, "")
+}
+
+// requestDisconnect is tunnel.disconnect from uid. A non-administrator may
+// only disconnect a tunnel bound to its own uid.
+func (m *Manager) requestDisconnect(uid uint32, name string) (ipc.TunnelStatus, error) {
+	if m.admin(uid) {
+		return m.disconnect(name, nil)
+	}
+	if !m.agentUser(uid) {
+		return ipc.TunnelStatus{}, errForbidden
+	}
+	return m.disconnect(name, func(t *tunnel) bool { return t.boundTo(uid) })
 }
 
 func (m *Manager) handle(c *ipc.Conn) {
@@ -332,24 +374,18 @@ func (m *Manager) handle(c *ipc.Conn) {
 		return nil, m.remove(p.Name)
 	})
 	c.Handle(ipc.MethodTunnelConnect, func(ctx context.Context, uid uint32, params json.RawMessage) (any, error) {
-		if !m.user(uid) {
-			return nil, errForbidden
-		}
 		var p ipc.TunnelName
 		if err := decode(params, &p); err != nil {
 			return nil, err
 		}
-		return m.connect(ctx, p.Name, &uid, "")
+		return m.requestConnect(ctx, uid, p.Name)
 	})
 	c.Handle(ipc.MethodTunnelDisconnect, func(_ context.Context, uid uint32, params json.RawMessage) (any, error) {
-		if !m.user(uid) {
-			return nil, errForbidden
-		}
 		var p ipc.TunnelName
 		if err := decode(params, &p); err != nil {
 			return nil, err
 		}
-		return m.disconnect(p.Name)
+		return m.requestDisconnect(uid, p.Name)
 	})
 	c.Handle(ipc.MethodTunnelStatus, func(_ context.Context, uid uint32, params json.RawMessage) (any, error) {
 		if !m.user(uid) {
@@ -379,6 +415,10 @@ func (m *Manager) add(name, text string) error {
 	if m.tunnels[name] != nil {
 		return &ipc.Error{Code: ipc.CodeBadRequest, Message: msg.DaemonTunnelExists}
 	}
+	if err := m.store.removePins(name); err != nil {
+		log.Printf("daemon: store %s: %v", name, err)
+		return &ipc.Error{Code: ipc.CodeInternal, Message: fmt.Sprintf(msg.DaemonStoreFailedFmt, err)}
+	}
 	if err := m.store.save(name, text); err != nil {
 		log.Printf("daemon: store %s: %v", name, err)
 		return &ipc.Error{Code: ipc.CodeInternal, Message: fmt.Sprintf(msg.DaemonStoreFailedFmt, err)}
@@ -405,14 +445,18 @@ func (m *Manager) remove(name string) error {
 	return nil
 }
 
-func (m *Manager) disconnect(name string) (ipc.TunnelStatus, error) {
+// disconnect takes the tunnel down if cond (checked under Manager.mu, nil:
+// always) holds, else fails with forbidden.
+func (m *Manager) disconnect(name string, cond func(*tunnel) bool) (ipc.TunnelStatus, error) {
 	m.mu.Lock()
 	t := m.tunnels[name]
 	m.mu.Unlock()
 	if t == nil {
 		return ipc.TunnelStatus{}, errNotFound
 	}
-	m.teardown(t, StateDisconnected, nil)
+	if !m.teardown(t, StateDisconnected, cond) {
+		return ipc.TunnelStatus{}, errNotYours
+	}
 	return m.status(t), nil
 }
 
@@ -500,12 +544,7 @@ func (m *Manager) agentRegister(c *ipc.Conn, uid uint32, serials []uint32) {
 	for _, s := range serials {
 		a.serials[s] = true
 	}
-	var removed, inserted []uint32
-	for s := range old {
-		if !a.serials[s] {
-			removed = append(removed, s)
-		}
-	}
+	var inserted []uint32
 	for s := range a.serials {
 		if !old[s] {
 			inserted = append(inserted, s)
@@ -513,9 +552,9 @@ func (m *Manager) agentRegister(c *ipc.Conn, uid uint32, serials []uint32) {
 	}
 	m.mu.Unlock()
 	log.Printf("daemon: agent of uid %d registered with %d card(s)", uid, len(serials))
-	for _, s := range removed {
-		m.cardRemoved(s, uid)
-	}
+	// A card pulled while this user's agent was away is noticed here: the
+	// new connection has no earlier list to diff against (R20).
+	m.reconcile(uid)
 	for _, s := range inserted {
 		m.cardInserted(s, uid)
 	}
@@ -538,7 +577,7 @@ func (m *Manager) agentEvent(c *ipc.Conn, uid uint32, ev ipc.AgentEvent) {
 	case ipc.EventCardRemoved:
 		delete(a.serials, ev.Serial)
 		m.mu.Unlock()
-		m.cardRemoved(ev.Serial, uid)
+		m.reconcile(uid)
 	case ipc.EventPINReady:
 		present := a.serials[ev.Serial]
 		m.mu.Unlock()
@@ -567,14 +606,24 @@ func (t *tunnel) uses(serial, uid uint32) bool {
 	return t.hasRef && t.ref.Serial == serial && t.uid == uid
 }
 
-// cardRemoved takes down every tunnel using that card.
-func (m *Manager) cardRemoved(serial, uid uint32) {
-	cond := func(t *tunnel) bool {
-		return t.uses(serial, uid) && (t.state == StateConnected || t.state == StateConnecting)
+// bound reports whether t is tied to the agent user t.uid: it is up, coming
+// up, or waiting for that user's card to come back.
+func (t *tunnel) bound() bool {
+	return t.hasRef && (t.state == StateConnecting || t.state == StateConnected || t.state == StateCardRemoved)
+}
+
+func (t *tunnel) boundTo(uid uint32) bool { return t.bound() && t.uid == uid }
+
+// reconcile takes down every tunnel of uid whose card no registered agent of
+// uid reports any more.
+func (m *Manager) reconcile(uid uint32) {
+	cond := func(t *tunnel) bool { // under Manager.mu
+		return t.hasRef && t.uid == uid && (t.state == StateConnected || t.state == StateConnecting) &&
+			m.agentForLocked(t.ref.Serial, uid) == nil
 	}
 	for _, t := range m.matching(cond) {
 		if m.teardown(t, StateCardRemoved, cond) {
-			log.Printf("daemon: tunnel %s: YubiKey %d removed, tunnel down", t.name, serial)
+			log.Printf("daemon: tunnel %s: YubiKey %d removed, tunnel down", t.name, t.ref.Serial)
 		}
 	}
 }
@@ -583,7 +632,7 @@ func (m *Manager) cardRemoved(serial, uid uint32) {
 func (m *Manager) cardInserted(serial, uid uint32) {
 	for _, t := range m.matching(func(t *tunnel) bool { return t.state == StateCardRemoved && t.uses(serial, uid) }) {
 		go func() {
-			if _, err := m.connect(context.Background(), t.name, &uid, StateCardRemoved); err != nil {
+			if _, err := m.connect(context.Background(), t.name, uid, false, StateCardRemoved); err != nil {
 				log.Printf("daemon: tunnel %s: reconnect: %v", t.name, err)
 			}
 		}()
@@ -654,31 +703,59 @@ func (m *Manager) agentForLocked(serial, uid uint32) *ipc.Conn {
 	return best
 }
 
-// pickIdentityLocked returns the first identity whose card some agent
-// reports, served by an agent of prefer if there is one, else by the
-// earliest registered agent.
-func (m *Manager) pickIdentityLocked(cfg *config.Tunnel, prefer *uint32) (config.Identity, uint32, bool) {
-	for _, id := range cfg.Identities {
-		var best *agentState
-		for _, a := range m.agents {
-			if a.seq == 0 || !a.serials[id.Ref.Serial] {
-				continue
-			}
-			if best == nil {
-				best = a
-				continue
-			}
-			ap := prefer != nil && a.uid == *prefer
-			bp := prefer != nil && best.uid == *prefer
-			if ap && !bp || ap == bp && a.seq < best.seq {
-				best = a
-			}
+// uidsWithSerialLocked returns the users, other than except, whose agents
+// report serial, earliest registration first.
+func (m *Manager) uidsWithSerialLocked(serial, except uint32) []uint32 {
+	first := map[uint32]uint64{}
+	for _, a := range m.agents {
+		if a.seq == 0 || a.uid == except || !a.serials[serial] {
+			continue
 		}
-		if best != nil {
-			return id, best.uid, true
+		if s, ok := first[a.uid]; !ok || a.seq < s {
+			first[a.uid] = a.seq
 		}
 	}
-	return config.Identity{}, 0, false
+	uids := make([]uint32, 0, len(first))
+	for u := range first {
+		uids = append(uids, u)
+	}
+	slices.SortFunc(uids, func(x, y uint32) int { return cmp.Compare(first[x], first[y]) })
+	return uids
+}
+
+// pick is the identity chosen for a connect and the users whose agents may
+// serve it, in order of preference.
+type pick struct {
+	id   config.Identity
+	uids []uint32
+}
+
+// pickLocked chooses the tunnel's first identity whose card an agent of uid
+// reports. Only an administrator may fall back to other users' agents, and
+// only for an identity with a pinned key, which build then checks (R19).
+func (m *Manager) pickLocked(t *tunnel, uid uint32, admin bool) (pick, error) {
+	ownerNeeded := false
+	for _, id := range t.cfg.Identities {
+		if m.agentForLocked(id.Ref.Serial, uid) != nil {
+			return pick{id: id, uids: []uint32{uid}}, nil
+		}
+		if !admin {
+			continue
+		}
+		others := m.uidsWithSerialLocked(id.Ref.Serial, uid)
+		if len(others) == 0 {
+			continue
+		}
+		if _, pinned := t.pins[id.Ref]; !pinned {
+			ownerNeeded = true
+			continue
+		}
+		return pick{id: id, uids: others}, nil
+	}
+	if ownerNeeded {
+		return pick{}, errAsOwner
+	}
+	return pick{}, errNoCard
 }
 
 // ---- connect and teardown ----
@@ -686,27 +763,37 @@ func (m *Manager) pickIdentityLocked(cfg *config.Tunnel, prefer *uint32) (config
 // connect brings tunnel name up. caller, if not nil, is the requester's
 // context: the attempt is abandoned when it ends. A non-empty onlyFrom makes
 // connect a no-op unless the tunnel is in that state (automatic reconnect).
-func (m *Manager) connect(caller context.Context, name string, prefer *uint32, onlyFrom string) (ipc.TunnelStatus, error) {
+func (m *Manager) connect(caller context.Context, name string, uid uint32, admin bool, onlyFrom string) (ipc.TunnelStatus, error) {
 	m.mu.Lock()
 	t := m.tunnels[name]
 	if t == nil {
 		m.mu.Unlock()
 		return ipc.TunnelStatus{}, errNotFound
 	}
-	if onlyFrom != "" && t.state != onlyFrom || t.state == StateConnecting || t.state == StateConnected {
+	if onlyFrom != "" && t.state != onlyFrom {
+		m.mu.Unlock()
+		return m.status(t), nil
+	}
+	if !admin && t.bound() && t.uid != uid {
+		m.mu.Unlock()
+		return ipc.TunnelStatus{}, errNotYours
+	}
+	if t.state == StateConnecting || t.state == StateConnected {
 		m.mu.Unlock()
 		return m.status(t), nil
 	}
 	t.gen++
 	gen := t.gen
-	id, uid, ok := m.pickIdentityLocked(t.cfg, prefer)
-	if !ok {
+	p, err := m.pickLocked(t, uid, admin)
+	if err != nil {
 		t.state, t.hasRef = StateError, false
 		m.mu.Unlock()
-		return ipc.TunnelStatus{}, errNoCard
+		return ipc.TunnelStatus{}, err
 	}
+	id := p.id
+	pin, pinned := t.pins[id.Ref]
 	t.state = StateConnecting
-	t.ref, t.hasRef, t.uid = id.Ref, true, uid
+	t.ref, t.hasRef, t.uid = id.Ref, true, p.uids[0]
 	life, cancelLife := context.WithCancel(m.ctx)
 	attempt, cancelAttempt := context.WithCancel(life)
 	t.cancel = cancelLife
@@ -722,7 +809,7 @@ func (m *Manager) connect(caller context.Context, name string, prefer *uint32, o
 	defer t.op.Unlock()
 	m.reap(t)
 
-	dev, cfgr, err := m.build(attempt, life, cfg, id, uid)
+	dev, cfgr, pub, err := m.build(attempt, life, t, gen, cfg, p, pin, pinned)
 	m.mu.Lock()
 	if t.gen != gen {
 		err = errAborted // disconnected, removed or card removed meanwhile
@@ -731,6 +818,9 @@ func (m *Manager) connect(caller context.Context, name string, prefer *uint32, o
 		t.dev, t.cfgr, t.devGen = dev, cfgr, gen
 		t.state = StateConnected
 		m.mu.Unlock()
+		if !pinned {
+			go m.pinAfterHandshake(t, life, id.Ref, pub, dev)
+		}
 		log.Printf("daemon: tunnel %s connected with %s", name, id.Ref)
 		return m.status(t), nil
 	}
@@ -740,39 +830,38 @@ func (m *Manager) connect(caller context.Context, name string, prefer *uint32, o
 	m.mu.Unlock()
 	cancelLife()
 	if dev != nil {
-		closeDevice(name, dev, cfgr)
+		m.closeDevice(dev, cfgr)
 	}
 	log.Printf("daemon: tunnel %s: connect: %v", name, err)
 	return ipc.TunnelStatus{}, userErr(err)
 }
 
 // build makes the device for one connect attempt: resolve endpoints, get
-// the public key, warm up the card (the PIN is asked here, not inside a
-// 3 s handshake), then NewDevice, SetStaticKey (once, before Up), IpcSet,
-// addresses and routes, Up. life bounds the key's calls for the device's
-// whole lifetime; attempt only this connect.
-func (m *Manager) build(attempt, life context.Context, cfg *config.Tunnel, id config.Identity, uid uint32) (*device.Device, netcfg.Configurer, error) {
+// and check the public key, warm up the card (the PIN is asked here, not
+// inside a 3 s handshake), then NewDevice, SetStaticKey (once, before Up),
+// IpcSet, addresses and routes, Up. life bounds the key's calls for the
+// device's whole lifetime; attempt only this connect. It returns the
+// identity public key in use.
+func (m *Manager) build(attempt, life context.Context, t *tunnel, gen uint64, cfg *config.Tunnel, p pick, pin [32]byte, pinned bool) (*device.Device, netcfg.Configurer, [32]byte, error) {
+	var none [32]byte
+	id := p.id
 	var routes []netip.Prefix
-	for _, p := range cfg.Peers {
-		routes = append(routes, p.AllowedIPs...)
+	for _, peer := range cfg.Peers {
+		routes = append(routes, peer.AllowedIPs...)
 	}
 	for _, r := range routes {
 		if r.Bits() == 0 {
-			return nil, nil, netcfg.ErrFullTunnelUnsupported
+			return nil, nil, none, netcfg.ErrFullTunnelUnsupported
 		}
 	}
 	rt, err := m.resolveTunnel(attempt, cfg)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, none, err
 	}
 
-	c := m.agentFor(id.Ref.Serial, uid)
-	if c == nil {
-		return nil, nil, errNoCard
-	}
-	pub, err := fetchPublic(attempt, c, id.Ref)
+	pub, uid, err := m.selectKey(attempt, t, gen, id.Ref, p.uids, pin, pinned)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, none, err
 	}
 	key := &remoteKey{ref: id.Ref, pub: pub, uid: uid, find: m.agentFor, life: life}
 	if len(rt.Peers) > 0 {
@@ -781,11 +870,11 @@ func (m *Manager) build(attempt, life context.Context, cfg *config.Tunnel, id co
 		cancel()
 		clear(ss[:])
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, none, err
 		}
 	}
 	if err := attempt.Err(); err != nil {
-		return nil, nil, err
+		return nil, nil, none, err
 	}
 
 	mtu := cfg.MTU
@@ -794,17 +883,17 @@ func (m *Manager) build(attempt, life context.Context, cfg *config.Tunnel, id co
 	}
 	tdev, cfgr, err := m.tun(cfg.Name, mtu)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, none, err
 	}
 	iface, err := tdev.Name()
 	if err != nil {
 		tdev.Close()
-		return nil, nil, err
+		return nil, nil, none, err
 	}
 	dev := device.NewDevice(tdev, m.bind(), device.NewLogger(device.LogLevelError, fmt.Sprintf("latchwire(%s): ", cfg.Name)))
-	fail := func(err error) (*device.Device, netcfg.Configurer, error) {
-		closeDevice(cfg.Name, dev, cfgr)
-		return nil, nil, err
+	fail := func(err error) (*device.Device, netcfg.Configurer, [32]byte, error) {
+		m.closeDevice(dev, cfgr)
+		return nil, nil, none, err
 	}
 	if err := m.ops.setStaticKey(dev, wgadapter.New(key, wgadapter.DefaultLimits)); err != nil {
 		return fail(err)
@@ -818,7 +907,71 @@ func (m *Manager) build(attempt, life context.Context, cfg *config.Tunnel, id co
 	if err := m.ops.up(dev); err != nil {
 		return fail(err)
 	}
-	return dev, cfgr, nil
+	return dev, cfgr, pub, nil
+}
+
+// selectKey asks the agents of uids, in order, for ref's public key and
+// takes the first one that matches the pin (any, when nothing is pinned).
+// The tunnel is then bound to that agent's user.
+func (m *Manager) selectKey(ctx context.Context, t *tunnel, gen uint64, ref keyref.Ref, uids []uint32, pin [32]byte, pinned bool) ([32]byte, uint32, error) {
+	var lastErr error = errNoCard
+	for _, uid := range uids {
+		c := m.agentFor(ref.Serial, uid)
+		if c == nil {
+			continue
+		}
+		pub, err := fetchPublic(ctx, c, ref)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if pinned && pub != pin {
+			log.Printf("daemon: tunnel %s: agent of uid %d offered another key for %s", t.name, uid, ref)
+			lastErr = &ipc.Error{Code: ipc.CodeForbidden, Message: fmt.Sprintf(msg.DaemonKeyMismatchFmt, ref)}
+			continue
+		}
+		m.mu.Lock()
+		if t.gen == gen {
+			t.uid = uid
+		}
+		m.mu.Unlock()
+		return pub, uid, nil
+	}
+	return [32]byte{}, 0, lastErr
+}
+
+// pinAfterHandshake records pub as the identity key of ref once the device
+// completes a handshake: the server accepted the key, so a later agent
+// offering another key for ref is refused (TOFU, R19).
+func (m *Manager) pinAfterHandshake(t *tunnel, life context.Context, ref keyref.Ref, pub [32]byte, dev *device.Device) {
+	tick := time.NewTicker(pinPoll)
+	defer tick.Stop()
+	for lastHandshake(dev) == "" {
+		select {
+		case <-life.Done():
+			return
+		case <-tick.C:
+		}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.tunnels[t.name] != t { // removed meanwhile
+		return
+	}
+	if _, ok := t.pins[ref]; ok {
+		return
+	}
+	pins := maps.Clone(t.pins)
+	if pins == nil {
+		pins = map[keyref.Ref][32]byte{}
+	}
+	pins[ref] = pub
+	if err := m.store.savePins(t.name, pins); err != nil {
+		log.Printf("daemon: tunnel %s: saving pin: %v", t.name, err)
+		return
+	}
+	t.pins = pins
+	log.Printf("daemon: tunnel %s: pinned the public key of %s", t.name, ref)
 }
 
 // resolveTunnel returns a copy of cfg whose endpoints are literal IP:port.
@@ -891,14 +1044,15 @@ func (m *Manager) reap(t *tunnel) {
 	dev, cfgr := t.dev, t.cfgr
 	t.dev, t.cfgr = nil, nil
 	m.mu.Unlock()
-	closeDevice(t.name, dev, cfgr)
+	m.closeDevice(dev, cfgr)
 }
 
-func closeDevice(name string, dev *device.Device, cfgr netcfg.Configurer) {
-	if err := cfgr.Remove(); err != nil {
-		log.Printf("daemon: tunnel %s: removing routes: %v", name, err)
-	}
-	dev.Close()
+// closeDevice stops the tunnel first, so no packet uses it once this starts
+// (R20), then removes addresses and routes. Removal is best effort: closing
+// the TUN usually takes them with the interface, so its errors are expected.
+func (m *Manager) closeDevice(dev *device.Device, cfgr netcfg.Configurer) {
+	m.ops.close(dev)
+	_ = cfgr.Remove()
 }
 
 // userErr turns a connect failure into the error the requester sees.
