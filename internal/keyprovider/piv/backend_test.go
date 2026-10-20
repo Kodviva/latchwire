@@ -3,9 +3,11 @@ package piv
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/go-piv/piv-go/v2/piv"
 
@@ -216,5 +218,181 @@ func TestProbeClassification(t *testing.T) {
 		if err := probeResult(e); err == nil {
 			t.Fatalf("probeResult(%v) = nil, want error", e)
 		}
+	}
+}
+
+// A card pulled out and put back between two polls leaves the reader list
+// unchanged, but the held connection is dead. The first operation that sees
+// the transport error must drop the shared connection and the cached serial,
+// so the next Serials and Provider calls open the reader again (Ruling R16).
+func TestBackendDropsConnectionOnTransportError(t *testing.T) {
+	s, a, _ := twoCards(t)
+	a.occupyX25519(0x82)
+	var be Backend
+	ref := keyref.Ref{Serial: a.serial, Slot: 0x82}
+	p, err := be.Provider(ref, (&promptRec{pins: []string{a.pin}}).fn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.(io.Closer).Close()
+	_, peer := randPeer(t)
+	if _, err := p.X25519(context.Background(), peer); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := be.Serials(); err != nil {
+		t.Fatal(err)
+	}
+
+	a.handleDead = true // re-seated: same reader name, dead handle
+	if _, err := p.X25519(context.Background(), peer); !errors.Is(err, keyprovider.ErrUnavailable) {
+		t.Fatalf("X25519 on dead handle: err = %v, want ErrUnavailable", err)
+	}
+
+	opened := len(s.opened)
+	serials, err := be.Serials()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(serials, a.serial) {
+		t.Fatalf("Serials = %v, want card A", serials)
+	}
+	if !slices.Contains(s.opened[opened:], readerA) {
+		t.Fatal("Serials did not reopen the reader whose connection failed")
+	}
+
+	p2, err := be.Provider(ref, (&promptRec{pins: []string{a.pin}}).fn)
+	if err != nil {
+		t.Fatalf("Provider after re-seat: %v", err)
+	}
+	defer p2.(io.Closer).Close()
+	if _, err := p2.X25519(context.Background(), peer); err != nil {
+		t.Fatalf("X25519 after re-seat: %v", err)
+	}
+}
+
+// A transport error while making a provider on a reused connection drops it
+// too.
+func TestBackendDropsConnectionOnProviderTransportError(t *testing.T) {
+	_, a, _ := twoCards(t)
+	a.occupyX25519(0x82)
+	a.occupyX25519(0x83)
+	var be Backend
+	p, err := be.Provider(keyref.Ref{Serial: a.serial, Slot: 0x82}, (&promptRec{}).fn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.(io.Closer).Close()
+
+	a.handleDead = true
+	ref83 := keyref.Ref{Serial: a.serial, Slot: 0x83}
+	if _, err := be.Provider(ref83, (&promptRec{}).fn); !errors.Is(err, keyprovider.ErrUnavailable) {
+		t.Fatalf("Provider on dead handle: err = %v, want ErrUnavailable", err)
+	}
+	p2, err := be.Provider(ref83, (&promptRec{}).fn)
+	if err != nil {
+		t.Fatalf("second Provider after transport error: %v", err)
+	}
+	_ = p2.(io.Closer).Close()
+}
+
+// The vendored piv-go refuses to go on when the card answering after a reset
+// has another serial; the backend treats that as the card being gone.
+func TestBackendCardChangedIsUnavailable(t *testing.T) {
+	s, a, _ := twoCards(t)
+	a.occupyX25519(0x82)
+	var be Backend
+	ref := keyref.Ref{Serial: a.serial, Slot: 0x82}
+	pr := &promptRec{pins: []string{a.pin}}
+	p, err := be.Provider(ref, pr.fn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.(io.Closer).Close()
+	_, peer := randPeer(t)
+	if _, err := p.X25519(context.Background(), peer); err != nil {
+		t.Fatal(err)
+	}
+
+	a.ecdhErr = fmt.Errorf("checking card after reset: %w", piv.ErrCardChanged)
+	if _, err := p.X25519(context.Background(), peer); !errors.Is(err, keyprovider.ErrUnavailable) {
+		t.Fatalf("X25519 with changed card: err = %v, want ErrUnavailable", err)
+	}
+	if len(pr.retries) != 1 {
+		t.Fatalf("prompted %d times, want only the first PIN", len(pr.retries))
+	}
+	a.ecdhErr = nil
+	opened := len(s.opened)
+	p2, err := be.Provider(ref, (&promptRec{pins: []string{a.pin}}).fn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p2.(io.Closer).Close()
+	if !slices.Contains(s.opened[opened:], readerA) {
+		t.Fatal("Provider reused the connection to the changed card")
+	}
+}
+
+// A reader that opens but whose serial cannot be read is retried at most
+// every 10 seconds, not on every poll.
+func TestSerialsNegativeCache(t *testing.T) {
+	s, a, b := twoCards(t)
+	a.serialErr = errors.New("smart card command: timeout")
+	clock := time.Unix(1000, 0)
+	oldNow := now
+	now = func() time.Time { return clock }
+	t.Cleanup(func() { now = oldNow })
+
+	var be Backend
+	countA := func() int {
+		n := 0
+		for _, r := range s.opened {
+			if r == readerA {
+				n++
+			}
+		}
+		return n
+	}
+	for i := 0; i < 5; i++ {
+		serials, err := be.Serials()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(serials, []uint32{b.serial}) {
+			t.Fatalf("Serials = %v, want only card B", serials)
+		}
+		clock = clock.Add(time.Second)
+	}
+	if n := countA(); n != 1 {
+		t.Fatalf("reader with failing serial opened %d times in 5 s, want 1", n)
+	}
+
+	clock = clock.Add(5 * time.Second) // 10 s after the failure
+	a.serialErr = nil
+	serials, err := be.Serials()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(serials, []uint32{a.serial, b.serial}) {
+		t.Fatalf("Serials after 10 s = %v, want both cards", serials)
+	}
+	if n := countA(); n != 2 {
+		t.Fatalf("reader opened %d times, want a retry after 10 s", n)
+	}
+
+	// A reader that disappears and comes back is retried at once.
+	a.serialErr = errors.New("smart card command: timeout")
+	s.readers = []string{readerB}
+	if _, err := be.Serials(); err != nil {
+		t.Fatal(err)
+	}
+	s.readers = []string{readerA, readerB}
+	if _, err := be.Serials(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := be.Serials(); err != nil {
+		t.Fatal(err)
+	}
+	if n := countA(); n != 3 {
+		t.Fatalf("reader opened %d times after reinsertion, want exactly one more", n)
 	}
 }
