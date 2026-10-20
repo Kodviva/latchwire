@@ -53,10 +53,13 @@ type AgentEvent struct {
 }
 
 // KeyRequest is the params of key.public (Peer empty) and key.x25519. Peer is
-// the standard base64 encoding of a 32-byte X25519 public key.
+// the standard base64 encoding of a 32-byte X25519 public key. Deadline is
+// optional: unix milliseconds after which the caller no longer waits for the
+// answer (0 = none); the agent then gives up instead of asking for a PIN.
 type KeyRequest struct {
-	Ref  string `json:"ref"`
-	Peer string `json:"peer,omitempty"`
+	Ref      string `json:"ref"`
+	Peer     string `json:"peer,omitempty"`
+	Deadline int64  `json:"deadline,omitempty"`
 }
 
 // KeyPublicResult is the result of key.public; Public is standard base64 of

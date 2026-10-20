@@ -65,6 +65,7 @@ const (
 	AgentBadRequest      = "malformed request"
 	AgentLowOrderPeer    = "the peer public key is a low-order point"
 	AgentNoTTY           = "no terminal is available to ask for the PIN"
+	AgentRequestExpired  = "the request expired before the YubiKey could be used"
 	// AgentUntrustedDaemonFmt takes the uid of the socket's owner process.
 	AgentUntrustedDaemonFmt = "refusing the service socket: it is served by uid %d, not by root or this user"
 )
