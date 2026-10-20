@@ -26,23 +26,28 @@ type Limits struct {
 	// flood cannot starve our own handshakes.
 	InitiatorPerSecond float64
 	InitiatorBurst     int
-	// MaxInFlight caps provider calls outstanding at once across all uses.
-	// Calls that timed out but whose provider has not returned still count.
-	// When full, calls fail fast with keyprovider.ErrUnavailable.
-	MaxInFlight int
+	// MaxInFlightResponder caps outstanding provider calls for
+	// device.UseResponder; MaxInFlightOther caps those for UseInitiator and
+	// UseStaticStatic together. The pools are separate so a responder flood
+	// cannot starve our own handshakes. Calls that timed out but whose
+	// provider has not returned still count. When a pool is full, calls fail
+	// fast with keyprovider.ErrUnavailable.
+	MaxInFlightResponder int
+	MaxInFlightOther     int
 	// Timeout applies to every provider call.
 	Timeout time.Duration
 }
 
 // DefaultLimits: 5 ops/s with burst 10 for each of responder and initiator,
-// at most 4 calls in flight, 3 s per operation.
+// at most 2 calls in flight per pool (responder, other), 3 s per operation.
 var DefaultLimits = Limits{
-	ResponderPerSecond: 5,
-	ResponderBurst:     10,
-	InitiatorPerSecond: 5,
-	InitiatorBurst:     10,
-	MaxInFlight:        4,
-	Timeout:            3 * time.Second,
+	ResponderPerSecond:   5,
+	ResponderBurst:       10,
+	InitiatorPerSecond:   5,
+	InitiatorBurst:       10,
+	MaxInFlightResponder: 2,
+	MaxInFlightOther:     2,
+	Timeout:              3 * time.Second,
 }
 
 func (l Limits) withDefaults() Limits {
@@ -59,8 +64,11 @@ func (l Limits) withDefaults() Limits {
 	if l.InitiatorBurst == 0 {
 		l.InitiatorBurst = d.InitiatorBurst
 	}
-	if l.MaxInFlight == 0 {
-		l.MaxInFlight = d.MaxInFlight
+	if l.MaxInFlightResponder == 0 {
+		l.MaxInFlightResponder = d.MaxInFlightResponder
+	}
+	if l.MaxInFlightOther == 0 {
+		l.MaxInFlightOther = d.MaxInFlightOther
 	}
 	if l.Timeout == 0 {
 		l.Timeout = d.Timeout
@@ -69,11 +77,12 @@ func (l Limits) withDefaults() Limits {
 }
 
 type adapter struct {
-	p         keyprovider.Provider
-	timeout   time.Duration
-	responder *rate.Limiter
-	initiator *rate.Limiter
-	slots     chan struct{} // one token per outstanding provider call
+	p          keyprovider.Provider
+	timeout    time.Duration
+	responder  *rate.Limiter
+	initiator  *rate.Limiter
+	respSlots  chan struct{} // one token per outstanding responder call
+	otherSlots chan struct{} // same, for initiator and static-static
 }
 
 // New wraps p as a device.StaticKey. UseResponder and UseInitiator each have
@@ -82,11 +91,12 @@ type adapter struct {
 func New(p keyprovider.Provider, l Limits) device.StaticKey {
 	l = l.withDefaults()
 	return &adapter{
-		p:         p,
-		timeout:   l.Timeout,
-		responder: rate.NewLimiter(rate.Limit(l.ResponderPerSecond), l.ResponderBurst),
-		initiator: rate.NewLimiter(rate.Limit(l.InitiatorPerSecond), l.InitiatorBurst),
-		slots:     make(chan struct{}, l.MaxInFlight),
+		p:          p,
+		timeout:    l.Timeout,
+		responder:  rate.NewLimiter(rate.Limit(l.ResponderPerSecond), l.ResponderBurst),
+		initiator:  rate.NewLimiter(rate.Limit(l.InitiatorPerSecond), l.InitiatorBurst),
+		respSlots:  make(chan struct{}, l.MaxInFlightResponder),
+		otherSlots: make(chan struct{}, l.MaxInFlightOther),
 	}
 }
 
@@ -111,11 +121,13 @@ func (a *adapter) SharedSecret(peer device.NoisePublicKey, use device.KeyUse) (o
 	if peer.IsZero() {
 		return out, keyprovider.ErrLowOrderPoint
 	}
+	slots := a.otherSlots
 	switch use {
 	case device.UseResponder:
 		if !a.responder.Allow() {
 			return out, keyprovider.ErrRateLimited
 		}
+		slots = a.respSlots
 	case device.UseInitiator:
 		if !a.initiator.Allow() {
 			return out, keyprovider.ErrRateLimited
@@ -123,7 +135,7 @@ func (a *adapter) SharedSecret(peer device.NoisePublicKey, use device.KeyUse) (o
 	}
 
 	select {
-	case a.slots <- struct{}{}:
+	case slots <- struct{}{}:
 	default:
 		return out, keyprovider.ErrUnavailable
 	}
@@ -137,6 +149,9 @@ func (a *adapter) SharedSecret(peer device.NoisePublicKey, use device.KeyUse) (o
 	c := &call{ch: make(chan result, 1)}
 	go func() {
 		ss, err := a.p.X25519(ctx, [32]byte(peer))
+		// The provider has returned: free the slot before the caller can
+		// observe the result, so a sequential caller never sees a stale slot.
+		<-slots
 		c.mu.Lock()
 		if c.abandoned {
 			setZero(ss[:])
@@ -144,7 +159,6 @@ func (a *adapter) SharedSecret(peer device.NoisePublicKey, use device.KeyUse) (o
 			c.ch <- result{ss, err}
 		}
 		c.mu.Unlock()
-		<-a.slots
 	}()
 
 	var r result

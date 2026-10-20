@@ -42,7 +42,7 @@ func newSoft(t *testing.T) *softkey.Key {
 func TestLimitRejectsBurst(t *testing.T) {
 	l := DefaultLimits
 	l.ResponderPerSecond = 0.001 // no refill during the test, whatever the scheduling
-	l.MaxInFlight = 16
+	l.MaxInFlightResponder = 16
 	sk := New(newSoft(t), l)
 	peer := randPeer(t)
 
@@ -175,9 +175,9 @@ func waitEntered(t *testing.T, g *gateProvider, n int) {
 	}
 }
 
-// eventually retries until a call succeeds: slots are freed by the provider
-// goroutine just after it returns.
-func eventually(t *testing.T, sk device.StaticKey, peer device.NoisePublicKey) {
+// recovers polls until a call succeeds. Only for slots held by calls that
+// already timed out: the caller cannot know when their provider returns.
+func recovers(t *testing.T, sk device.StaticKey, peer device.NoisePublicKey) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
@@ -195,7 +195,7 @@ func eventually(t *testing.T, sk device.StaticKey, peer device.NoisePublicKey) {
 func TestMaxInFlightFailsFast(t *testing.T) {
 	g := newGate(t)
 	l := DefaultLimits
-	l.MaxInFlight = 2
+	l.MaxInFlightOther = 2
 	sk := New(g, l)
 	peer := randPeer(t)
 
@@ -212,7 +212,7 @@ func TestMaxInFlightFailsFast(t *testing.T) {
 	waitEntered(t, g, 2)
 
 	start := time.Now()
-	_, err := sk.SharedSecret(peer, device.UseStaticStatic)
+	_, err := sk.SharedSecret(peer, device.UseInitiator)
 	if !errors.Is(err, keyprovider.ErrUnavailable) {
 		t.Fatalf("want ErrUnavailable, got %v", err)
 	}
@@ -221,14 +221,16 @@ func TestMaxInFlightFailsFast(t *testing.T) {
 	}
 
 	close(g.gate)
-	wg.Wait()
-	eventually(t, sk, peer)
+	wg.Wait() // slots are freed before results are delivered
+	if _, err := sk.SharedSecret(peer, device.UseStaticStatic); err != nil {
+		t.Fatalf("after providers returned: %v", err)
+	}
 }
 
 func TestTimedOutCallsCountInFlight(t *testing.T) {
 	g := newGate(t)
 	l := DefaultLimits
-	l.MaxInFlight = 2
+	l.MaxInFlightOther = 2
 	l.Timeout = 50 * time.Millisecond
 	sk := New(g, l)
 	peer := randPeer(t)
@@ -251,7 +253,68 @@ func TestTimedOutCallsCountInFlight(t *testing.T) {
 	}
 
 	close(g.gate)
-	eventually(t, sk, peer)
+	recovers(t, sk, peer)
+}
+
+// peerGateProvider blocks only calls for the peer blocked, so one test can
+// fill the responder pool while other uses stay fast.
+type peerGateProvider struct {
+	keyprovider.Provider
+	blocked [32]byte
+	gate    chan struct{}
+	entered chan struct{}
+}
+
+func (g *peerGateProvider) X25519(ctx context.Context, peer [32]byte) ([32]byte, error) {
+	if peer == g.blocked {
+		g.entered <- struct{}{}
+		<-g.gate
+	}
+	return g.Provider.X25519(context.Background(), peer)
+}
+
+func TestResponderFloodDoesNotBlockInitiator(t *testing.T) {
+	flood := randPeer(t)
+	g := &peerGateProvider{Provider: newSoft(t), blocked: flood, gate: make(chan struct{}), entered: make(chan struct{}, 8)}
+	l := DefaultLimits
+	l.MaxInFlightResponder = 2
+	l.Timeout = 50 * time.Millisecond
+	sk := New(g, l)
+	defer close(g.gate)
+
+	for i := 0; i < 2; i++ {
+		if _, err := sk.SharedSecret(flood, device.UseResponder); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("flood call %d: want DeadlineExceeded, got %v", i, err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		<-g.entered
+	}
+	if _, err := sk.SharedSecret(flood, device.UseResponder); !errors.Is(err, keyprovider.ErrUnavailable) {
+		t.Fatalf("responder pool should be full, got %v", err)
+	}
+
+	peer := randPeer(t)
+	if _, err := sk.SharedSecret(peer, device.UseInitiator); err != nil {
+		t.Fatalf("initiator starved: %v", err)
+	}
+	if _, err := sk.SharedSecret(peer, device.UseStaticStatic); err != nil {
+		t.Fatalf("static-static starved: %v", err)
+	}
+}
+
+func TestSequentialCallsAtCapNeverUnavailable(t *testing.T) {
+	l := DefaultLimits
+	l.MaxInFlightOther = 1
+	l.InitiatorPerSecond = 1000
+	l.InitiatorBurst = 1000
+	sk := New(newSoft(t), l)
+	peer := randPeer(t)
+	for i := 0; i < 50; i++ {
+		if _, err := sk.SharedSecret(peer, device.UseInitiator); err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+	}
 }
 
 func TestZeroLimitsUseDefaults(t *testing.T) {
