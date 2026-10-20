@@ -40,7 +40,10 @@ func newSoft(t *testing.T) *softkey.Key {
 }
 
 func TestLimitRejectsBurst(t *testing.T) {
-	sk := New(newSoft(t), DefaultLimits)
+	l := DefaultLimits
+	l.ResponderPerSecond = 0.001 // no refill during the test, whatever the scheduling
+	l.MaxInFlight = 16
+	sk := New(newSoft(t), l)
 	peer := randPeer(t)
 
 	var wg sync.WaitGroup
@@ -87,6 +90,8 @@ func TestLimitRefills(t *testing.T) {
 }
 
 func TestInitiatorNotLimited(t *testing.T) {
+	// Exhausted responder budget does not block initiator or static-static;
+	// static-static has no bucket at all.
 	sk := New(newSoft(t), DefaultLimits)
 	peer := randPeer(t)
 	for i := 0; i < 10; i++ {
@@ -97,14 +102,172 @@ func TestInitiatorNotLimited(t *testing.T) {
 	if _, err := sk.SharedSecret(peer, device.UseResponder); !errors.Is(err, keyprovider.ErrRateLimited) {
 		t.Fatalf("responder budget not exhausted: %v", err)
 	}
+	if _, err := sk.SharedSecret(peer, device.UseInitiator); err != nil {
+		t.Fatalf("initiator: %v", err)
+	}
 	for i := 0; i < 50; i++ {
-		if _, err := sk.SharedSecret(peer, device.UseInitiator); err != nil {
-			t.Fatalf("initiator %d: %v", i, err)
-		}
 		if _, err := sk.SharedSecret(peer, device.UseStaticStatic); err != nil {
 			t.Fatalf("static-static %d: %v", i, err)
 		}
 	}
+}
+
+func exhaust(t *testing.T, sk device.StaticKey, peer device.NoisePublicKey, use device.KeyUse, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		if _, err := sk.SharedSecret(peer, use); err != nil {
+			t.Fatalf("use %d call %d: %v", use, i, err)
+		}
+	}
+	if _, err := sk.SharedSecret(peer, use); !errors.Is(err, keyprovider.ErrRateLimited) {
+		t.Fatalf("use %d: want ErrRateLimited, got %v", use, err)
+	}
+}
+
+func TestInitiatorLimitedSeparately(t *testing.T) {
+	l := DefaultLimits
+	l.ResponderPerSecond, l.InitiatorPerSecond = 0.001, 0.001
+	peer := randPeer(t)
+
+	sk := New(newSoft(t), l)
+	exhaust(t, sk, peer, device.UseInitiator, 10)
+	for i := 0; i < 10; i++ {
+		if _, err := sk.SharedSecret(peer, device.UseResponder); err != nil {
+			t.Fatalf("responder starved by initiator: %v", err)
+		}
+	}
+
+	sk = New(newSoft(t), l)
+	exhaust(t, sk, peer, device.UseResponder, 10)
+	for i := 0; i < 10; i++ {
+		if _, err := sk.SharedSecret(peer, device.UseInitiator); err != nil {
+			t.Fatalf("initiator starved by responder: %v", err)
+		}
+	}
+}
+
+// gateProvider blocks every X25519 call until gate is closed, then answers
+// like the wrapped provider. entered receives one value per call that started.
+type gateProvider struct {
+	keyprovider.Provider
+	gate    chan struct{}
+	entered chan struct{}
+}
+
+func newGate(t *testing.T) *gateProvider {
+	return &gateProvider{Provider: newSoft(t), gate: make(chan struct{}), entered: make(chan struct{}, 64)}
+}
+
+func (g *gateProvider) X25519(ctx context.Context, peer [32]byte) ([32]byte, error) {
+	g.entered <- struct{}{}
+	<-g.gate // deliberately ignores ctx
+	return g.Provider.X25519(context.Background(), peer)
+}
+
+func waitEntered(t *testing.T, g *gateProvider, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		select {
+		case <-g.entered:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("provider call %d never started", i)
+		}
+	}
+}
+
+// eventually retries until a call succeeds: slots are freed by the provider
+// goroutine just after it returns.
+func eventually(t *testing.T, sk device.StaticKey, peer device.NoisePublicKey) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		_, err := sk.SharedSecret(peer, device.UseStaticStatic)
+		if err == nil {
+			return
+		}
+		if !errors.Is(err, keyprovider.ErrUnavailable) || time.Now().After(deadline) {
+			t.Fatalf("call did not recover: %v", err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestMaxInFlightFailsFast(t *testing.T) {
+	g := newGate(t)
+	l := DefaultLimits
+	l.MaxInFlight = 2
+	sk := New(g, l)
+	peer := randPeer(t)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := sk.SharedSecret(peer, device.UseStaticStatic); err != nil {
+				t.Errorf("blocked call: %v", err)
+			}
+		}()
+	}
+	waitEntered(t, g, 2)
+
+	start := time.Now()
+	_, err := sk.SharedSecret(peer, device.UseStaticStatic)
+	if !errors.Is(err, keyprovider.ErrUnavailable) {
+		t.Fatalf("want ErrUnavailable, got %v", err)
+	}
+	if time.Since(start) > 500*time.Millisecond {
+		t.Fatalf("did not fail fast: %v", time.Since(start))
+	}
+
+	close(g.gate)
+	wg.Wait()
+	eventually(t, sk, peer)
+}
+
+func TestTimedOutCallsCountInFlight(t *testing.T) {
+	g := newGate(t)
+	l := DefaultLimits
+	l.MaxInFlight = 2
+	l.Timeout = 50 * time.Millisecond
+	sk := New(g, l)
+	peer := randPeer(t)
+
+	for i := 0; i < 2; i++ {
+		if _, err := sk.SharedSecret(peer, device.UseStaticStatic); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("call %d: want DeadlineExceeded, got %v", i, err)
+		}
+	}
+	waitEntered(t, g, 2)
+
+	// Providers are still blocked: both slots are held by timed-out calls.
+	start := time.Now()
+	_, err := sk.SharedSecret(peer, device.UseStaticStatic)
+	if !errors.Is(err, keyprovider.ErrUnavailable) {
+		t.Fatalf("want ErrUnavailable, got %v", err)
+	}
+	if time.Since(start) > 30*time.Millisecond {
+		t.Fatalf("did not fail fast: %v", time.Since(start))
+	}
+
+	close(g.gate)
+	eventually(t, sk, peer)
+}
+
+func TestZeroLimitsUseDefaults(t *testing.T) {
+	if got := (Limits{}).withDefaults(); got != DefaultLimits {
+		t.Fatalf("zero Limits -> %+v, want %+v", got, DefaultLimits)
+	}
+	got := (Limits{InitiatorBurst: 3}).withDefaults()
+	want := DefaultLimits
+	want.InitiatorBurst = 3
+	if got != want {
+		t.Fatalf("partial Limits -> %+v, want %+v", got, want)
+	}
+
+	// Behaviour: a zero Limits passed to New behaves like DefaultLimits.
+	sk := New(newSoft(t), Limits{})
+	exhaust(t, sk, randPeer(t), device.UseResponder, 10)
 }
 
 // sleepProvider blocks until its context ends or d passes.
@@ -147,7 +310,7 @@ func (s ignoreCtxProvider) X25519(_ context.Context, peer [32]byte) ([32]byte, e
 }
 
 func TestTimeoutIgnoringProvider(t *testing.T) {
-	l := Limits{ResponderPerSecond: 5, ResponderBurst: 10, Timeout: 100 * time.Millisecond}
+	l := Limits{Timeout: 100 * time.Millisecond}
 	sk := New(ignoreCtxProvider{newSoft(t), time.Second}, l)
 	start := time.Now()
 	_, err := sk.SharedSecret(randPeer(t), device.UseInitiator)

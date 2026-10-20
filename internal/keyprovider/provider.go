@@ -52,6 +52,8 @@ var (
 )
 
 // PINError means a wrong PIN was entered; RetriesLeft attempts remain.
+// It has a pointer receiver: return it as *PINError and match it with
+// errors.As(err, &pe) where pe is a *PINError.
 type PINError struct {
 	RetriesLeft int
 }
