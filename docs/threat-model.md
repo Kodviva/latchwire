@@ -364,16 +364,21 @@ in `internal/daemon/manager.go` (`build`).
   the PUK) now has the new value.
 - **The last attempt is flagged.** The remaining retries are shown; with one
   left you get an explicit warning, and with none left you are never asked.
-- **Existing slots are not overwritten without `--force`.** The default is the
-  first empty retired slot.
+- **Existing slots are not overwritten without `--force` and a confirmation.**
+  The default is the first empty retired slot. With `--force` on an occupied
+  slot, `latchwire keygen` first shows what the slot holds and warns that the
+  key is destroyed, then requires `yes` typed on the terminal (read from
+  `/dev/tty`, never from standard input, so a pipe cannot confirm). Without a
+  terminal, or with any other answer, nothing is changed.
 - **A wrong PIN ends the request.** After a wrong or cancelled entry, requests
   that were already waiting get the same outcome without asking again, so a
   queued burst cannot spend your retries.
 
 Where this is enforced: `internal/keyprovider/piv/generate.go` (`harden`,
-`managementKey`, `Generate`), `internal/keyprovider/piv/card.go` (package
+`managementKey`, `Generate`, `Occupied`), `internal/keyprovider/piv/card.go` (package
 comment), `internal/agent/agent.go` (PIN rules in the package comment,
-`prompt`, `x25519`), `cmd/latchwire/keygen.go`, `internal/msg/en.go`
+`prompt`, `x25519`), `cmd/latchwire/keygen.go` (`askManagementKey`,
+`confirmForce`), `cmd/latchwire/tty.go` (`readLineTTY`), `internal/msg/en.go`
 (`FreshCardExplain`, `PIVPINAlreadyChanged`, `PIVPINAndPUKAlreadyChanged`,
 `LastPINRetry`), `third_party/piv-go/PATCHES.md` (patches 4 and 5).
 

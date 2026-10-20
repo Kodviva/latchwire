@@ -49,6 +49,12 @@ LATCHWIRE_HW_PIN=<pin> go test -tags hardware ./internal/keyprovider/piv/ -run H
 - [ ] `latchwire keygen --serial 40727512 --slot 82` stops with a message that
       shows the key in the slot and says to use `--force`. Nothing changes on
       the card.
+- [ ] `latchwire keygen --serial 40727512 --slot 82 --force` shows the key in
+      the slot, warns that it is destroyed, and asks you to type `yes` before
+      it asks for the PIN. Any other answer stops with nothing changed on the
+      card; so does `echo yes | latchwire keygen ...` (the answer is read from
+      the terminal, not from standard input). Only test the `yes` path on a
+      slot whose key you can afford to lose.
 - [ ] `latchwire pubkey piv://40727512/82` prints the same public key that
       `keygen` printed, without asking for a PIN.
 
