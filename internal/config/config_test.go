@@ -237,7 +237,7 @@ func TestParseRejectsInvalid(t *testing.T) {
 		"bad address":                id + "Address = 10.0.0.2/33\n",
 		"bad port":                   id + "ListenPort = 70000\n",
 		"bad mtu":                    id + "MTU = abc\n",
-		"bad dns":                    id + "DNS = notanip\n",
+		"bad dns":                    id + "DNS = notanip!\n",
 		"dup listen port":            id + "ListenPort = 1\nListenPort = 2\n",
 		"dup keyref":                 id + "KeyRef = piv://2/82\n",
 		"shorthand+identity":         id + "[Identity]\nKeyRef = piv://2/82\n",
@@ -307,5 +307,29 @@ func TestUAPIOmitsZeroListenPort(t *testing.T) {
 	tun := mustParse(t, "[Interface]\nKeyRef = piv://1/82\n[Peer]\nPublicKey = "+b64(pubA)+"\n")
 	if strings.Contains(tun.UAPI(), "listen_port") {
 		t.Fatalf("unexpected listen_port:\n%s", tun.UAPI())
+	}
+}
+
+func TestParseDNSSearchDomains(t *testing.T) {
+	tun := mustParse(t, "[Interface]\nKeyRef = piv://1/82\n"+
+		"DNS = 10.0.0.1, corp.example, fd00::1\n"+
+		"DNS = Lab-1.internal.example.com\n")
+	if len(tun.DNS) != 2 || tun.DNS[0] != netip.MustParseAddr("10.0.0.1") || tun.DNS[1] != netip.MustParseAddr("fd00::1") {
+		t.Fatalf("DNS = %v", tun.DNS)
+	}
+	if len(tun.DNSSearch) != 2 || tun.DNSSearch[0] != "corp.example" || tun.DNSSearch[1] != "Lab-1.internal.example.com" {
+		t.Fatalf("DNSSearch = %v", tun.DNSSearch)
+	}
+
+	for _, bad := range []string{
+		"notanip!", "-bad.example", "bad-.example", "a..b", ".example", "a b",
+		"fd00::zz", "10.0.0.256", "exa_mple.com", "1.2.3.4.5",
+		strings.Repeat("a", 64) + ".example",
+		strings.Repeat("a.", 127) + "a",
+	} {
+		_, err := parse(t, "[Interface]\nKeyRef = piv://1/82\nDNS = 10.0.0.1, "+bad+"\n")
+		if err == nil {
+			t.Errorf("DNS item %q accepted", bad)
+		}
 	}
 }
