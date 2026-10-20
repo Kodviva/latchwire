@@ -11,9 +11,13 @@ import (
 
 	"github.com/go-piv/piv-go/v2/piv"
 
+	"github.com/Kodviva/latchwire/internal/agent"
 	"github.com/Kodviva/latchwire/internal/keyprovider"
 	"github.com/Kodviva/latchwire/internal/keyref"
 )
+
+// The agent drives cards through this backend.
+var _ agent.Backend = Backend{}
 
 const (
 	readerA     = "Yubico YubiKey OTP+FIDO+CCID 00 00"
