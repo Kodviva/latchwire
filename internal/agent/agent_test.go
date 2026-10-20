@@ -179,13 +179,26 @@ type fakePrompter struct {
 	pins    []string // answers, the last one repeats
 	calls   []int    // retriesLeft of each PIN call
 	journal []string // "warn:<msg>" and "pin" in call order
+
+	// If gate is set, PIN signals started and then waits for gate.
+	started  chan struct{}
+	gate     chan struct{}
+	openGate chan struct{} // the gate as first set, for the test to close
 }
 
 func (p *fakePrompter) PIN(d keyprovider.Description, retriesLeft int) (string, error) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	p.calls = append(p.calls, retriesLeft)
 	p.journal = append(p.journal, "pin")
+	started, gate := p.started, p.gate
+	p.mu.Unlock()
+	if gate != nil {
+		// A slow user: the prompt stays open until the test answers.
+		started <- struct{}{}
+		<-gate
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if len(p.pins) == 0 {
 		return "", errors.New("no PIN")
 	}
@@ -696,5 +709,187 @@ func TestCancelledPromptNotRetried(t *testing.T) {
 	wantCode(t, err, ipc.CodePINRequired)
 	if n := p.pinCalls(); n != 1 {
 		t.Fatalf("PIN asked %d times, want 1", n)
+	}
+}
+
+// ---- queued requests behind a slow prompt (fix round 1) ----
+
+// waitingCounter counts requests that started waiting for their card.
+func waitingCounter(t *testing.T) func() int {
+	var mu sync.Mutex
+	n := 0
+	testHookWaiting = func() {
+		mu.Lock()
+		n++
+		mu.Unlock()
+	}
+	t.Cleanup(func() { testHookWaiting = nil })
+	return func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return n
+	}
+}
+
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// queueBehindPrompt starts one request whose prompt stays open, queues n
+// more behind it, then lets the prompt answer. It returns every request's
+// error, the first one's first.
+func queueBehindPrompt(t *testing.T, p *fakePrompter, n int) (*ipc.Conn, []error) {
+	t.Helper()
+	p.started = make(chan struct{}, 16)
+	p.gate = make(chan struct{})
+	p.openGate = p.gate
+	waiting := waitingCounter(t)
+
+	d := newDaemon(t)
+	b := newFakeBackend(t, serialA)
+	startAgent(t, d, b, p)
+	c, _ := d.conn()
+	_, peer := peerKey(t)
+
+	errs := make([]error, n+1)
+	var wg sync.WaitGroup
+	run := func(i int) {
+		defer wg.Done()
+		_, errs[i] = x25519(t, c, refA, peer)
+	}
+	wg.Add(1)
+	go run(0)
+	select {
+	case <-p.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no prompt")
+	}
+	for i := 1; i <= n; i++ {
+		wg.Add(1)
+		go run(i)
+	}
+	waitFor(t, "queued requests", func() bool { return waiting() == n+1 })
+
+	p.mu.Lock()
+	p.gate = nil // later prompts (there must be none) do not block
+	p.mu.Unlock()
+	close(p.openGate)
+	wg.Wait()
+	return c, errs
+}
+
+func TestQueuedRequestsDoNotRepromptAfterWrongPIN(t *testing.T) {
+	p := &fakePrompter{pins: []string{wrongPIN}}
+	c, errs := queueBehindPrompt(t, p, 5)
+	for i, err := range errs {
+		var ie *ipc.Error
+		if !errors.As(err, &ie) || ie.Code != ipc.CodeWrongPIN {
+			t.Fatalf("request %d: err = %v, want wrong_pin", i, err)
+		}
+	}
+	if n := p.pinCalls(); n != 1 {
+		t.Fatalf("PIN asked %d times for 6 requests behind one prompt, want 1", n)
+	}
+
+	// A request that starts after the wrong-PIN outcome may ask again, once.
+	p.mu.Lock()
+	p.pins = []string{testPIN}
+	p.mu.Unlock()
+	_, peer := peerKey(t)
+	if _, err := x25519(t, c, refA, peer); err != nil {
+		t.Fatalf("request after the outcome: %v", err)
+	}
+	if n := p.pinCalls(); n != 2 {
+		t.Fatalf("PIN asked %d times, want exactly one more (2)", n)
+	}
+}
+
+func TestQueuedRequestsDoNotRepromptAfterCancel(t *testing.T) {
+	p := &fakePrompter{} // the prompt fails: cancelled
+	_, errs := queueBehindPrompt(t, p, 5)
+	for i, err := range errs {
+		var ie *ipc.Error
+		if !errors.As(err, &ie) || ie.Code != ipc.CodePINRequired {
+			t.Fatalf("request %d: err = %v, want pin_required", i, err)
+		}
+	}
+	if n := p.pinCalls(); n != 1 {
+		t.Fatalf("PIN asked %d times for 6 requests behind one cancelled prompt, want 1", n)
+	}
+}
+
+// Requests queued behind a prompt the user answers correctly just run.
+func TestQueuedRequestsSucceedAfterCorrectPIN(t *testing.T) {
+	p := &fakePrompter{pins: []string{testPIN}}
+	_, errs := queueBehindPrompt(t, p, 5)
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
+	}
+	if n := p.pinCalls(); n != 1 {
+		t.Fatalf("PIN asked %d times, want 1", n)
+	}
+}
+
+func TestExpiredDeadlineDoesNotPrompt(t *testing.T) {
+	p := &fakePrompter{pins: []string{testPIN}}
+	p.started = make(chan struct{}, 16)
+	p.gate = make(chan struct{})
+	p.openGate = p.gate
+	waiting := waitingCounter(t)
+	d := newDaemon(t)
+	b := newFakeBackend(t, serialA)
+	startAgent(t, d, b, p)
+	c, _ := d.conn()
+	_, peer := peerKey(t)
+
+	call := func(deadline time.Time) error {
+		req := ipc.KeyRequest{Ref: refA.String(), Peer: peer, Deadline: deadline.UnixMilli()}
+		return c.Call(ctx5(t), ipc.MethodKeyX25519, req, nil)
+	}
+
+	// Already expired on arrival: no prompt, no card use.
+	err := call(time.Now().Add(-time.Second))
+	wantCode(t, err, ipc.CodeUnavailable)
+	if n := p.pinCalls(); n != 0 {
+		t.Fatalf("PIN asked %d times for an expired request", n)
+	}
+
+	// Expires while queued behind an open prompt: returns at its deadline,
+	// before the prompt is answered, and never prompts.
+	first := make(chan error, 1)
+	go func() { _, err := x25519(t, c, refA, peer); first <- err }()
+	<-p.started
+	start := time.Now()
+	err = call(time.Now().Add(100 * time.Millisecond))
+	wantCode(t, err, ipc.CodeUnavailable)
+	if el := time.Since(start); el > 2*time.Second {
+		t.Fatalf("queued expired request took %v", el)
+	}
+	if waiting() < 2 {
+		t.Fatal("the second request never queued")
+	}
+	p.mu.Lock()
+	p.gate = nil
+	p.mu.Unlock()
+	close(p.openGate)
+	if err := <-first; err != nil {
+		t.Fatal(err)
+	}
+	if n := p.pinCalls(); n != 1 {
+		t.Fatalf("PIN asked %d times, want only the first request's (1)", n)
+	}
+
+	// A request without a deadline still works (the field is optional).
+	if _, err := x25519(t, c, refA, peer); err != nil {
+		t.Fatal(err)
 	}
 }

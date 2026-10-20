@@ -13,6 +13,13 @@
 //   - If the card reports that its PIN verification was lost (for example
 //     another program reset it) and nobody was asked yet in this request,
 //     the operation is retried once, which asks once.
+//   - Requests for one card run one at a time. A request that was already
+//     waiting when a prompt for that card ended in a wrong PIN or was
+//     cancelled gets that same outcome without being asked: the daemon may
+//     have queued many requests behind a slow prompt and given up on them,
+//     and each mistyped answer would cost a real PIN retry.
+//   - A request carrying a deadline (ipc.KeyRequest.Deadline) that passed
+//     while it waited ends without asking.
 //   - The PIN is passed from the Prompter straight to the provider's prompt
 //     callback. It is never logged or kept in any field.
 package agent
@@ -64,13 +71,42 @@ type Agent struct {
 
 	mu      sync.Mutex
 	entries map[keyref.Ref]*entry // providers, kept so the card stays verified
+	cards   map[uint32]*cardState // by serial; never removed (tiny)
 }
+
+// cardState serialises requests for one card and remembers the outcome of
+// the last PIN prompt for it.
+type cardState struct {
+	sem chan struct{} // held for a whole attempt, prompt included
+
+	mu      sync.Mutex
+	epoch   uint64 // incremented when a prompt's outcome is known
+	outcome error  // nil: the PIN was accepted; else wrong/cancelled/blocked
+}
+
+func (cs *cardState) last() (uint64, error) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	return cs.epoch, cs.outcome
+}
+
+func (cs *cardState) record(outcome error) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.epoch++
+	cs.outcome = outcome
+}
+
+// testHookWaiting, if set, is called when a request starts waiting for its
+// card. Tests only.
+var testHookWaiting func()
 
 // New returns an agent for the daemon socket at socketPath. Card presence is
 // polled every poll (1 s in production); the same interval paces reconnect
 // attempts when the daemon is not reachable.
 func New(socketPath string, b Backend, p Prompter, poll time.Duration) *Agent {
-	return &Agent{socket: socketPath, b: b, p: p, poll: poll, entries: map[keyref.Ref]*entry{}}
+	return &Agent{socket: socketPath, b: b, p: p, poll: poll,
+		entries: map[keyref.Ref]*entry{}, cards: map[uint32]*cardState{}}
 }
 
 // Run connects to the daemon, registers, reports card changes and serves
@@ -216,9 +252,14 @@ func nonNil(s []uint32) []uint32 {
 // ---- key requests ----
 
 func (a *Agent) handlePublic(ctx context.Context, _ uint32, params json.RawMessage) (any, error) {
-	ref, _, err := parseRequest(params, false)
+	ref, _, deadline, err := parseRequest(params, false)
 	if err != nil {
 		return nil, err
+	}
+	ctx, cancel := withDeadline(ctx, deadline)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return nil, userErr(err)
 	}
 	e, err := a.entry(ref)
 	if err != nil {
@@ -230,11 +271,13 @@ func (a *Agent) handlePublic(ctx context.Context, _ uint32, params json.RawMessa
 }
 
 func (a *Agent) handleX25519(ctx context.Context, c *ipc.Conn, params json.RawMessage) (any, error) {
-	ref, peer, err := parseRequest(params, true)
+	ref, peer, deadline, err := parseRequest(params, true)
 	if err != nil {
 		return nil, err
 	}
-	ss, gotPIN, err := a.x25519(ctx, ref, peer)
+	rctx, cancel := withDeadline(ctx, deadline)
+	defer cancel()
+	ss, gotPIN, err := a.x25519(rctx, ref, peer)
 	if err != nil {
 		log.Printf("agent: key.x25519 %s: %v", ref, err)
 		return nil, userErr(err)
@@ -248,37 +291,47 @@ func (a *Agent) handleX25519(ctx context.Context, c *ipc.Conn, params json.RawMe
 	return ipc.KeyX25519Result{Shared: base64.StdEncoding.EncodeToString(ss[:])}, nil
 }
 
-func parseRequest(params json.RawMessage, withPeer bool) (keyref.Ref, [32]byte, error) {
-	var peer [32]byte
+func parseRequest(params json.RawMessage, withPeer bool) (ref keyref.Ref, peer [32]byte, deadline int64, err error) {
 	var req ipc.KeyRequest
 	if err := json.Unmarshal(params, &req); err != nil {
-		return keyref.Ref{}, peer, &ipc.Error{Code: ipc.CodeBadRequest, Message: msg.AgentBadRequest}
+		return ref, peer, 0, &ipc.Error{Code: ipc.CodeBadRequest, Message: msg.AgentBadRequest}
 	}
-	ref, err := keyref.Parse(req.Ref)
+	ref, err = keyref.Parse(req.Ref)
 	if err != nil {
-		return keyref.Ref{}, peer, &ipc.Error{Code: ipc.CodeBadRequest, Message: err.Error()}
+		return ref, peer, 0, &ipc.Error{Code: ipc.CodeBadRequest, Message: err.Error()}
 	}
 	if withPeer {
 		b, err := base64.StdEncoding.DecodeString(req.Peer)
 		if err != nil || len(b) != len(peer) {
-			return keyref.Ref{}, peer, &ipc.Error{Code: ipc.CodeBadRequest, Message: msg.AgentBadPeer}
+			return ref, peer, 0, &ipc.Error{Code: ipc.CodeBadRequest, Message: msg.AgentBadPeer}
 		}
 		copy(peer[:], b)
 	}
-	return ref, peer, nil
+	return ref, peer, req.Deadline, nil
+}
+
+// withDeadline applies a request's deadline (unix milliseconds, 0 = none).
+// The handler's own ctx only ends with the connection.
+func withDeadline(ctx context.Context, ms int64) (context.Context, context.CancelFunc) {
+	if ms == 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithDeadline(ctx, time.UnixMilli(ms))
 }
 
 // x25519 runs one daemon request. gotPIN reports whether the user entered a
 // PIN that the card accepted.
 func (a *Agent) x25519(ctx context.Context, ref keyref.Ref, peer [32]byte) (ss [32]byte, gotPIN bool, err error) {
-	req := &request{}
+	cs := a.card(ref.Serial)
+	start, _ := cs.last()
+	req := &request{ctx: ctx, start: start}
 	retriedUnavailable, retriedPIN := false, false
 	for {
 		e, err := a.entry(ref)
 		if err != nil {
 			return ss, false, err
 		}
-		ss, err = e.do(ctx, req, peer)
+		ss, err = e.do(ctx, cs, req, peer)
 		if err == nil {
 			return ss, req.entered, nil
 		}
@@ -286,7 +339,7 @@ func (a *Agent) x25519(ctx context.Context, ref keyref.Ref, peer [32]byte) (ss [
 			a.drop(e)
 		}
 		var pe *keyprovider.PINError
-		if errors.As(err, &pe) {
+		if req.typed && errors.As(err, &pe) {
 			// Tell the user at the terminal, not only the daemon.
 			a.warn(fmt.Sprintf(msg.AgentWrongPINFmt, pe.RetriesLeft))
 		}
@@ -317,38 +370,61 @@ func pinLost(err error) bool {
 
 // request is the per-request prompt state. It never holds the PIN.
 type request struct {
-	called  bool // prompt callback called in the current attempt
-	asked   int  // Prompter.PIN calls in this request
-	entered bool // a PIN was entered and the operation then succeeded
+	ctx     context.Context
+	start   uint64 // card's prompt epoch when the request began
+	called  bool   // prompt callback called in the current attempt
+	typed   bool   // Prompter.PIN called in the current attempt
+	asked   int    // Prompter.PIN calls in this request
+	entered bool   // a PIN was entered and the operation then succeeded
 }
 
-// entry is a cached provider. Requests on one entry run one at a time, so
-// the prompt callback (called synchronously from X25519) always belongs to
-// the request in cur.
+// entry is a cached provider. Requests on one card run one at a time
+// (cardState.sem), so the prompt callback (called synchronously from X25519)
+// always belongs to the request in cur.
 type entry struct {
 	ref  keyref.Ref
 	prov keyprovider.Provider
 	desc keyprovider.Description
-	sem  chan struct{}
+	cs   *cardState
 	cur  atomic.Pointer[request]
 }
 
-func (e *entry) do(ctx context.Context, req *request, peer [32]byte) ([32]byte, error) {
+func (e *entry) do(ctx context.Context, cs *cardState, req *request, peer [32]byte) ([32]byte, error) {
+	if testHookWaiting != nil {
+		testHookWaiting()
+	}
 	select {
-	case e.sem <- struct{}{}:
+	case cs.sem <- struct{}{}:
 	case <-ctx.Done():
 		return [32]byte{}, ctx.Err()
 	}
-	defer func() { <-e.sem }()
-	req.called = false
-	asked := req.asked
+	defer func() { <-cs.sem }()
+	if err := ctx.Err(); err != nil {
+		return [32]byte{}, err
+	}
+	req.called, req.typed = false, false
 	e.cur.Store(req)
 	defer e.cur.Store(nil)
 	ss, err := e.prov.X25519(ctx, peer)
-	if err == nil && req.asked > asked {
-		req.entered = true
+	if req.typed {
+		// Recorded before the card is released, so every request still
+		// waiting sees it.
+		if err == nil {
+			req.entered = true
+			cs.record(nil)
+		} else if isPINOutcome(err) {
+			cs.record(err)
+		}
 	}
 	return ss, err
+}
+
+// isPINOutcome reports errors that are the answer to a prompt: wrong PIN,
+// blocked, or not entered (cancelled, empty, too long).
+func isPINOutcome(err error) bool {
+	var pe *keyprovider.PINError
+	return errors.As(err, &pe) || errors.Is(err, keyprovider.ErrPINBlocked) ||
+		errors.Is(err, keyprovider.ErrPINRequired)
 }
 
 func (a *Agent) warn(m string) {
@@ -365,6 +441,15 @@ func (a *Agent) prompt(e *entry, retriesLeft int) (string, error) {
 		return "", keyprovider.ErrPINRequired
 	}
 	req.called = true
+	if err := req.ctx.Err(); err != nil {
+		// The daemon's deadline passed while this request waited.
+		return "", fmt.Errorf("%w: %w", keyprovider.ErrPINRequired, err)
+	}
+	if epoch, outcome := e.cs.last(); epoch != req.start && outcome != nil {
+		// A prompt for this card failed after this request began: answer
+		// with that outcome instead of asking again.
+		return "", outcome
+	}
 	a.promptMu.Lock()
 	defer a.promptMu.Unlock()
 	if retriesLeft <= 0 {
@@ -375,6 +460,7 @@ func (a *Agent) prompt(e *entry, retriesLeft int) (string, error) {
 		return "", keyprovider.ErrPINRequired
 	}
 	req.asked++
+	req.typed = true
 	if retriesLeft == 1 {
 		a.p.Warn(msg.LastPINRetry)
 	}
@@ -388,7 +474,7 @@ func (a *Agent) entry(ref keyref.Ref) (*entry, error) {
 	if e := a.entries[ref]; e != nil {
 		return e, nil
 	}
-	e := &entry{ref: ref, sem: make(chan struct{}, 1)}
+	e := &entry{ref: ref, cs: a.cardLocked(ref.Serial)}
 	prov, err := a.b.Provider(ref, func(retriesLeft int) (string, error) {
 		return a.prompt(e, retriesLeft)
 	})
@@ -398,6 +484,21 @@ func (a *Agent) entry(ref keyref.Ref) (*entry, error) {
 	e.prov, e.desc = prov, prov.Describe()
 	a.entries[ref] = e
 	return e, nil
+}
+
+func (a *Agent) card(serial uint32) *cardState {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.cardLocked(serial)
+}
+
+func (a *Agent) cardLocked(serial uint32) *cardState {
+	cs := a.cards[serial]
+	if cs == nil {
+		cs = &cardState{sem: make(chan struct{}, 1)}
+		a.cards[serial] = cs
+	}
+	return cs
 }
 
 // drop forgets and closes e unless it was already replaced.
@@ -449,6 +550,8 @@ func closeProvider(p keyprovider.Provider) {
 func userErr(err error) error {
 	var pe *keyprovider.PINError
 	switch {
+	case errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled):
+		return &ipc.Error{Code: ipc.CodeUnavailable, Message: msg.AgentRequestExpired}
 	case errors.Is(err, keyprovider.ErrPINBlocked):
 		return &ipc.Error{Code: ipc.CodePINBlocked, Message: msg.AgentPINBlocked}
 	case errors.As(err, &pe):
