@@ -58,11 +58,9 @@ func (k softStaticKey) SharedSecret(peer NoisePublicKey, use KeyUse) ([NoisePubl
 	return k.sk.sharedSecret(peer)
 }
 
-// staticSharedSecret computes the DH between the device's static key and
-// peer. The caller must hold device.staticIdentity (read or write). On any
-// failure the returned secret is zero.
-func (device *Device) staticSharedSecret(peer NoisePublicKey, use KeyUse) (ss [NoisePublicKeySize]byte, err error) {
-	key := device.staticIdentity.key
+// sharedSecretWith runs one DH step on key, mapping a nil key, a key error
+// or an all-zero secret to an error. On any failure the secret is zero.
+func sharedSecretWith(key StaticKey, peer NoisePublicKey, use KeyUse) (ss [NoisePublicKeySize]byte, err error) {
 	if key == nil {
 		return ss, errNoStaticKey
 	}
@@ -74,6 +72,12 @@ func (device *Device) staticSharedSecret(peer NoisePublicKey, use KeyUse) (ss [N
 		setZero(ss[:])
 	}
 	return ss, err
+}
+
+// staticSharedSecret computes the DH between the device's static key and
+// peer. The caller must hold device.staticIdentity (read or write).
+func (device *Device) staticSharedSecret(peer NoisePublicKey, use KeyUse) ([NoisePublicKeySize]byte, error) {
+	return sharedSecretWith(device.staticIdentity.key, peer, use)
 }
 
 // SetStaticKey installs k as the device's static identity; nil clears it.
@@ -131,6 +135,7 @@ func (device *Device) SetStaticKey(k StaticKey) error {
 	// update key material
 
 	device.staticIdentity.key = k
+	device.staticIdentity.gen++
 	device.staticIdentity.publicKey = publicKey
 	device.cookieChecker.Init(publicKey)
 
@@ -157,22 +162,44 @@ func (device *Device) SetStaticKey(k StaticKey) error {
 // peer, for use after a StaticKey that was failing (for example a removed
 // token) becomes usable again. It returns the number of peers for which
 // the computation failed; those peers cannot handshake.
+//
+// The key may take seconds per call (hardware token), so it is never called
+// with a device lock held. The key and peer list are snapshotted, each
+// secret is computed lock-free, and the result is stored under
+// staticIdentity.RLock + handshake.mutex.Lock (the order used by
+// CreateMessageInitiation) only if SetStaticKey has not run meanwhile; if it
+// has, that call already recomputed everything and this pass starts over.
 func (device *Device) RecomputeStaticStatic() (failed int) {
-	// Same lock order and handshake read-locking as SetStaticKey: the
-	// exclusive staticIdentity lock already keeps out every other reader
-	// and writer of precomputedStaticStatic.
-	device.staticIdentity.Lock()
-	defer device.staticIdentity.Unlock()
-
+restart:
+	device.staticIdentity.RLock()
+	key := device.staticIdentity.key
+	gen := device.staticIdentity.gen
 	device.peers.RLock()
-	defer device.peers.RUnlock()
-
+	peers := make([]*Peer, 0, len(device.peers.keyMap))
 	for _, peer := range device.peers.keyMap {
+		peers = append(peers, peer)
+	}
+	device.peers.RUnlock()
+	device.staticIdentity.RUnlock()
+
+	failed = 0
+	for _, peer := range peers {
 		handshake := &peer.handshake
-		handshake.mutex.RLock()
-		var err error
-		handshake.precomputedStaticStatic, err = device.staticSharedSecret(handshake.remoteStatic, UseStaticStatic)
-		handshake.mutex.RUnlock()
+		// remoteStatic is immutable after NewPeer
+		ss, err := sharedSecretWith(key, handshake.remoteStatic, UseStaticStatic)
+
+		device.staticIdentity.RLock()
+		if device.staticIdentity.gen != gen {
+			device.staticIdentity.RUnlock()
+			setZero(ss[:])
+			goto restart
+		}
+		handshake.mutex.Lock()
+		handshake.precomputedStaticStatic = ss
+		handshake.mutex.Unlock()
+		device.staticIdentity.RUnlock()
+
+		setZero(ss[:])
 		if err != nil {
 			failed++
 		}

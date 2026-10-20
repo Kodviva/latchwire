@@ -15,7 +15,17 @@ rebases onto upstream.
   helper. The helper returns `errNoStaticKey` when no key is set and rejects an
   all-zero secret, so every call site keeps the upstream zero-secret check.
 - `device/statickey_test.go`: tests for the above (call roles, interop with the
-  software key, UAPI, error paths, recompute).
+  software key, UAPI, error paths, recompute, no stall/deadlock while the key is slow).
+
+`RecomputeStaticStatic` locking: the key can take seconds per call, so it is
+never called with a device lock held. It snapshots the key, a generation counter
+(`staticIdentity.gen`, bumped by `SetStaticKey`) and the peer list under
+`staticIdentity.RLock` + `peers.RLock`, computes each secret with no lock held,
+then stores it under `staticIdentity.RLock` + `handshake.mutex.Lock` (the order
+`CreateMessageInitiation` uses) only if the generation is unchanged; otherwise
+the pass restarts. Handshakes and `SetStaticKey` therefore proceed while a slow
+token is being queried. `SetStaticKey` itself still calls the key under the
+exclusive lock, as upstream `SetPrivateKey` did for its DH.
 
 ## Changed
 
