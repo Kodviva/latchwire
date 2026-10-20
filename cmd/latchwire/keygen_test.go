@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -23,6 +25,9 @@ type fakeCard struct {
 	// genErrs are returned by successive Generate calls before it succeeds.
 	genErrs []error
 	gens    []piv.GenerateOptions
+	// mgmtKeys holds a copy of each call's ManagementKey (gens shares the
+	// caller's buffer, which is cleared after use).
+	mgmtKeys [][]byte
 
 	// slotPub, if set, is what Provider reports for an occupied slot.
 	slotPub *[32]byte
@@ -31,6 +36,7 @@ type fakeCard struct {
 
 func (f *fakeCard) Generate(o piv.GenerateOptions) (keyref.Ref, [32]byte, error) {
 	f.gens = append(f.gens, o)
+	f.mgmtKeys = append(f.mgmtKeys, bytes.Clone(o.ManagementKey))
 	if len(f.genErrs) > 0 {
 		err := f.genErrs[0]
 		f.genErrs = f.genErrs[1:]
@@ -272,6 +278,82 @@ func TestKeygenSlotOccupiedUnusableKey(t *testing.T) {
 		t.Fatalf("exit %d", code)
 	}
 	if !strings.Contains(te.errOut.String(), piv.ErrImportedKey.Error()) {
+		t.Errorf("stderr: %s", te.errOut)
+	}
+}
+
+func TestKeygenPromptsForManagementKey(t *testing.T) {
+	for _, n := range []int{16, 24, 32} {
+		mk := make([]byte, n)
+		for i := range mk {
+			mk[i] = byte(0xa0 + i)
+		}
+		mkHex := hex.EncodeToString(mk)
+		card := &fakeCard{serial: 7, pub: testPub(), genErrs: []error{piv.ErrManagementKeyRequired}}
+		te := newTestEnv(card, "654321", mkHex)
+		if code := run(context.Background(), te.env, []string{"keygen", "--serial", "7"}); code != 0 {
+			t.Fatalf("%d-byte key: exit %d, stderr: %s", n, code, te.errOut)
+		}
+		if len(card.gens) != 2 {
+			t.Fatalf("%d-byte key: Generate called %d times, want 2", n, len(card.gens))
+		}
+		if card.mgmtKeys[0] != nil {
+			t.Errorf("first call already carried a management key")
+		}
+		if !bytes.Equal(card.mgmtKeys[1], mk) {
+			t.Errorf("%d-byte key: retry used management key %x, want %x", n, card.mgmtKeys[1], mk)
+		}
+		if g := card.gens[1]; g.PIN != "654321" {
+			t.Errorf("retry options = %+v", g)
+		}
+		if !bytes.Equal(card.gens[1].ManagementKey, make([]byte, n)) {
+			t.Errorf("%d-byte key: management key buffer not cleared after use", n)
+		}
+		if want := []string{fmt.Sprintf(msg.KeygenPINPromptFmt, 7), msg.KeygenManagementKeyPrompt}; !slices.Equal(te.secrets.prompts, want) {
+			t.Errorf("prompts = %q, want %q", te.secrets.prompts, want)
+		}
+		if strings.Contains(strings.ToLower(te.out.String()+te.errOut.String()), mkHex) {
+			t.Error("management key was printed")
+		}
+	}
+}
+
+func TestKeygenRejectsBadManagementKeyHex(t *testing.T) {
+	for _, bad := range []string{
+		"",
+		"0011",
+		strings.Repeat("ab", 20), // 20 bytes: not an AES/3DES key length
+		strings.Repeat("zz", 24), // not hex
+		strings.Repeat("ab", 24) + "a",
+	} {
+		card := &fakeCard{serial: 7, pub: testPub(), genErrs: []error{piv.ErrManagementKeyRequired}}
+		te := newTestEnv(card, "654321", bad)
+		if code := run(context.Background(), te.env, []string{"keygen", "--serial", "7"}); code != 1 {
+			t.Errorf("%q: exit %d, want 1", bad, code)
+		}
+		if len(card.gens) != 1 {
+			t.Errorf("%q: Generate called %d times, want 1 (no retry with a bad key)", bad, len(card.gens))
+		}
+		if !strings.Contains(te.errOut.String(), msg.KeygenBadManagementKey) {
+			t.Errorf("%q: stderr: %s", bad, te.errOut)
+		}
+		if bad != "" && strings.Contains(te.errOut.String(), bad) {
+			t.Errorf("%q: input was echoed", bad)
+		}
+	}
+}
+
+func TestKeygenWrongManagementKeyRetriedOnce(t *testing.T) {
+	card := &fakeCard{serial: 7, pub: testPub(),
+		genErrs: []error{piv.ErrManagementKeyRequired, piv.ErrManagementKeyRequired, piv.ErrManagementKeyRequired}}
+	te := newTestEnv(card, "654321", strings.Repeat("01", 24))
+	if code := run(context.Background(), te.env, []string{"keygen", "--serial", "7"}); code != 1 {
+		t.Fatalf("exit %d, want 1", code)
+	}
+	if len(card.gens) != 2 || len(te.secrets.prompts) != 2 {
+		t.Errorf("gens=%d prompts=%d, want 2 and 2", len(card.gens), len(te.secrets.prompts))
+	}
+	if !strings.Contains(te.errOut.String(), msg.KeygenManagementKeyRejected) {
 		t.Errorf("stderr: %s", te.errOut)
 	}
 }
