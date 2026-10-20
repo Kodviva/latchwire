@@ -9,7 +9,7 @@ to expect.
 **Do not open a public issue, pull request or discussion for a security
 problem.** Send a private report by email to:
 
-> [GÜVENLİK E-POSTASI]
+> security@kodviva.com
 
 Keep working exploit details out of the first email if you can; we will
 arrange a safe channel in our reply.
