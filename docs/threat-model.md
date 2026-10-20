@@ -24,11 +24,17 @@ Latchwire distinguishes how strongly a key provider protects the private key:
 
 - **Tier 1**: a hardware token whose private key never leaves the device.
   The YubiKey PIV backend is Tier 1.
-- **Tier 2**: weaker providers, for example a key held in software.
+- **Tier 2**: backends such as a TPM / Windows Hello, a Secure Enclave /
+  Touch ID, or a FIDO2 hmac-secret (WebAuthn PRF) passkey. The key is stored
+  encrypted by hardware, but it is revealed in RAM while it is in use. A Tier 2
+  backend never carries the Tier 1 "cannot be copied" claim.
 
-Version 1 contains **Tier 1 only**. The only other provider in the source tree,
-`internal/keyprovider/softkey`, is for tests; no production code imports it,
-and the tunnel configuration has no way to select it. If a Tier 2 provider is
+The architecture allows Tier 2 backends, but version 1 contains **Tier 1
+only**. The only other provider in the source tree,
+`internal/keyprovider/softkey`, is an in-memory key for tests (it is not even
+encrypted at rest and is only tagged `Tier2` in code so that it can never be
+mistaken for Tier 1); no production code imports it, and the tunnel
+configuration has no way to select it. If a Tier 2 provider is
 ever added, it must be labelled as Tier 2 wherever the key is shown (CLI, user
 interface, web site) and must never be described with the Tier 1 claim.
 
@@ -223,7 +229,7 @@ compromised root.
   and is not hardware protected.
 - **Counterfeit or compromised tokens and firmware.** Latchwire trusts what the
   card reports about where a key came from. It does not (yet) verify a PIV
-  attestation certificate. This is a planned addition.
+  attestation certificate. This is a possible future addition.
 - **The PIN prompt.** The agent asks for the PIN on its terminal when the
   daemon's request needs it. A process that can request a connect as your user
   can cause a prompt, and an administrator whose own card is missing can cause
@@ -259,9 +265,13 @@ they need `se` = DH(your static private key, the server's fresh ephemeral
 key). That value did not exist before the handshake began, and without the
 card it cannot be computed. So `ss` cannot be turned into a working session.
 One side effect is worth knowing: a forged but authentic-looking initiation
-moves the server's replay timestamp for your key, which can make the server
-reject your next real initiation for a while. That needs the attacker to have
-read the daemon's memory already, at which point the session keys of the
+moves the server's replay timestamp for your key. The attacker chooses that
+timestamp (a TAI64N value), so a far-future value makes the server reject your
+real initiations until the server's in-memory state is reset (the server
+restarts or the peer is removed and added again) or the server's clock passes
+the forged timestamp. This is a denial of service, not impersonation: the
+attacker still gets no session. It needs the attacker to have read the
+daemon's memory already, at which point the session keys of the
 running session are exposed as well (section 5.3). The session ends at the
 next rekey or card removal.
 
@@ -295,8 +305,8 @@ hundreds of milliseconds). Latchwire bounds that:
 - The **responder** role (consuming a handshake initiation, `UseResponder`) and
   the **initiator** role (consuming a handshake response, `UseInitiator`) have
   **separate token buckets: 5 operations per second, burst 10, each**.
-- In-flight card calls are capped **per role: 2 for the responder and 2 for the
-  initiator plus the one-time static-static computation** (separate pools).
+- In-flight card calls are capped **per role: 2 for the responder, 2 shared by
+  the initiator and the static-static computation** (separate pools).
   When a pool is full, the call fails at once (`ErrUnavailable`) rather than
   queueing. A call that timed out but whose card operation has not returned
   still counts until it returns.

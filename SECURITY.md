@@ -74,11 +74,5 @@ Out of scope:
 - Reports that need root, or physical access to an unlocked machine with the
   card plugged in and the PIN entered, with no extra weakness.
 
-## Safe harbour
-
-If you act in good faith, stay within these rules, and give us time to fix the
-problem, we will not take legal action against you for your research. Test with
-your own hardware and accounts only.
-
 Related documents: [threat model](docs/threat-model.md),
 [contributing](CONTRIBUTING.md), [hardware checklist](docs/hardware-checklist.md).
