@@ -1,8 +1,9 @@
 # Latchwire threat model
 
 This document says what Latchwire protects, what it does not, and where in the
-code each protection lives. It describes the code of the core CLI (macOS and
-Linux) as of commit `dfa8d35`. Latchwire is pre-release software and has not
+code each protection lives. It describes the core CLI (macOS and Linux) at the
+same revision as this file; its git history shows which code each version
+matches. Latchwire is pre-release software and has not
 had an independent security review. If a claim here and the code disagree, the
 code is right and this document has a bug: please report it (see
 [SECURITY.md](../SECURITY.md)).

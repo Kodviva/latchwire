@@ -112,6 +112,22 @@ card A must never be sent to card B.
   maps it to "card unavailable" and reopens the reader.
 - `piv/reset_test.go`: unit test for `sameCard` (no card).
 
+## Coupling: the management-key probe (not a patch)
+
+Latchwire checks a management key without side effects
+(`internal/keyprovider/piv/card.go`, `yubiKey.AuthenticateManagementKey`)
+by calling `GenerateKey` with a zero slot and a zero `piv.Key`: piv-go
+authenticates the management key first, then refuses the zero algorithm
+locally before any GENERATE command is sent. Success is recognised **only by
+piv-go's exact error text `unsupported algorithm`** (`probeSentinel`, from
+`ykGenerateKey` in `piv/key.go`); any other error counts as a failed
+authentication. This couples Latchwire to an unexported detail of piv-go.
+On every piv-go upgrade, re-check that `GenerateKey` still authenticates
+before validating the key options and still returns exactly that text for
+algorithm 0; otherwise fresh-card detection and the stored-key check stop
+working (they fail closed: every key looks wrong) and the probe must be
+rewritten.
+
 ## Tests
 
 `cd third_party/piv-go && go test ./...` runs only the unit tests: every
