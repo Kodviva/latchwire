@@ -1,0 +1,819 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Latchwire — hardware-bound WireGuard keys</title>
+<meta name="description" content="Open-source WireGuard client that keeps the private key inside a hardware security key such as a YubiKey. No key plugged in, no tunnel.">
+<link rel="canonical" href="https://latchwire.com/">
+<meta name="theme-color" content="#0a0e16">
+<meta name="color-scheme" content="dark">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Latchwire">
+<meta property="og:title" content="Latchwire — hardware-bound WireGuard keys">
+<meta property="og:description" content="Open-source WireGuard client that keeps the private key inside a hardware security key such as a YubiKey. No key plugged in, no tunnel.">
+<meta property="og:url" content="https://latchwire.com/">
+<meta property="og:image" content="https://latchwire.com/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Latchwire — Your VPN key can't be copied.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Latchwire — hardware-bound WireGuard keys">
+<meta name="twitter:description" content="Open-source WireGuard client that keeps the private key inside a hardware security key such as a YubiKey. No key plugged in, no tunnel.">
+<meta name="twitter:image" content="https://latchwire.com/og.png">
+<style>
+  :root{--bg:#0a0e16;--surface:#141a26;--surface2:#0f1521;--line:#222c3c;--text:#e8edf4;--muted:#93a0b4;--faint:#6b7689;
+    --amber:#e8a13a;--amber-ink:#1a1003;--amber-tint:rgba(232,161,58,.09);--amber-line:rgba(232,161,58,.38);
+    --blue:#5b9bf0;--blue-ink:#04101f;--ok:#46c98b;--warn:#f08a5b;
+    --mono:"SF Mono",ui-monospace,Menlo,Consolas,monospace}
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth;-webkit-text-size-adjust:100%}
+  @media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;background:var(--bg);color:var(--text);line-height:1.65;-webkit-font-smoothing:antialiased;overflow-wrap:break-word}
+  .wrap{max-width:960px;margin-inline:auto;padding-inline:24px}
+  @media (max-width:600px){.wrap{padding-inline:16px}}
+  a{color:var(--blue);text-decoration:none}
+  a:hover{text-decoration:underline}
+  :focus-visible{outline:2px solid var(--amber);outline-offset:3px;border-radius:6px}
+  code,pre{font-family:var(--mono)}
+  .vh{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+  .skip{position:absolute;inset-inline-start:16px;top:-60px;z-index:20;background:var(--amber);color:var(--amber-ink);padding:10px 16px;border-radius:10px;font-weight:600}
+  .skip:focus{top:12px}
+
+  /* header */
+  .site-head{position:sticky;top:0;z-index:10;border-bottom:1px solid var(--line);background:rgba(10,14,22,.88);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px)}
+  .head-in{display:flex;align-items:center;gap:8px 18px;min-height:64px;flex-wrap:wrap}
+  .brand{display:inline-flex;align-items:center;gap:10px;font-weight:700;font-size:1.08rem;color:var(--text);min-height:44px;letter-spacing:-.01em}
+  .brand:hover{text-decoration:none}
+  .brand svg{width:26px;height:26px;color:var(--amber);flex:none}
+  .nav{display:flex;align-items:center;flex-wrap:wrap;gap:0 4px;margin-inline-start:auto}
+  .nav a{display:inline-flex;align-items:center;min-height:44px;padding-inline:10px;color:var(--muted);font-size:.92rem;white-space:nowrap;border-radius:8px}
+  .nav a:hover{color:var(--text);text-decoration:none;background:var(--surface)}
+  .nav a svg{width:16px;height:16px;margin-inline-end:6px}
+  .lang-wrap{display:flex;align-items:center}
+  .lang-sel{appearance:none;-webkit-appearance:none;min-height:44px;background-color:var(--surface);color:var(--text);border:1px solid var(--line);border-radius:10px;
+    padding-block:8px;padding-inline:12px 32px;font:inherit;font-size:.88rem;cursor:pointer;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2393a0b4' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+    background-repeat:no-repeat;background-position:right 11px center}
+  [dir="rtl"] .lang-sel{background-position:left 11px center}
+  .lang-sel:hover{border-color:var(--faint)}
+  @media (max-width:760px){
+    .site-head{position:static}
+    .head-in{padding-block:8px}
+    .lang-wrap{margin-inline-start:auto}
+    .nav{order:3;flex-basis:100%;margin-inline:-10px 0;gap:0}
+  }
+
+  /* hero */
+  .hero{padding-block:72px 40px}
+  .eyebrow{font-size:.78rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--amber);margin:0}
+  :lang(ar) .eyebrow,:lang(hi) .eyebrow,:lang(zh) .eyebrow,:lang(ja) .eyebrow{letter-spacing:0}
+  h1{font-size:clamp(2.1rem,6vw,3.4rem);letter-spacing:-.03em;line-height:1.08;margin:14px 0 18px;max-width:16ch}
+  :lang(ar) h1,:lang(hi) h1,:lang(zh) h1,:lang(ja) h1{letter-spacing:0;line-height:1.3}
+  .hero .sub{font-size:1.14rem;color:var(--muted);max-width:640px;margin:0}
+  .status{display:inline-flex;align-items:center;gap:9px;margin-top:22px;font-size:.86rem;font-weight:600;color:var(--amber);background:var(--amber-tint);border:1px solid var(--amber-line);padding:6px 14px;border-radius:999px}
+  .status .dot{width:8px;height:8px;border-radius:50%;background:var(--amber);flex:none}
+  .cta{display:flex;gap:12px;flex-wrap:wrap;margin-top:28px}
+  .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:48px;padding-block:12px;padding-inline:22px;border-radius:12px;font-weight:600;font-size:.98rem;border:1px solid transparent}
+  .btn:hover{text-decoration:none}
+  .btn svg{width:18px;height:18px;flex:none}
+  .btn.primary{background:var(--amber);color:var(--amber-ink)}
+  .btn.primary:hover{filter:brightness(1.08)}
+  .btn.ghost{border-color:var(--line);color:var(--text)}
+  .btn.ghost:hover{border-color:var(--blue)}
+  @media (max-width:420px){.cta .btn{flex:1 1 100%}}
+
+  /* sections */
+  main section{padding-block:30px;scroll-margin-top:80px}
+  h2{font-size:1.6rem;letter-spacing:-.02em;line-height:1.25;margin:0 0 8px}
+  :lang(ar) h2,:lang(hi) h2,:lang(zh) h2,:lang(ja) h2{letter-spacing:0}
+  .lead{color:var(--muted);margin:0 0 20px;max-width:680px}
+  h3{font-size:1.04rem;margin:0 0 6px;line-height:1.35}
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:20px}
+  .card p{margin:0;color:var(--muted);font-size:.94rem}
+
+  .steps{list-style:none;margin:20px 0 0;padding:0;display:grid;grid-template-columns:repeat(3,1fr);gap:14px;counter-reset:step}
+  .steps li{counter-increment:step;position:relative}
+  .steps li::before{content:counter(step);display:inline-grid;place-items:center;width:32px;height:32px;border-radius:50%;border:1.5px solid var(--amber);color:var(--amber);font-weight:700;font-size:.95rem;margin-bottom:12px}
+
+  .tablebox{overflow-x:auto;-webkit-overflow-scrolling:touch;border:1px solid var(--line);border-radius:14px;background:var(--surface2);margin-top:20px}
+  table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+  th,td{text-align:start;padding:13px 16px;border-bottom:1px solid var(--line);vertical-align:top}
+  tbody tr:last-child th,tbody tr:last-child td{border-bottom:0}
+  thead th{color:var(--muted);font-weight:600;font-size:.86rem}
+  tbody th{font-weight:600;color:var(--text)}
+  td{color:var(--muted)}
+  .col-lw{background:var(--amber-tint);color:var(--text)}
+  thead .col-lw{color:var(--amber)}
+
+  .grid2{display:grid;grid-template-columns:repeat(2,1fr);gap:14px;margin-top:20px}
+  .hw .top{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:6px}
+  .hw h3{margin:0}
+  .badge{display:inline-block;font-size:.76rem;font-weight:700;padding:3px 10px;border-radius:999px;white-space:nowrap;border:1px solid var(--line);color:var(--muted)}
+  .badge.now{color:var(--ok);border-color:rgba(70,201,139,.4);background:rgba(70,201,139,.08)}
+  .hw.supported{border-color:var(--amber-line)}
+  .hw.dashed{background:transparent;border-style:dashed;border-color:var(--faint)}
+
+  .sec-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:14px;margin-top:20px}
+  .checklist{list-style:none;margin:10px 0 0;padding:0;display:grid;gap:10px}
+  .checklist li{display:flex;gap:10px;align-items:flex-start;color:var(--muted);font-size:.95rem}
+  .checklist svg{width:18px;height:18px;flex:none;margin-top:3px}
+  .yes svg{color:var(--ok)}
+  .no svg{color:var(--warn)}
+  .card.no{border-color:rgba(240,138,91,.35)}
+  .notes{margin-top:14px}
+  .links{display:flex;flex-wrap:wrap;gap:6px 22px;margin-top:16px}
+  .links a{display:inline-flex;align-items:center;gap:6px;min-height:44px;font-weight:600}
+  .links a svg{width:15px;height:15px}
+  [dir="rtl"] .links a svg.arrow{transform:scaleX(-1)}
+
+  .code{position:relative;margin-top:14px}
+  pre{direction:ltr;text-align:left;unicode-bidi:isolate;background:var(--surface2);border:1px solid var(--line);border-radius:12px;padding:18px 20px;padding-inline-end:20px;overflow-x:auto;font-size:.88rem;line-height:1.7;color:#cdd6e4;margin:0}
+  pre .p{color:var(--amber);user-select:none;-webkit-user-select:none}
+  .copy{position:absolute;top:8px;right:8px;min-height:44px;min-width:44px;padding-inline:14px;border-radius:10px;border:1px solid var(--line);background:var(--surface);color:var(--text);font:inherit;font-size:.84rem;font-weight:600;cursor:pointer}
+  .copy:hover{border-color:var(--blue)}
+  pre{padding-top:62px}
+  @media (min-width:601px){pre{padding-top:18px}}
+  .req{color:var(--muted);margin:16px 0 0;font-size:.95rem}
+  .req code,.lead code{color:var(--text);font-size:.9em}
+  .indev{margin:8px 0 0;color:var(--muted);font-size:.95rem}
+
+  .road{list-style:none;margin:20px 0 0;padding:0;position:relative}
+  .road li{position:relative;padding-inline-start:36px;padding-bottom:20px}
+  .road li::before{content:"";position:absolute;inset-inline-start:8px;top:22px;bottom:-4px;width:2px;background:var(--line)}
+  .road li:last-child::before{display:none}
+  .road .mk{position:absolute;inset-inline-start:0;top:4px;width:18px;height:18px;border-radius:50%;border:2px solid var(--faint);background:var(--bg);display:grid;place-items:center}
+  .road .done .mk{border-color:var(--amber);background:var(--amber);color:var(--amber-ink)}
+  .road .mk svg{width:12px;height:12px}
+  .road h3{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin:0}
+  .road p{margin:2px 0 0;color:var(--muted);font-size:.94rem}
+  .badge.done{color:var(--amber);border-color:var(--amber-line);background:var(--amber-tint)}
+
+  footer{border-top:1px solid var(--line);margin-top:40px;padding-block:32px 56px;color:var(--muted);font-size:.9rem}
+  footer p{margin:0 0 6px}
+  footer .links{margin-top:10px}
+  footer .links a{font-weight:500}
+
+  @media (max-width:760px){
+    .steps,.grid2,.sec-grid{grid-template-columns:1fr}
+    .hero{padding-block:44px 24px}
+  }
+</style>
+</head>
+<body>
+<a class="skip" href="#main" data-i18n="a11y.skip">Skip to content</a>
+
+<header class="site-head">
+  <div class="wrap head-in">
+    <a class="brand" href="/">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="7.5" cy="12" r="4.5"/><circle cx="7.5" cy="12" r="1.2"/><path d="M12 12h9.5M18.5 12v3.5M21.5 12v2.5"/></svg>
+      <span>Latchwire</span>
+    </a>
+    <nav class="nav">
+      <a href="#how" data-i18n="nav.how">How it works</a>
+      <a href="#hw" data-i18n="nav.hw">Hardware</a>
+      <a href="#security" data-i18n="nav.sec">Security</a>
+      <a href="#install" data-i18n="nav.install">Install</a>
+      <a href="https://github.com/Kodviva/latchwire"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><path d="M12 .5a11.5 11.5 0 0 0-3.64 22.41c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.53-1.33-1.28-1.69-1.28-1.69-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.29 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.77 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.8 1.19 1.83 1.19 3.09 0 4.42-2.7 5.39-5.26 5.68.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .5z"/></svg>GitHub</a>
+    </nav>
+    <div class="lang-wrap">
+      <label for="lang" class="vh" data-i18n="nav.lang">Language</label>
+      <select id="lang" class="lang-sel"></select>
+    </div>
+  </div>
+</header>
+
+<main id="main">
+  <section class="hero" aria-labelledby="hero-h">
+    <div class="wrap">
+      <p class="eyebrow" data-i18n="hero.eyebrow">Open source · WireGuard® compatible</p>
+      <h1 id="hero-h" data-i18n="hero.h1">Your VPN key can't be copied.</h1>
+      <p class="sub" data-i18n="hero.sub">Latchwire keeps your WireGuard private key inside a hardware security key such as a YubiKey. The key is generated on the device and never touches your disk or memory. No key plugged in, no tunnel.</p>
+      <p class="status"><span class="dot" aria-hidden="true"></span><span data-i18n="hero.status">Early preview — command-line core for macOS and Linux</span></p>
+      <div class="cta">
+        <a class="btn primary" href="https://github.com/Kodviva/latchwire"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><path d="M12 .5a11.5 11.5 0 0 0-3.64 22.41c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.53-1.33-1.28-1.69-1.28-1.69-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.29 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.77 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.8 1.19 1.83 1.19 3.09 0 4.42-2.7 5.39-5.26 5.68.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .5z"/></svg><span data-i18n="hero.cta1">View on GitHub</span></a>
+        <a class="btn ghost" href="#how" data-i18n="hero.cta2">How it works</a>
+      </div>
+    </div>
+  </section>
+
+  <div class="wrap">
+    <section id="how" aria-labelledby="how-h">
+      <h2 id="how-h" data-i18n="how.h">How it works</h2>
+      <ol class="steps">
+        <li class="card"><h3 data-i18n="how.s1h">Plug in your key</h3><p data-i18n="how.s1p">Latchwire generates the WireGuard key inside it, in a dedicated PIV slot. Your login slots are left untouched.</p></li>
+        <li class="card"><h3 data-i18n="how.s2h">Add the public key to your server</h3><p data-i18n="how.s2p">Any standard WireGuard server works — OPNsense, pfSense, Linux, MikroTik and others. No plugins, no server changes.</p></li>
+        <li class="card"><h3 data-i18n="how.s3h">Enter your PIN and connect</h3><p data-i18n="how.s3p">The PIN is asked once while the key is plugged in. Pull the key out and the tunnel closes within about two seconds.</p></li>
+      </ol>
+    </section>
+
+    <section id="compare" aria-labelledby="cmp-h">
+      <h2 id="cmp-h" data-i18n="cmp.h">Classic WireGuard vs Latchwire</h2>
+      <div class="tablebox" role="region" aria-labelledby="cmp-h" tabindex="0">
+        <table>
+          <thead>
+            <tr><th scope="col"><span class="vh" data-i18n="cmp.q">Question</span></th><th scope="col" data-i18n="cmp.classic">Classic WireGuard</th><th scope="col" class="col-lw">Latchwire</th></tr>
+          </thead>
+          <tbody>
+            <tr><th scope="row" data-i18n="cmp.r1q">Where is the private key?</th><td data-i18n="cmp.r1a">A file on your computer</td><td class="col-lw" data-i18n="cmp.r1b">Inside the hardware key</td></tr>
+            <tr><th scope="row" data-i18n="cmp.r2q">Can it be copied?</th><td data-i18n="cmp.r2a">Yes, silently</td><td class="col-lw" data-i18n="cmp.r2b">No</td></tr>
+            <tr><th scope="row" data-i18n="cmp.r3q">Laptop stolen?</th><td data-i18n="cmp.r3a">Rotate the key everywhere</td><td class="col-lw" data-i18n="cmp.r3b">No access without the key</td></tr>
+            <tr><th scope="row" data-i18n="cmp.r4q">Server side</th><td data-i18n="cmp.r4a">Standard WireGuard</td><td class="col-lw" data-i18n="cmp.r4b">The same — standard WireGuard</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="hw" aria-labelledby="hw-h">
+      <h2 id="hw-h" data-i18n="hw.h">Hardware</h2>
+      <p class="lead" data-i18n="hw.lead">Latchwire talks to the key through standard interfaces. Support is added one device family at a time.</p>
+      <div class="grid2">
+        <div class="card hw supported"><div class="top"><h3>YubiKey 5</h3><span class="badge now" data-i18n="hw.now">Supported now</span></div><p data-i18n="hw.c1p">PIV, firmware 5.7 or later</p></div>
+        <div class="card hw"><div class="top"><h3 data-i18n="hw.c2h">OpenPGP cards</h3><span class="badge" data-i18n="hw.planned">Planned</span></div><p>YubiKey, Nitrokey 3</p></div>
+        <div class="card hw"><div class="top"><h3>PKCS#11 / HSM</h3><span class="badge" data-i18n="hw.planned">Planned</span></div><p data-i18n="hw.c3p">Devices with X25519 support</p></div>
+        <div class="card hw dashed"><div class="top"><h3>TPM · Secure Enclave</h3><span class="badge" data-i18n="hw.roadmap">Roadmap</span></div><p data-i18n="hw.c4p">Listed separately: here the key is only encrypted at rest, not uncopyable.</p></div>
+      </div>
+    </section>
+
+    <section id="security" aria-labelledby="sec-h">
+      <h2 id="sec-h" data-i18n="sec.h">Security</h2>
+      <p class="lead" data-i18n="sec.lead">What Latchwire does and does not protect against, stated plainly.</p>
+      <div class="sec-grid">
+        <div class="card yes">
+          <h3 data-i18n="sec.yesH">Protects against</h3>
+          <ul class="checklist">
+            <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 12.5l5 5L20 6.5"/></svg><span data-i18n="sec.y1">Copying the key from your disk or backups</span></li>
+            <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 12.5l5 5L20 6.5"/></svg><span data-i18n="sec.y2">A stolen laptop when the key is not with it</span></li>
+            <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 12.5l5 5L20 6.5"/></svg><span data-i18n="sec.y3">Config files that carry a private key — Latchwire rejects them</span></li>
+          </ul>
+        </div>
+        <div class="card no">
+          <h3 data-i18n="sec.noH">Does not protect against</h3>
+          <ul class="checklist">
+            <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 3.5L2.5 20h19z"/><path d="M12 10v4.5M12 17.2v.1"/></svg><span data-i18n="sec.n1">Malware on your computer: while the key is plugged in, it can use the tunnel.</span></li>
+          </ul>
+        </div>
+      </div>
+      <div class="card notes">
+        <h3 data-i18n="sec.notesH">Good to know</h3>
+        <ul class="checklist">
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="var(--amber)" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="3"/></svg><span data-i18n="sec.note1">The PIN is never stored.</span></li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="var(--amber)" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="3"/></svg><span data-i18n="sec.note2">The default PIN is never tried.</span></li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="var(--amber)" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="3"/></svg><span data-i18n="sec.note3">Every claim on this page is documented.</span></li>
+        </ul>
+        <div class="links">
+          <a href="https://github.com/Kodviva/latchwire/blob/main/docs/threat-model.md"><span data-i18n="sec.tm">Read the threat model</span><svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
+          <a href="https://github.com/Kodviva/latchwire/blob/main/SECURITY.md"><span data-i18n="sec.vuln">Report a vulnerability</span><svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
+        </div>
+      </div>
+    </section>
+
+    <section id="install" aria-labelledby="inst-h">
+      <h2 id="inst-h" data-i18n="inst.h">Install</h2>
+      <h3 data-i18n="inst.sub">Build from source</h3>
+      <div class="code">
+<pre dir="ltr" translate="no"><code id="build-cmds">git clone https://github.com/Kodviva/latchwire
+cd latchwire
+go build -o latchwire ./cmd/latchwire</code></pre>
+        <button type="button" class="copy" id="copy-btn" data-i18n="inst.copy">Copy</button>
+      </div>
+      <span class="vh" id="copy-status" role="status" aria-live="polite"></span>
+      <p class="req" data-i18n="inst.req">Requirements: Go 1.25+, a YubiKey 5 with firmware 5.7+; on Linux also <code>pcscd</code> and <code>libpcsclite</code>.</p>
+      <p class="indev" data-i18n="inst.desktop">Desktop apps for macOS, Windows and Linux are in development.</p>
+      <div class="links">
+        <a href="https://github.com/Kodviva/latchwire/blob/main/docs/hardware-checklist.md"><span data-i18n="inst.check">Hardware test checklist</span><svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
+      </div>
+    </section>
+
+    <section id="roadmap" aria-labelledby="road-h">
+      <h2 id="road-h" data-i18n="road.h">Roadmap</h2>
+      <ol class="road">
+        <li class="done"><span class="mk" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12.5l5 5L19.5 7"/></svg></span><h3><span data-i18n="road.r1">Core</span><span class="badge done" data-i18n="road.done">Done</span></h3><p data-i18n="road.r1p">Command-line client for macOS and Linux</p></li>
+        <li><span class="mk" aria-hidden="true"></span><h3 data-i18n="road.r2">Full network features</h3><p data-i18n="road.r2p">DNS, full tunnel, kill switch</p></li>
+        <li><span class="mk" aria-hidden="true"></span><h3 data-i18n="road.r3">Desktop app and translations</h3><p data-i18n="road.r3p">Desktop app for macOS, Windows and Linux</p></li>
+        <li><span class="mk" aria-hidden="true"></span><h3 data-i18n="road.r4">Signed releases</h3><p data-i18n="road.r4p">Homebrew, Microsoft Store, Linux packages</p></li>
+      </ol>
+    </section>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <p data-i18n="foot.lic">Apache-2.0 licensed · Built by Kodviva</p>
+    <p data-i18n="foot.tm">Latchwire is an independent open-source project. WireGuard is a registered trademark of Jason A. Donenfeld.</p>
+    <div class="links">
+      <a href="https://github.com/Kodviva/latchwire">GitHub</a>
+      <a href="https://github.com/Kodviva/latchwire/blob/main/SECURITY.md" data-i18n="foot.sec">Security policy</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+const LANGS=[["en","English"],["tr","Türkçe"],["zh","中文"],["hi","हिन्दी"],["es","Español"],["fr","Français"],["ar","العربية"],["pt","Português"],["ru","Русский"],["ja","日本語"],["de","Deutsch"]];
+const I18N={
+ en:{
+  "meta.title":"Latchwire — hardware-bound WireGuard keys",
+  "meta.desc":"Open-source WireGuard client that keeps the private key inside a hardware security key such as a YubiKey. No key plugged in, no tunnel.",
+  "a11y.skip":"Skip to content",
+  "nav.how":"How it works","nav.hw":"Hardware","nav.sec":"Security","nav.install":"Install","nav.lang":"Language",
+  "hero.eyebrow":"Open source · WireGuard® compatible",
+  "hero.h1":"Your VPN key can't be copied.",
+  "hero.sub":"Latchwire keeps your WireGuard private key inside a hardware security key such as a YubiKey. The key is generated on the device and never touches your disk or memory. No key plugged in, no tunnel.",
+  "hero.status":"Early preview — command-line core for macOS and Linux",
+  "hero.cta1":"View on GitHub","hero.cta2":"How it works",
+  "how.h":"How it works",
+  "how.s1h":"Plug in your key","how.s1p":"Latchwire generates the WireGuard key inside it, in a dedicated PIV slot. Your login slots are left untouched.",
+  "how.s2h":"Add the public key to your server","how.s2p":"Any standard WireGuard server works — OPNsense, pfSense, Linux, MikroTik and others. No plugins, no server changes.",
+  "how.s3h":"Enter your PIN and connect","how.s3p":"The PIN is asked once while the key is plugged in. Pull the key out and the tunnel closes within about two seconds.",
+  "cmp.h":"Classic WireGuard vs Latchwire","cmp.q":"Question","cmp.classic":"Classic WireGuard",
+  "cmp.r1q":"Where is the private key?","cmp.r1a":"A file on your computer","cmp.r1b":"Inside the hardware key",
+  "cmp.r2q":"Can it be copied?","cmp.r2a":"Yes, silently","cmp.r2b":"No",
+  "cmp.r3q":"Laptop stolen?","cmp.r3a":"Rotate the key everywhere","cmp.r3b":"No access without the key",
+  "cmp.r4q":"Server side","cmp.r4a":"Standard WireGuard","cmp.r4b":"The same — standard WireGuard",
+  "hw.h":"Hardware","hw.lead":"Latchwire talks to the key through standard interfaces. Support is added one device family at a time.",
+  "hw.now":"Supported now","hw.planned":"Planned","hw.roadmap":"Roadmap",
+  "hw.c1p":"PIV, firmware 5.7 or later","hw.c2h":"OpenPGP cards","hw.c3p":"Devices with X25519 support",
+  "hw.c4p":"Listed separately: here the key is only encrypted at rest, not uncopyable.",
+  "sec.h":"Security","sec.lead":"What Latchwire does and does not protect against, stated plainly.",
+  "sec.yesH":"Protects against","sec.y1":"Copying the key from your disk or backups","sec.y2":"A stolen laptop when the key is not with it","sec.y3":"Config files that carry a private key — Latchwire rejects them",
+  "sec.noH":"Does not protect against","sec.n1":"Malware on your computer: while the key is plugged in, it can use the tunnel.",
+  "sec.notesH":"Good to know","sec.note1":"The PIN is never stored.","sec.note2":"The default PIN is never tried.","sec.note3":"Every claim on this page is documented.",
+  "sec.tm":"Read the threat model","sec.vuln":"Report a vulnerability",
+  "inst.h":"Install","inst.sub":"Build from source","inst.copy":"Copy","inst.copied":"Copied",
+  "inst.req":"Requirements: Go 1.25+, a YubiKey 5 with firmware 5.7+; on Linux also <code>pcscd</code> and <code>libpcsclite</code>.",
+  "inst.check":"Hardware test checklist","inst.desktop":"Desktop apps for macOS, Windows and Linux are in development.",
+  "road.h":"Roadmap","road.done":"Done",
+  "road.r1":"Core","road.r1p":"Command-line client for macOS and Linux",
+  "road.r2":"Full network features","road.r2p":"DNS, full tunnel, kill switch",
+  "road.r3":"Desktop app and translations","road.r3p":"Desktop app for macOS, Windows and Linux",
+  "road.r4":"Signed releases","road.r4p":"Homebrew, Microsoft Store, Linux packages",
+  "foot.lic":"Apache-2.0 licensed · Built by Kodviva",
+  "foot.tm":"Latchwire is an independent open-source project. WireGuard is a registered trademark of Jason A. Donenfeld.",
+  "foot.sec":"Security policy"
+ },
+ tr:{
+  "meta.title":"Latchwire — donanıma bağlı WireGuard anahtarları",
+  "meta.desc":"WireGuard özel anahtarını YubiKey gibi bir donanım güvenlik anahtarının içinde tutan açık kaynaklı WireGuard istemcisi. Anahtar takılı değilse tünel de yok.",
+  "a11y.skip":"İçeriğe geç",
+  "nav.how":"Nasıl çalışır","nav.hw":"Donanım","nav.sec":"Güvenlik","nav.install":"Kurulum","nav.lang":"Dil",
+  "hero.eyebrow":"Açık kaynak · WireGuard® uyumlu",
+  "hero.h1":"VPN anahtarınız kopyalanamaz.",
+  "hero.sub":"Latchwire, WireGuard özel anahtarınızı YubiKey gibi bir donanım güvenlik anahtarının içinde tutar. Anahtar cihazın üzerinde üretilir; ne diskinize ne de belleğinize hiç dokunmaz. Anahtar takılı değilse tünel de yok.",
+  "hero.status":"Erken önizleme — macOS ve Linux için komut satırı çekirdeği",
+  "hero.cta1":"GitHub'da incele","hero.cta2":"Nasıl çalışır",
+  "how.h":"Nasıl çalışır",
+  "how.s1h":"Anahtarınızı takın","how.s1p":"Latchwire, WireGuard anahtarını onun içinde, ayrı bir PIV yuvasında üretir. Oturum açma yuvalarınıza dokunulmaz.",
+  "how.s2h":"Açık anahtarı sunucunuza ekleyin","how.s2p":"Herhangi bir standart WireGuard sunucusu yeterli — OPNsense, pfSense, Linux, MikroTik ve diğerleri. Eklenti yok, sunucuda değişiklik yok.",
+  "how.s3h":"PIN'inizi girin ve bağlanın","how.s3p":"Anahtar takılı kaldığı sürece PIN yalnızca bir kez sorulur. Anahtarı çıkardığınızda tünel yaklaşık iki saniye içinde kapanır.",
+  "cmp.h":"Klasik WireGuard ve Latchwire","cmp.q":"Soru","cmp.classic":"Klasik WireGuard",
+  "cmp.r1q":"Özel anahtar nerede?","cmp.r1a":"Bilgisayarınızdaki bir dosyada","cmp.r1b":"Donanım anahtarının içinde",
+  "cmp.r2q":"Kopyalanabilir mi?","cmp.r2a":"Evet, sessizce","cmp.r2b":"Hayır",
+  "cmp.r3q":"Dizüstü bilgisayarınız çalındı mı?","cmp.r3a":"Anahtarı her yerde yenilemeniz gerekir","cmp.r3b":"Anahtar olmadan erişim yok",
+  "cmp.r4q":"Sunucu tarafı","cmp.r4a":"Standart WireGuard","cmp.r4b":"Aynısı — standart WireGuard",
+  "hw.h":"Donanım","hw.lead":"Latchwire anahtarla standart arayüzler üzerinden konuşur. Destek, her seferinde bir cihaz ailesi olmak üzere ekleniyor.",
+  "hw.now":"Şu an destekleniyor","hw.planned":"Planlandı","hw.roadmap":"Yol haritasında",
+  "hw.c1p":"PIV, donanım yazılımı 5.7 veya üstü","hw.c2h":"OpenPGP kartları","hw.c3p":"X25519 destekli cihazlar",
+  "hw.c4p":"Ayrı listeleniyor: burada anahtar yalnızca depolanırken şifrelenir, kopyalanamaz değildir.",
+  "sec.h":"Güvenlik","sec.lead":"Latchwire'ın neye karşı koruduğu ve neye karşı korumadığı, açıkça.",
+  "sec.yesH":"Şunlara karşı korur","sec.y1":"Anahtarın diskinizden veya yedeklerden kopyalanması","sec.y2":"Anahtar yanında değilken çalınan bir dizüstü bilgisayar","sec.y3":"Özel anahtar içeren yapılandırma dosyaları — Latchwire bunları reddeder",
+  "sec.noH":"Şuna karşı korumaz","sec.n1":"Bilgisayarınızdaki kötü amaçlı yazılım: anahtar takılıyken tüneli kullanabilir.",
+  "sec.notesH":"Bilmekte fayda var","sec.note1":"PIN hiçbir zaman saklanmaz.","sec.note2":"Varsayılan PIN asla denenmez.","sec.note3":"Bu sayfadaki her iddia belgelenmiştir.",
+  "sec.tm":"Tehdit modelini okuyun","sec.vuln":"Güvenlik açığı bildirin",
+  "inst.h":"Kurulum","inst.sub":"Kaynaktan derleyin","inst.copy":"Kopyala","inst.copied":"Kopyalandı",
+  "inst.req":"Gereksinimler: Go 1.25+, donanım yazılımı 5.7+ olan bir YubiKey 5; Linux'ta ayrıca <code>pcscd</code> ve <code>libpcsclite</code>.",
+  "inst.check":"Donanım test kontrol listesi","inst.desktop":"macOS, Windows ve Linux için masaüstü uygulamaları geliştiriliyor.",
+  "road.h":"Yol haritası","road.done":"Tamamlandı",
+  "road.r1":"Çekirdek","road.r1p":"macOS ve Linux için komut satırı istemcisi",
+  "road.r2":"Tam ağ özellikleri","road.r2p":"DNS, tam tünel, kill switch",
+  "road.r3":"Masaüstü uygulaması ve çeviriler","road.r3p":"macOS, Windows ve Linux için masaüstü uygulaması",
+  "road.r4":"İmzalı sürümler","road.r4p":"Homebrew, Microsoft Store, Linux paketleri",
+  "foot.lic":"Apache-2.0 lisanslı · Kodviva tarafından geliştirildi",
+  "foot.tm":"Latchwire bağımsız bir açık kaynak projesidir. WireGuard, Jason A. Donenfeld'in tescilli ticari markasıdır.",
+  "foot.sec":"Güvenlik politikası"
+ },
+ zh:{
+  "meta.title":"Latchwire — 绑定硬件的 WireGuard 密钥",
+  "meta.desc":"开源 WireGuard 客户端，将私钥保存在 YubiKey 等硬件安全密钥中。不插密钥，就没有隧道。",
+  "a11y.skip":"跳到正文",
+  "nav.how":"工作原理","nav.hw":"硬件","nav.sec":"安全","nav.install":"安装","nav.lang":"语言",
+  "hero.eyebrow":"开源 · 兼容 WireGuard®",
+  "hero.h1":"你的 VPN 密钥无法被复制。",
+  "hero.sub":"Latchwire 将你的 WireGuard 私钥保存在 YubiKey 等硬件安全密钥中。密钥在设备内部生成，从不触及你的磁盘或内存。不插密钥，就没有隧道。",
+  "hero.status":"早期预览版 — 面向 macOS 和 Linux 的命令行核心",
+  "hero.cta1":"在 GitHub 上查看","hero.cta2":"工作原理",
+  "how.h":"工作原理",
+  "how.s1h":"插入你的密钥","how.s1p":"Latchwire 在密钥内部一个专用的 PIV 槽位中生成 WireGuard 密钥，你用于登录的槽位不受影响。",
+  "how.s2h":"把公钥添加到服务器","how.s2p":"任何标准 WireGuard 服务器都可以 —— OPNsense、pfSense、Linux、MikroTik 等。无需插件，也无需改动服务器。",
+  "how.s3h":"输入 PIN 并连接","how.s3p":"密钥插着期间只需输入一次 PIN。拔出密钥后，隧道会在约两秒内关闭。",
+  "cmp.h":"传统 WireGuard 与 Latchwire 对比","cmp.q":"问题","cmp.classic":"传统 WireGuard",
+  "cmp.r1q":"私钥存放在哪里？","cmp.r1a":"你电脑上的一个文件","cmp.r1b":"硬件密钥内部",
+  "cmp.r2q":"能被复制吗？","cmp.r2a":"能，而且悄无声息","cmp.r2b":"不能",
+  "cmp.r3q":"笔记本电脑被盗？","cmp.r3a":"必须在所有地方更换密钥","cmp.r3b":"没有密钥就无法访问",
+  "cmp.r4q":"服务器端","cmp.r4a":"标准 WireGuard","cmp.r4b":"完全相同 —— 标准 WireGuard",
+  "hw.h":"硬件","hw.lead":"Latchwire 通过标准接口与密钥通信，并按设备系列逐步增加支持。",
+  "hw.now":"现已支持","hw.planned":"计划中","hw.roadmap":"远期规划",
+  "hw.c1p":"PIV，固件 5.7 或更高版本","hw.c2h":"OpenPGP 卡","hw.c3p":"支持 X25519 的设备",
+  "hw.c4p":"单独列出：在这类硬件上，密钥只是在存储时被加密，并非无法复制。",
+  "sec.h":"安全","sec.lead":"Latchwire 能防护什么、不能防护什么，直言不讳。",
+  "sec.yesH":"可以防护","sec.y1":"从磁盘或备份中复制密钥","sec.y2":"笔记本电脑被盗，而密钥不在电脑上","sec.y3":"包含私钥的配置文件 —— Latchwire 会拒绝它们",
+  "sec.noH":"无法防护","sec.n1":"你电脑上的恶意软件：在密钥插着期间，它可以使用隧道。",
+  "sec.notesH":"须知","sec.note1":"PIN 从不被保存。","sec.note2":"从不尝试默认 PIN。","sec.note3":"本页的每一项说法都有文档可查。",
+  "sec.tm":"阅读威胁模型","sec.vuln":"报告漏洞",
+  "inst.h":"安装","inst.sub":"从源码构建","inst.copy":"复制","inst.copied":"已复制",
+  "inst.req":"要求：Go 1.25+，固件 5.7+ 的 YubiKey 5；在 Linux 上还需要 <code>pcscd</code> 和 <code>libpcsclite</code>。",
+  "inst.check":"硬件测试清单","inst.desktop":"适用于 macOS、Windows 和 Linux 的桌面应用正在开发中。",
+  "road.h":"路线图","road.done":"已完成",
+  "road.r1":"核心","road.r1p":"适用于 macOS 和 Linux 的命令行客户端",
+  "road.r2":"完整的网络功能","road.r2p":"DNS、全局隧道、断网保护（kill switch）",
+  "road.r3":"桌面应用与多语言","road.r3p":"适用于 macOS、Windows 和 Linux 的桌面应用",
+  "road.r4":"签名发布","road.r4p":"Homebrew、Microsoft Store、Linux 软件包",
+  "foot.lic":"采用 Apache-2.0 许可 · 由 Kodviva 开发",
+  "foot.tm":"Latchwire 是一个独立的开源项目。WireGuard 是 Jason A. Donenfeld 的注册商标。",
+  "foot.sec":"安全政策"
+ },
+ hi:{
+  "meta.title":"Latchwire — हार्डवेयर से बंधी WireGuard कुंजियाँ",
+  "meta.desc":"ओपन-सोर्स WireGuard क्लाइंट, जो प्राइवेट कुंजी को YubiKey जैसी हार्डवेयर सुरक्षा कुंजी के अंदर रखता है। कुंजी नहीं लगी, तो टनल नहीं।",
+  "a11y.skip":"सामग्री पर जाएँ",
+  "nav.how":"यह कैसे काम करता है","nav.hw":"हार्डवेयर","nav.sec":"सुरक्षा","nav.install":"इंस्टॉल करें","nav.lang":"भाषा",
+  "hero.eyebrow":"ओपन सोर्स · WireGuard® के साथ संगत",
+  "hero.h1":"आपकी VPN कुंजी कॉपी नहीं की जा सकती।",
+  "hero.sub":"Latchwire आपकी WireGuard प्राइवेट कुंजी को YubiKey जैसी हार्डवेयर सुरक्षा कुंजी के अंदर रखता है। कुंजी डिवाइस पर ही बनती है और कभी आपकी डिस्क या मेमोरी तक नहीं पहुँचती। कुंजी नहीं लगी, तो टनल नहीं।",
+  "hero.status":"शुरुआती प्रीव्यू — macOS और Linux के लिए कमांड-लाइन कोर",
+  "hero.cta1":"GitHub पर देखें","hero.cta2":"यह कैसे काम करता है",
+  "how.h":"यह कैसे काम करता है",
+  "how.s1h":"अपनी कुंजी लगाएँ","how.s1p":"Latchwire उसके अंदर एक अलग PIV स्लॉट में WireGuard कुंजी बनाता है। आपके लॉगिन वाले स्लॉट को छुआ नहीं जाता।",
+  "how.s2h":"पब्लिक कुंजी अपने सर्वर में जोड़ें","how.s2p":"कोई भी मानक WireGuard सर्वर चलेगा — OPNsense, pfSense, Linux, MikroTik आदि। न कोई प्लगइन, न सर्वर में कोई बदलाव।",
+  "how.s3h":"PIN डालें और कनेक्ट करें","how.s3p":"कुंजी लगी रहने तक PIN सिर्फ़ एक बार पूछा जाता है। कुंजी निकालते ही लगभग दो सेकंड में टनल बंद हो जाता है।",
+  "cmp.h":"पारंपरिक WireGuard बनाम Latchwire","cmp.q":"प्रश्न","cmp.classic":"पारंपरिक WireGuard",
+  "cmp.r1q":"प्राइवेट कुंजी कहाँ है?","cmp.r1a":"आपके कंप्यूटर पर एक फ़ाइल में","cmp.r1b":"हार्डवेयर कुंजी के अंदर",
+  "cmp.r2q":"क्या इसे कॉपी किया जा सकता है?","cmp.r2a":"हाँ, चुपचाप","cmp.r2b":"नहीं",
+  "cmp.r3q":"लैपटॉप चोरी हो गया?","cmp.r3a":"हर जगह कुंजी बदलनी होगी","cmp.r3b":"कुंजी के बिना कोई पहुँच नहीं",
+  "cmp.r4q":"सर्वर की ओर","cmp.r4a":"मानक WireGuard","cmp.r4b":"वही — मानक WireGuard",
+  "hw.h":"हार्डवेयर","hw.lead":"Latchwire मानक इंटरफ़ेस के ज़रिए कुंजी से बात करता है। सपोर्ट एक-एक डिवाइस परिवार करके जोड़ा जा रहा है।",
+  "hw.now":"अभी समर्थित","hw.planned":"योजना में","hw.roadmap":"रोडमैप पर",
+  "hw.c1p":"PIV, फ़र्मवेयर 5.7 या उससे नया","hw.c2h":"OpenPGP कार्ड","hw.c3p":"X25519 सपोर्ट वाले डिवाइस",
+  "hw.c4p":"अलग से दिखाया गया है: यहाँ कुंजी सिर्फ़ स्टोर रहते समय एन्क्रिप्टेड होती है, कॉपी-रोधी नहीं।",
+  "sec.h":"सुरक्षा","sec.lead":"Latchwire किससे बचाता है और किससे नहीं — साफ़ शब्दों में।",
+  "sec.yesH":"इनसे बचाता है","sec.y1":"आपकी डिस्क या बैकअप से कुंजी की कॉपी","sec.y2":"चोरी हुआ लैपटॉप, जब कुंजी उसके साथ न हो","sec.y3":"प्राइवेट कुंजी वाली कॉन्फ़िग फ़ाइलें — Latchwire इन्हें अस्वीकार करता है",
+  "sec.noH":"इससे नहीं बचाता","sec.n1":"आपके कंप्यूटर पर मैलवेयर: कुंजी लगी होने पर वह टनल का इस्तेमाल कर सकता है।",
+  "sec.notesH":"जानने योग्य बातें","sec.note1":"PIN कभी सेव नहीं किया जाता।","sec.note2":"डिफ़ॉल्ट PIN कभी आज़माया नहीं जाता।","sec.note3":"इस पेज का हर दावा दस्तावेज़ों में दर्ज है।",
+  "sec.tm":"थ्रेट मॉडल पढ़ें","sec.vuln":"सुरक्षा कमज़ोरी की रिपोर्ट करें",
+  "inst.h":"इंस्टॉल करें","inst.sub":"सोर्स से बिल्ड करें","inst.copy":"कॉपी करें","inst.copied":"कॉपी हो गया",
+  "inst.req":"ज़रूरतें: Go 1.25+, फ़र्मवेयर 5.7+ वाली YubiKey 5; Linux पर <code>pcscd</code> और <code>libpcsclite</code> भी।",
+  "inst.check":"हार्डवेयर टेस्ट चेकलिस्ट","inst.desktop":"macOS, Windows और Linux के लिए डेस्कटॉप ऐप पर काम चल रहा है।",
+  "road.h":"रोडमैप","road.done":"पूरा हुआ",
+  "road.r1":"कोर","road.r1p":"macOS और Linux के लिए कमांड-लाइन क्लाइंट",
+  "road.r2":"पूरी नेटवर्क सुविधाएँ","road.r2p":"DNS, फ़ुल टनल, किल स्विच",
+  "road.r3":"डेस्कटॉप ऐप और अनुवाद","road.r3p":"macOS, Windows और Linux के लिए डेस्कटॉप ऐप",
+  "road.r4":"साइन किए गए रिलीज़","road.r4p":"Homebrew, Microsoft Store, Linux पैकेज",
+  "foot.lic":"Apache-2.0 लाइसेंस · Kodviva द्वारा निर्मित",
+  "foot.tm":"Latchwire एक स्वतंत्र ओपन-सोर्स प्रोजेक्ट है। WireGuard, Jason A. Donenfeld का पंजीकृत ट्रेडमार्क है।",
+  "foot.sec":"सुरक्षा नीति"
+ },
+ es:{
+  "meta.title":"Latchwire — claves de WireGuard ligadas al hardware",
+  "meta.desc":"Cliente de WireGuard de código abierto que guarda la clave privada dentro de una llave de seguridad física, como una YubiKey. Sin llave conectada, no hay túnel.",
+  "a11y.skip":"Saltar al contenido",
+  "nav.how":"Cómo funciona","nav.hw":"Hardware","nav.sec":"Seguridad","nav.install":"Instalación","nav.lang":"Idioma",
+  "hero.eyebrow":"Código abierto · Compatible con WireGuard®",
+  "hero.h1":"Tu clave de VPN no se puede copiar.",
+  "hero.sub":"Latchwire guarda tu clave privada de WireGuard dentro de una llave de seguridad física, como una YubiKey. La clave se genera en el propio dispositivo y nunca pasa por tu disco ni por la memoria. Sin la llave conectada, no hay túnel.",
+  "hero.status":"Versión preliminar — núcleo de línea de comandos para macOS y Linux",
+  "hero.cta1":"Ver en GitHub","hero.cta2":"Cómo funciona",
+  "how.h":"Cómo funciona",
+  "how.s1h":"Conecta tu llave","how.s1p":"Latchwire genera la clave de WireGuard dentro de ella, en una ranura PIV dedicada. Tus ranuras de inicio de sesión no se tocan.",
+  "how.s2h":"Añade la clave pública a tu servidor","how.s2p":"Sirve cualquier servidor WireGuard estándar: OPNsense, pfSense, Linux, MikroTik y otros. Sin plugins y sin cambios en el servidor.",
+  "how.s3h":"Introduce tu PIN y conéctate","how.s3p":"El PIN se pide una sola vez mientras la llave está conectada. Si la retiras, el túnel se cierra en unos dos segundos.",
+  "cmp.h":"WireGuard clásico frente a Latchwire","cmp.q":"Pregunta","cmp.classic":"WireGuard clásico",
+  "cmp.r1q":"¿Dónde está la clave privada?","cmp.r1a":"En un archivo de tu ordenador","cmp.r1b":"Dentro de la llave física",
+  "cmp.r2q":"¿Se puede copiar?","cmp.r2a":"Sí, sin que te enteres","cmp.r2b":"No",
+  "cmp.r3q":"¿Te roban el portátil?","cmp.r3a":"Hay que cambiar la clave en todas partes","cmp.r3b":"Sin la llave, no hay acceso",
+  "cmp.r4q":"Lado del servidor","cmp.r4a":"WireGuard estándar","cmp.r4b":"El mismo: WireGuard estándar",
+  "hw.h":"Hardware","hw.lead":"Latchwire se comunica con la llave mediante interfaces estándar. El soporte se añade de familia en familia de dispositivos.",
+  "hw.now":"Compatible ya","hw.planned":"Previsto","hw.roadmap":"A futuro",
+  "hw.c1p":"PIV, firmware 5.7 o posterior","hw.c2h":"Tarjetas OpenPGP","hw.c3p":"Dispositivos compatibles con X25519",
+  "hw.c4p":"Se muestra aparte: aquí la clave solo está cifrada en reposo; no es imposible de copiar.",
+  "sec.h":"Seguridad","sec.lead":"Lo que Latchwire protege y lo que no, dicho con claridad.",
+  "sec.yesH":"Protege contra","sec.y1":"La copia de la clave desde tu disco o tus copias de seguridad","sec.y2":"El robo del portátil cuando la llave no está con él","sec.y3":"Archivos de configuración que contienen una clave privada: Latchwire los rechaza",
+  "sec.noH":"No protege contra","sec.n1":"Malware en tu ordenador: mientras la llave está conectada, puede usar el túnel.",
+  "sec.notesH":"Conviene saber","sec.note1":"El PIN nunca se guarda.","sec.note2":"Nunca se prueba el PIN por defecto.","sec.note3":"Cada afirmación de esta página está documentada.",
+  "sec.tm":"Leer el modelo de amenazas","sec.vuln":"Informar de una vulnerabilidad",
+  "inst.h":"Instalación","inst.sub":"Compilar desde el código fuente","inst.copy":"Copiar","inst.copied":"Copiado",
+  "inst.req":"Requisitos: Go 1.25+, una YubiKey 5 con firmware 5.7+; en Linux, además, <code>pcscd</code> y <code>libpcsclite</code>.",
+  "inst.check":"Lista de comprobación de hardware","inst.desktop":"Las aplicaciones de escritorio para macOS, Windows y Linux están en desarrollo.",
+  "road.h":"Hoja de ruta","road.done":"Hecho",
+  "road.r1":"Núcleo","road.r1p":"Cliente de línea de comandos para macOS y Linux",
+  "road.r2":"Funciones de red completas","road.r2p":"DNS, túnel completo, kill switch",
+  "road.r3":"Aplicación de escritorio y traducciones","road.r3p":"Aplicación de escritorio para macOS, Windows y Linux",
+  "road.r4":"Versiones firmadas","road.r4p":"Homebrew, Microsoft Store, paquetes para Linux",
+  "foot.lic":"Licencia Apache-2.0 · Creado por Kodviva",
+  "foot.tm":"Latchwire es un proyecto independiente de código abierto. WireGuard es una marca registrada de Jason A. Donenfeld.",
+  "foot.sec":"Política de seguridad"
+ },
+ fr:{
+  "meta.title":"Latchwire — des clés WireGuard liées au matériel",
+  "meta.desc":"Client WireGuard open source qui conserve la clé privée dans une clé de sécurité matérielle, comme une YubiKey. Pas de clé branchée, pas de tunnel.",
+  "a11y.skip":"Aller au contenu",
+  "nav.how":"Fonctionnement","nav.hw":"Matériel","nav.sec":"Sécurité","nav.install":"Installation","nav.lang":"Langue",
+  "hero.eyebrow":"Open source · Compatible WireGuard®",
+  "hero.h1":"Votre clé VPN ne peut pas être copiée.",
+  "hero.sub":"Latchwire conserve votre clé privée WireGuard dans une clé de sécurité matérielle, comme une YubiKey. La clé est générée sur l'appareil et ne passe jamais par votre disque ni par la mémoire. Pas de clé branchée, pas de tunnel.",
+  "hero.status":"Préversion — cœur en ligne de commande pour macOS et Linux",
+  "hero.cta1":"Voir sur GitHub","hero.cta2":"Comment ça marche",
+  "how.h":"Comment ça marche",
+  "how.s1h":"Branchez votre clé","how.s1p":"Latchwire y génère la clé WireGuard, dans un emplacement PIV dédié. Vos emplacements de connexion restent intacts.",
+  "how.s2h":"Ajoutez la clé publique à votre serveur","how.s2p":"N'importe quel serveur WireGuard standard convient : OPNsense, pfSense, Linux, MikroTik… Aucun plugin, aucune modification côté serveur.",
+  "how.s3h":"Saisissez votre PIN et connectez-vous","how.s3p":"Le PIN n'est demandé qu'une fois tant que la clé reste branchée. Retirez la clé et le tunnel se ferme en deux secondes environ.",
+  "cmp.h":"WireGuard classique ou Latchwire","cmp.q":"Question","cmp.classic":"WireGuard classique",
+  "cmp.r1q":"Où se trouve la clé privée ?","cmp.r1a":"Dans un fichier sur votre ordinateur","cmp.r1b":"Dans la clé matérielle",
+  "cmp.r2q":"Peut-elle être copiée ?","cmp.r2a":"Oui, sans laisser de trace","cmp.r2b":"Non",
+  "cmp.r3q":"Ordinateur portable volé ?","cmp.r3a":"Il faut changer la clé partout","cmp.r3b":"Aucun accès sans la clé",
+  "cmp.r4q":"Côté serveur","cmp.r4a":"WireGuard standard","cmp.r4b":"Identique : WireGuard standard",
+  "hw.h":"Matériel","hw.lead":"Latchwire dialogue avec la clé via des interfaces standard. La prise en charge s'étend une famille d'appareils à la fois.",
+  "hw.now":"Pris en charge","hw.planned":"Prévu","hw.roadmap":"À plus long terme",
+  "hw.c1p":"PIV, firmware 5.7 ou plus récent","hw.c2h":"Cartes OpenPGP","hw.c3p":"Appareils compatibles X25519",
+  "hw.c4p":"Présenté à part : ici, la clé est seulement chiffrée au repos, elle n'est pas impossible à copier.",
+  "sec.h":"Sécurité","sec.lead":"Ce contre quoi Latchwire protège, et ce contre quoi il ne protège pas, sans détour.",
+  "sec.yesH":"Protège contre","sec.y1":"La copie de la clé depuis votre disque ou vos sauvegardes","sec.y2":"Le vol d'un portable quand la clé n'est pas avec lui","sec.y3":"Les fichiers de configuration contenant une clé privée : Latchwire les refuse",
+  "sec.noH":"Ne protège pas contre","sec.n1":"Un logiciel malveillant sur votre ordinateur : tant que la clé est branchée, il peut utiliser le tunnel.",
+  "sec.notesH":"Bon à savoir","sec.note1":"Le PIN n'est jamais enregistré.","sec.note2":"Le PIN par défaut n'est jamais essayé.","sec.note3":"Chaque affirmation de cette page est documentée.",
+  "sec.tm":"Lire le modèle de menace","sec.vuln":"Signaler une vulnérabilité",
+  "inst.h":"Installation","inst.sub":"Compiler depuis les sources","inst.copy":"Copier","inst.copied":"Copié",
+  "inst.req":"Prérequis : Go 1.25+, une YubiKey 5 avec un firmware 5.7+ ; sous Linux, également <code>pcscd</code> et <code>libpcsclite</code>.",
+  "inst.check":"Liste de vérification matérielle","inst.desktop":"Des applications de bureau pour macOS, Windows et Linux sont en développement.",
+  "road.h":"Feuille de route","road.done":"Terminé",
+  "road.r1":"Cœur","road.r1p":"Client en ligne de commande pour macOS et Linux",
+  "road.r2":"Fonctions réseau complètes","road.r2p":"DNS, tunnel complet, kill switch",
+  "road.r3":"Application de bureau et traductions","road.r3p":"Application de bureau pour macOS, Windows et Linux",
+  "road.r4":"Versions signées","road.r4p":"Homebrew, Microsoft Store, paquets Linux",
+  "foot.lic":"Sous licence Apache-2.0 · Créé par Kodviva",
+  "foot.tm":"Latchwire est un projet open source indépendant. WireGuard est une marque déposée de Jason A. Donenfeld.",
+  "foot.sec":"Politique de sécurité"
+ },
+ ar:{
+  "meta.title":"Latchwire — مفاتيح WireGuard مرتبطة بالعتاد",
+  "meta.desc":"عميل WireGuard مفتوح المصدر يحفظ المفتاح الخاص داخل مفتاح أمان عتادي مثل YubiKey. لا مفتاح موصول، لا نفق.",
+  "a11y.skip":"انتقل إلى المحتوى",
+  "nav.how":"طريقة العمل","nav.hw":"العتاد","nav.sec":"الأمان","nav.install":"التثبيت","nav.lang":"اللغة",
+  "hero.eyebrow":"مفتوح المصدر · متوافق مع WireGuard®",
+  "hero.h1":"مفتاح VPN الخاص بك لا يمكن نسخه.",
+  "hero.sub":"يحفظ Latchwire المفتاح الخاص لاتصال WireGuard داخل مفتاح أمان عتادي مثل YubiKey. يُولَّد المفتاح على الجهاز نفسه ولا يمرّ أبدًا بقرصك أو بذاكرة حاسوبك. لا مفتاح موصول، لا نفق.",
+  "hero.status":"معاينة مبكرة — نواة تعمل من سطر الأوامر على macOS وLinux",
+  "hero.cta1":"عرض على GitHub","hero.cta2":"طريقة العمل",
+  "how.h":"طريقة العمل",
+  "how.s1h":"صِل مفتاحك","how.s1p":"يولّد Latchwire مفتاح WireGuard داخله، في خانة PIV مخصّصة. أما خانات تسجيل الدخول لديك فتبقى كما هي.",
+  "how.s2h":"أضف المفتاح العام إلى خادمك","how.s2p":"أي خادم WireGuard قياسي يفي بالغرض: OPNsense وpfSense وLinux وMikroTik وغيرها. لا إضافات ولا تغييرات على الخادم.",
+  "how.s3h":"أدخل رمز PIN واتصل","how.s3p":"يُطلب رمز PIN مرة واحدة ما دام المفتاح موصولًا. انزع المفتاح فيُغلق النفق خلال ثانيتين تقريبًا.",
+  "cmp.h":"WireGuard التقليدي مقابل Latchwire","cmp.q":"السؤال","cmp.classic":"WireGuard التقليدي",
+  "cmp.r1q":"أين المفتاح الخاص؟","cmp.r1a":"في ملف على حاسوبك","cmp.r1b":"داخل المفتاح العتادي",
+  "cmp.r2q":"هل يمكن نسخه؟","cmp.r2a":"نعم، دون أن تلاحظ","cmp.r2b":"لا",
+  "cmp.r3q":"سُرق حاسوبك المحمول؟","cmp.r3a":"عليك تغيير المفتاح في كل مكان","cmp.r3b":"لا وصول دون المفتاح",
+  "cmp.r4q":"جهة الخادم","cmp.r4a":"WireGuard قياسي","cmp.r4b":"كما هي: WireGuard قياسي",
+  "hw.h":"العتاد","hw.lead":"يتواصل Latchwire مع المفتاح عبر واجهات قياسية، ويُضاف الدعم لعائلة أجهزة تلو الأخرى.",
+  "hw.now":"مدعوم الآن","hw.planned":"مخطّط له","hw.roadmap":"على المدى البعيد",
+  "hw.c1p":"PIV، البرنامج الثابت 5.7 أو أحدث","hw.c2h":"بطاقات OpenPGP","hw.c3p":"أجهزة تدعم X25519",
+  "hw.c4p":"مذكور على حدة: هنا يكون المفتاح مشفّرًا أثناء التخزين فقط، وليس غير قابل للنسخ.",
+  "sec.h":"الأمان","sec.lead":"ما يحمي منه Latchwire وما لا يحمي منه، بوضوح.",
+  "sec.yesH":"يحمي من","sec.y1":"نسخ المفتاح من قرصك أو من النسخ الاحتياطية","sec.y2":"سرقة الحاسوب المحمول حين لا يكون المفتاح معه","sec.y3":"ملفات الإعداد التي تحمل مفتاحًا خاصًا، إذ يرفضها Latchwire",
+  "sec.noH":"لا يحمي من","sec.n1":"البرمجيات الخبيثة على حاسوبك: ما دام المفتاح موصولًا، يمكنها استخدام النفق.",
+  "sec.notesH":"من المفيد معرفته","sec.note1":"لا يُخزَّن رمز PIN أبدًا.","sec.note2":"لا يُجرَّب رمز PIN الافتراضي أبدًا.","sec.note3":"كل ادعاء في هذه الصفحة موثّق.",
+  "sec.tm":"اقرأ نموذج التهديدات","sec.vuln":"أبلغ عن ثغرة",
+  "inst.h":"التثبيت","inst.sub":"البناء من الشيفرة المصدرية","inst.copy":"نسخ","inst.copied":"تم النسخ",
+  "inst.req":"المتطلبات: Go 1.25 أو أحدث، ومفتاح YubiKey 5 ببرنامج ثابت 5.7 أو أحدث؛ وعلى Linux أيضًا <code>pcscd</code> و<code>libpcsclite</code>.",
+  "inst.check":"قائمة اختبار العتاد","inst.desktop":"تطبيقات سطح المكتب لأنظمة macOS وWindows وLinux قيد التطوير.",
+  "road.h":"خارطة الطريق","road.done":"مكتمل",
+  "road.r1":"النواة","road.r1p":"عميل يعمل من سطر الأوامر على macOS وLinux",
+  "road.r2":"ميزات الشبكة الكاملة","road.r2p":"DNS، نفق كامل، مفتاح قطع الاتصال (kill switch)",
+  "road.r3":"تطبيق سطح المكتب والترجمات","road.r3p":"تطبيق سطح مكتب لأنظمة macOS وWindows وLinux",
+  "road.r4":"إصدارات موقّعة","road.r4p":"Homebrew وMicrosoft Store وحزم Linux",
+  "foot.lic":"مرخّص بموجب Apache-2.0 · من تطوير Kodviva",
+  "foot.tm":"Latchwire مشروع مستقل مفتوح المصدر. WireGuard علامة تجارية مسجّلة لـ Jason A. Donenfeld.",
+  "foot.sec":"سياسة الأمان"
+ },
+ pt:{
+  "meta.title":"Latchwire — chaves WireGuard presas ao hardware",
+  "meta.desc":"Cliente WireGuard de código aberto que mantém a chave privada dentro de uma chave de segurança física, como uma YubiKey. Sem a chave conectada, sem túnel.",
+  "a11y.skip":"Pular para o conteúdo",
+  "nav.how":"Como funciona","nav.hw":"Hardware","nav.sec":"Segurança","nav.install":"Instalação","nav.lang":"Idioma",
+  "hero.eyebrow":"Código aberto · Compatível com WireGuard®",
+  "hero.h1":"Sua chave de VPN não pode ser copiada.",
+  "hero.sub":"O Latchwire mantém sua chave privada do WireGuard dentro de uma chave de segurança física, como uma YubiKey. A chave é gerada no próprio dispositivo e nunca passa pelo seu disco nem pela memória. Sem a chave conectada, sem túnel.",
+  "hero.status":"Prévia inicial — núcleo de linha de comando para macOS e Linux",
+  "hero.cta1":"Ver no GitHub","hero.cta2":"Como funciona",
+  "how.h":"Como funciona",
+  "how.s1h":"Conecte sua chave","how.s1p":"O Latchwire gera a chave do WireGuard dentro dela, em um slot PIV dedicado. Seus slots de login ficam intocados.",
+  "how.s2h":"Adicione a chave pública ao seu servidor","how.s2p":"Qualquer servidor WireGuard padrão serve: OPNsense, pfSense, Linux, MikroTik e outros. Sem plugins, sem mudanças no servidor.",
+  "how.s3h":"Digite seu PIN e conecte","how.s3p":"O PIN é pedido uma única vez enquanto a chave estiver conectada. Remova a chave e o túnel se fecha em cerca de dois segundos.",
+  "cmp.h":"WireGuard clássico vs. Latchwire","cmp.q":"Pergunta","cmp.classic":"WireGuard clássico",
+  "cmp.r1q":"Onde fica a chave privada?","cmp.r1a":"Em um arquivo no seu computador","cmp.r1b":"Dentro da chave física",
+  "cmp.r2q":"Pode ser copiada?","cmp.r2a":"Sim, sem ninguém perceber","cmp.r2b":"Não",
+  "cmp.r3q":"Notebook roubado?","cmp.r3a":"É preciso trocar a chave em todo lugar","cmp.r3b":"Sem a chave, sem acesso",
+  "cmp.r4q":"Lado do servidor","cmp.r4a":"WireGuard padrão","cmp.r4b":"O mesmo: WireGuard padrão",
+  "hw.h":"Hardware","hw.lead":"O Latchwire se comunica com a chave por interfaces padrão. O suporte é adicionado uma família de dispositivos por vez.",
+  "hw.now":"Suportado agora","hw.planned":"Planejado","hw.roadmap":"Mais adiante",
+  "hw.c1p":"PIV, firmware 5.7 ou superior","hw.c2h":"Cartões OpenPGP","hw.c3p":"Dispositivos com suporte a X25519",
+  "hw.c4p":"Listado à parte: aqui a chave é apenas criptografada em repouso, não é impossível de copiar.",
+  "sec.h":"Segurança","sec.lead":"Contra o que o Latchwire protege e contra o que não protege, sem rodeios.",
+  "sec.yesH":"Protege contra","sec.y1":"Cópia da chave a partir do disco ou de backups","sec.y2":"Notebook roubado quando a chave não está junto","sec.y3":"Arquivos de configuração com chave privada: o Latchwire os rejeita",
+  "sec.noH":"Não protege contra","sec.n1":"Malware no seu computador: enquanto a chave estiver conectada, ele pode usar o túnel.",
+  "sec.notesH":"Bom saber","sec.note1":"O PIN nunca é armazenado.","sec.note2":"O PIN padrão nunca é testado.","sec.note3":"Toda afirmação desta página está documentada.",
+  "sec.tm":"Ler o modelo de ameaças","sec.vuln":"Relatar uma vulnerabilidade",
+  "inst.h":"Instalação","inst.sub":"Compilar a partir do código-fonte","inst.copy":"Copiar","inst.copied":"Copiado",
+  "inst.req":"Requisitos: Go 1.25+, uma YubiKey 5 com firmware 5.7+; no Linux, também <code>pcscd</code> e <code>libpcsclite</code>.",
+  "inst.check":"Checklist de teste de hardware","inst.desktop":"Aplicativos de desktop para macOS, Windows e Linux estão em desenvolvimento.",
+  "road.h":"Roteiro","road.done":"Concluído",
+  "road.r1":"Núcleo","road.r1p":"Cliente de linha de comando para macOS e Linux",
+  "road.r2":"Recursos de rede completos","road.r2p":"DNS, túnel completo, kill switch",
+  "road.r3":"Aplicativo de desktop e traduções","road.r3p":"Aplicativo de desktop para macOS, Windows e Linux",
+  "road.r4":"Versões assinadas","road.r4p":"Homebrew, Microsoft Store, pacotes Linux",
+  "foot.lic":"Licença Apache-2.0 · Feito pela Kodviva",
+  "foot.tm":"O Latchwire é um projeto independente de código aberto. WireGuard é uma marca registrada de Jason A. Donenfeld.",
+  "foot.sec":"Política de segurança"
+ },
+ ru:{
+  "meta.title":"Latchwire — ключи WireGuard, привязанные к оборудованию",
+  "meta.desc":"Клиент WireGuard с открытым исходным кодом, который хранит закрытый ключ внутри аппаратного ключа безопасности, например YubiKey. Нет ключа — нет туннеля.",
+  "a11y.skip":"Перейти к содержанию",
+  "nav.how":"Как это работает","nav.hw":"Оборудование","nav.sec":"Безопасность","nav.install":"Установка","nav.lang":"Язык",
+  "hero.eyebrow":"Открытый исходный код · Совместим с WireGuard®",
+  "hero.h1":"Ваш VPN-ключ невозможно скопировать.",
+  "hero.sub":"Latchwire хранит закрытый ключ WireGuard внутри аппаратного ключа безопасности, например YubiKey. Ключ создаётся на самом устройстве и никогда не попадает ни на диск, ни в память компьютера. Нет ключа — нет туннеля.",
+  "hero.status":"Ранняя версия — консольное ядро для macOS и Linux",
+  "hero.cta1":"Открыть на GitHub","hero.cta2":"Как это работает",
+  "how.h":"Как это работает",
+  "how.s1h":"Подключите ключ","how.s1p":"Latchwire создаёт ключ WireGuard прямо в нём, в отдельном слоте PIV. Слоты, которые вы используете для входа в систему, не затрагиваются.",
+  "how.s2h":"Добавьте открытый ключ на сервер","how.s2p":"Подойдёт любой стандартный сервер WireGuard: OPNsense, pfSense, Linux, MikroTik и другие. Без плагинов и без изменений на сервере.",
+  "how.s3h":"Введите PIN и подключитесь","how.s3p":"PIN запрашивается один раз, пока ключ подключён. Выньте ключ — и туннель закроется примерно через две секунды.",
+  "cmp.h":"Классический WireGuard и Latchwire","cmp.q":"Вопрос","cmp.classic":"Классический WireGuard",
+  "cmp.r1q":"Где хранится закрытый ключ?","cmp.r1a":"В файле на вашем компьютере","cmp.r1b":"Внутри аппаратного ключа",
+  "cmp.r2q":"Можно ли его скопировать?","cmp.r2a":"Да, и незаметно","cmp.r2b":"Нет",
+  "cmp.r3q":"Украли ноутбук?","cmp.r3a":"Нужно менять ключ везде","cmp.r3b":"Без ключа доступа нет",
+  "cmp.r4q":"На стороне сервера","cmp.r4a":"Стандартный WireGuard","cmp.r4b":"То же самое — стандартный WireGuard",
+  "hw.h":"Оборудование","hw.lead":"Latchwire работает с ключом через стандартные интерфейсы. Поддержка добавляется поочерёдно, по семействам устройств.",
+  "hw.now":"Поддерживается","hw.planned":"Запланировано","hw.roadmap":"В дальних планах",
+  "hw.c1p":"PIV, прошивка 5.7 или новее","hw.c2h":"Карты OpenPGP","hw.c3p":"Устройства с поддержкой X25519",
+  "hw.c4p":"Выделено отдельно: здесь ключ лишь зашифрован при хранении, но не защищён от копирования.",
+  "sec.h":"Безопасность","sec.lead":"От чего Latchwire защищает, а от чего нет — честно и прямо.",
+  "sec.yesH":"Защищает от","sec.y1":"Копирования ключа с диска или из резервных копий","sec.y2":"Кражи ноутбука, если ключа при нём нет","sec.y3":"Конфигурационных файлов с закрытым ключом — Latchwire их отклоняет",
+  "sec.noH":"Не защищает от","sec.n1":"Вредоносного ПО на компьютере: пока ключ подключён, оно может пользоваться туннелем.",
+  "sec.notesH":"Полезно знать","sec.note1":"PIN никогда не сохраняется.","sec.note2":"Latchwire никогда не пробует PIN по умолчанию.","sec.note3":"Каждое утверждение на этой странице подкреплено документацией.",
+  "sec.tm":"Прочитать модель угроз","sec.vuln":"Сообщить об уязвимости",
+  "inst.h":"Установка","inst.sub":"Сборка из исходного кода","inst.copy":"Копировать","inst.copied":"Скопировано",
+  "inst.req":"Требования: Go 1.25+, YubiKey 5 с прошивкой 5.7+; в Linux также <code>pcscd</code> и <code>libpcsclite</code>.",
+  "inst.check":"Чек-лист проверки на оборудовании","inst.desktop":"Настольные приложения для macOS, Windows и Linux в разработке.",
+  "road.h":"Дорожная карта","road.done":"Готово",
+  "road.r1":"Ядро","road.r1p":"Консольный клиент для macOS и Linux",
+  "road.r2":"Полный набор сетевых функций","road.r2p":"DNS, полный туннель, kill switch",
+  "road.r3":"Настольное приложение и переводы","road.r3p":"Настольное приложение для macOS, Windows и Linux",
+  "road.r4":"Подписанные релизы","road.r4p":"Homebrew, Microsoft Store, пакеты для Linux",
+  "foot.lic":"Лицензия Apache-2.0 · Создано Kodviva",
+  "foot.tm":"Latchwire — независимый проект с открытым исходным кодом. WireGuard — зарегистрированный товарный знак Jason A. Donenfeld.",
+  "foot.sec":"Политика безопасности"
+ },
+ ja:{
+  "meta.title":"Latchwire — ハードウェアに縛られた WireGuard 鍵",
+  "meta.desc":"WireGuard の秘密鍵を YubiKey などのハードウェアセキュリティキーの中に保管する、オープンソースの WireGuard クライアント。キーを挿さなければ、トンネルは開きません。",
+  "a11y.skip":"本文へスキップ",
+  "nav.how":"仕組み","nav.hw":"ハードウェア","nav.sec":"セキュリティ","nav.install":"インストール","nav.lang":"言語",
+  "hero.eyebrow":"オープンソース · WireGuard® 互換",
+  "hero.h1":"あなたの VPN 鍵は、コピーできない。",
+  "hero.sub":"Latchwire は、WireGuard の秘密鍵を YubiKey などのハードウェアセキュリティキーの中に保管します。鍵はデバイス上で生成され、ディスクにもメモリにも一切触れません。キーを挿さなければ、トンネルは開きません。",
+  "hero.status":"アーリープレビュー — macOS と Linux 向けのコマンドライン版コア",
+  "hero.cta1":"GitHub で見る","hero.cta2":"仕組みを見る",
+  "how.h":"仕組み",
+  "how.s1h":"キーを挿す","how.s1p":"Latchwire は、キー内の専用 PIV スロットに WireGuard 鍵を生成します。ログイン用のスロットには一切触れません。",
+  "how.s2h":"公開鍵をサーバーに登録する","how.s2p":"標準的な WireGuard サーバーならどれでも使えます（OPNsense、pfSense、Linux、MikroTik など）。プラグインもサーバー側の変更も不要です。",
+  "how.s3h":"PIN を入力して接続する","how.s3p":"PIN を聞かれるのは、キーが挿さっている間に一度だけ。キーを抜くと、約 2 秒以内にトンネルが閉じます。",
+  "cmp.h":"従来の WireGuard と Latchwire の比較","cmp.q":"項目","cmp.classic":"従来の WireGuard",
+  "cmp.r1q":"秘密鍵はどこにある？","cmp.r1a":"コンピューター上のファイル","cmp.r1b":"ハードウェアキーの中",
+  "cmp.r2q":"コピーできる？","cmp.r2a":"できる（気づかれずに）","cmp.r2b":"できない",
+  "cmp.r3q":"ノート PC が盗まれたら？","cmp.r3a":"あらゆる場所で鍵を交換","cmp.r3b":"キーがなければアクセス不可",
+  "cmp.r4q":"サーバー側","cmp.r4a":"標準の WireGuard","cmp.r4b":"同じく標準の WireGuard",
+  "hw.h":"ハードウェア","hw.lead":"Latchwire は標準インターフェースを通じてキーとやり取りします。対応はデバイスのファミリーごとに順次追加していきます。",
+  "hw.now":"現在対応","hw.planned":"予定","hw.roadmap":"将来の構想",
+  "hw.c1p":"PIV、ファームウェア 5.7 以降","hw.c2h":"OpenPGP カード","hw.c3p":"X25519 対応デバイス",
+  "hw.c4p":"別枠で掲載しています。これらでは鍵は保存時に暗号化されるだけで、コピー不可能ではないためです。",
+  "sec.h":"セキュリティ","sec.lead":"Latchwire が守れるもの、守れないものを率直に示します。",
+  "sec.yesH":"守れるもの","sec.y1":"ディスクやバックアップからの鍵のコピー","sec.y2":"キーを挿していないノート PC の盗難","sec.y3":"秘密鍵を含む設定ファイル（Latchwire は読み込みを拒否します）",
+  "sec.noH":"守れないもの","sec.n1":"コンピューター上のマルウェア。キーが挿さっている間は、トンネルを使われるおそれがあります。",
+  "sec.notesH":"知っておいてほしいこと","sec.note1":"PIN は保存されません。","sec.note2":"デフォルト PIN を試すことはありません。","sec.note3":"このページの記述はすべてドキュメントで裏付けています。",
+  "sec.tm":"脅威モデルを読む","sec.vuln":"脆弱性を報告する",
+  "inst.h":"インストール","inst.sub":"ソースからビルド","inst.copy":"コピー","inst.copied":"コピーしました",
+  "inst.req":"必要なもの：Go 1.25 以降、ファームウェア 5.7 以降の YubiKey 5。Linux ではさらに <code>pcscd</code> と <code>libpcsclite</code>。",
+  "inst.check":"ハードウェアテスト チェックリスト","inst.desktop":"macOS、Windows、Linux 向けのデスクトップアプリを開発中です。",
+  "road.h":"ロードマップ","road.done":"完了",
+  "road.r1":"コア","road.r1p":"macOS と Linux 向けのコマンドラインクライアント",
+  "road.r2":"ネットワーク機能の充実","road.r2p":"DNS、フルトンネル、キルスイッチ",
+  "road.r3":"デスクトップアプリと多言語対応","road.r3p":"macOS、Windows、Linux 向けのデスクトップアプリ",
+  "road.r4":"署名付きリリース","road.r4p":"Homebrew、Microsoft Store、Linux パッケージ",
+  "foot.lic":"Apache-2.0 ライセンス · 開発：Kodviva",
+  "foot.tm":"Latchwire は独立したオープンソースプロジェクトです。WireGuard は Jason A. Donenfeld の登録商標です。",
+  "foot.sec":"セキュリティポリシー"
+ },
+ de:{
+  "meta.title":"Latchwire — hardwaregebundene WireGuard-Schlüssel",
+  "meta.desc":"Open-Source-WireGuard-Client, der den privaten Schlüssel in einem Hardware-Sicherheitsschlüssel wie einem YubiKey aufbewahrt. Kein Schlüssel eingesteckt, kein Tunnel.",
+  "a11y.skip":"Zum Inhalt springen",
+  "nav.how":"So funktioniert's","nav.hw":"Hardware","nav.sec":"Sicherheit","nav.install":"Installation","nav.lang":"Sprache",
+  "hero.eyebrow":"Open Source · WireGuard®-kompatibel",
+  "hero.h1":"Dein VPN-Schlüssel lässt sich nicht kopieren.",
+  "hero.sub":"Latchwire bewahrt deinen privaten WireGuard-Schlüssel in einem Hardware-Sicherheitsschlüssel wie einem YubiKey auf. Der Schlüssel wird auf dem Gerät erzeugt und berührt nie deine Festplatte oder deinen Arbeitsspeicher. Kein Schlüssel eingesteckt, kein Tunnel.",
+  "hero.status":"Frühe Vorschau — Kommandozeilen-Kern für macOS und Linux",
+  "hero.cta1":"Auf GitHub ansehen","hero.cta2":"So funktioniert's",
+  "how.h":"So funktioniert's",
+  "how.s1h":"Schlüssel einstecken","how.s1p":"Latchwire erzeugt den WireGuard-Schlüssel direkt darin, in einem eigenen PIV-Slot. Deine Login-Slots bleiben unberührt.",
+  "how.s2h":"Öffentlichen Schlüssel am Server eintragen","how.s2p":"Jeder Standard-WireGuard-Server funktioniert – OPNsense, pfSense, Linux, MikroTik und andere. Keine Plugins, keine Änderungen am Server.",
+  "how.s3h":"PIN eingeben und verbinden","how.s3p":"Die PIN wird einmal abgefragt, solange der Schlüssel steckt. Ziehst du ihn ab, schließt sich der Tunnel nach etwa zwei Sekunden.",
+  "cmp.h":"Klassisches WireGuard und Latchwire im Vergleich","cmp.q":"Frage","cmp.classic":"Klassisches WireGuard",
+  "cmp.r1q":"Wo liegt der private Schlüssel?","cmp.r1a":"In einer Datei auf deinem Computer","cmp.r1b":"Im Hardware-Schlüssel",
+  "cmp.r2q":"Kann er kopiert werden?","cmp.r2a":"Ja, unbemerkt","cmp.r2b":"Nein",
+  "cmp.r3q":"Laptop gestohlen?","cmp.r3a":"Schlüssel überall austauschen","cmp.r3b":"Ohne Schlüssel kein Zugang",
+  "cmp.r4q":"Serverseite","cmp.r4a":"Standard-WireGuard","cmp.r4b":"Unverändert – Standard-WireGuard",
+  "hw.h":"Hardware","hw.lead":"Latchwire spricht über Standardschnittstellen mit dem Schlüssel. Die Unterstützung wächst Gerätefamilie für Gerätefamilie.",
+  "hw.now":"Jetzt unterstützt","hw.planned":"Geplant","hw.roadmap":"Langfristig",
+  "hw.c1p":"PIV, Firmware 5.7 oder neuer","hw.c2h":"OpenPGP-Karten","hw.c3p":"Geräte mit X25519-Unterstützung",
+  "hw.c4p":"Separat aufgeführt: Hier ist der Schlüssel nur im Ruhezustand verschlüsselt, nicht unkopierbar.",
+  "sec.h":"Sicherheit","sec.lead":"Wovor Latchwire schützt und wovor nicht – klar benannt.",
+  "sec.yesH":"Schützt vor","sec.y1":"Dem Kopieren des Schlüssels von der Festplatte oder aus Backups","sec.y2":"Einem gestohlenen Laptop, wenn der Schlüssel nicht dabei ist","sec.y3":"Konfigurationsdateien mit privatem Schlüssel – Latchwire lehnt sie ab",
+  "sec.noH":"Schützt nicht vor","sec.n1":"Schadsoftware auf deinem Computer: Solange der Schlüssel steckt, kann sie den Tunnel nutzen.",
+  "sec.notesH":"Gut zu wissen","sec.note1":"Die PIN wird nie gespeichert.","sec.note2":"Die Standard-PIN wird nie ausprobiert.","sec.note3":"Jede Aussage auf dieser Seite ist dokumentiert.",
+  "sec.tm":"Bedrohungsmodell lesen","sec.vuln":"Sicherheitslücke melden",
+  "inst.h":"Installation","inst.sub":"Aus dem Quellcode bauen","inst.copy":"Kopieren","inst.copied":"Kopiert",
+  "inst.req":"Voraussetzungen: Go 1.25+, ein YubiKey 5 mit Firmware 5.7+; unter Linux zusätzlich <code>pcscd</code> und <code>libpcsclite</code>.",
+  "inst.check":"Checkliste für Hardwaretests","inst.desktop":"Desktop-Apps für macOS, Windows und Linux sind in Entwicklung.",
+  "road.h":"Roadmap","road.done":"Fertig",
+  "road.r1":"Kern","road.r1p":"Kommandozeilen-Client für macOS und Linux",
+  "road.r2":"Vollständige Netzwerkfunktionen","road.r2p":"DNS, Full Tunnel, Kill Switch",
+  "road.r3":"Desktop-App und Übersetzungen","road.r3p":"Desktop-App für macOS, Windows und Linux",
+  "road.r4":"Signierte Releases","road.r4p":"Homebrew, Microsoft Store, Linux-Pakete",
+  "foot.lic":"Apache-2.0-lizenziert · Entwickelt von Kodviva",
+  "foot.tm":"Latchwire ist ein unabhängiges Open-Source-Projekt. WireGuard ist eine eingetragene Marke von Jason A. Donenfeld.",
+  "foot.sec":"Sicherheitsrichtlinie"
+ }
+};
+(function(){
+  var KEY='lw_lang';
+  var sel=document.getElementById('lang');
+  var copyBtn=document.getElementById('copy-btn');
+  var copyStatus=document.getElementById('copy-status');
+  var cur='en', copyTimer=null;
+  LANGS.forEach(function(p){var o=document.createElement('option');o.value=p[0];o.textContent=p[1];o.lang=p[0];sel.appendChild(o);});
+  function dict(){return I18N[cur]||I18N.en;}
+  function apply(l, remember){
+    if(!I18N[l]) l='en';
+    cur=l;
+    var d=I18N[l], en=I18N.en;
+    document.querySelectorAll('[data-i18n]').forEach(function(el){
+      var k=el.getAttribute('data-i18n');
+      var v=(d[k]!=null)?d[k]:en[k];
+      if(v!=null) el.innerHTML=v;
+    });
+    var root=document.documentElement;
+    root.lang=l;
+    root.dir=(l==='ar')?'rtl':'ltr';
+    document.title=d['meta.title']||en['meta.title'];
+    var md=document.querySelector('meta[name="description"]');
+    if(md) md.setAttribute('content',d['meta.desc']||en['meta.desc']);
+    sel.value=l;
+    if(copyTimer){clearTimeout(copyTimer);copyTimer=null;}
+    if(remember){try{localStorage.setItem(KEY,l);}catch(e){}}
+  }
+  function pick(){
+    var q=null;
+    try{q=new URLSearchParams(location.search).get('lang');}catch(e){}
+    if(q){q=q.slice(0,2).toLowerCase(); if(I18N[q]) return q;}
+    var s=null;
+    try{s=localStorage.getItem(KEY);}catch(e){}
+    if(s&&I18N[s]) return s;
+    var b=((navigator.languages&&navigator.languages[0])||navigator.language||'en').slice(0,2).toLowerCase();
+    return I18N[b]?b:'en';
+  }
+  apply(pick(), false);
+  sel.addEventListener('change',function(){apply(sel.value, true);});
+
+  function fallbackCopy(text){
+    var ta=document.createElement('textarea');
+    ta.value=text;ta.setAttribute('readonly','');ta.style.position='fixed';ta.style.opacity='0';
+    document.body.appendChild(ta);ta.select();
+    var ok=false;try{ok=document.execCommand('copy');}catch(e){}
+    document.body.removeChild(ta);return ok;
+  }
+  copyBtn.addEventListener('click',function(){
+    var text=document.getElementById('build-cmds').textContent;
+    var done=function(){
+      var d=dict();
+      copyBtn.textContent=d['inst.copied'];
+      copyStatus.textContent=d['inst.copied'];
+      if(copyTimer) clearTimeout(copyTimer);
+      copyTimer=setTimeout(function(){copyBtn.textContent=dict()['inst.copy'];copyStatus.textContent='';copyTimer=null;},1800);
+    };
+    if(navigator.clipboard&&window.isSecureContext){
+      navigator.clipboard.writeText(text).then(done,function(){if(fallbackCopy(text))done();});
+    }else if(fallbackCopy(text)){done();}
+  });
+})();
+</script>
+</body>
+</html>
