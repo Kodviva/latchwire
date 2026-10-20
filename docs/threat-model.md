@@ -11,8 +11,11 @@ code is right and this document has a bug: please report it (see
 
 The static WireGuard private key is generated inside a YubiKey PIV slot and
 never leaves it, so an attacker has to be on a machine that has your card
-plugged in (and, for a PIN-verified card, a process running as you) to use it,
-and cannot take the key away with them.
+plugged in (and, for a PIN-verified card, a process that can reach the card
+through the operating system's smart-card service) to use it, and cannot take
+the key away with them. Which processes can reach the card depends on the
+platform's PC/SC access policy: on some systems only your own login session,
+on others any local user (section 5.2).
 
 The claim is about **extraction**, not about **use**. Latchwire does not make
 the tunnel unusable to malware that is running while the card is present (see
@@ -73,9 +76,9 @@ Where this is enforced: `internal/ipc/peercred_linux.go`,
 | **Configuration files that carry a private key.** | A `PrivateKey` line anywhere in a tunnel configuration is an error, not ignored (ignoring it would hide that you still have a software key). The check runs before the value is looked at, and the error text never echoes it. Hook keys such as `PostUp` are refused too: Latchwire never runs commands from configuration files. Stored configuration files are `0600` in a `0700` directory. | `internal/config/config.go` (`ErrPrivateKeyNotAllowed`, `hookKeys`); `internal/daemon/store.go` (`writeAtomic`, `ensureDir`). |
 | **A stolen or imaged laptop without the card.** | The disk holds the tunnel configuration (peer public keys, endpoints, and a preshared key if you use one) but nothing that can do the client's half of the handshake. Without the card, no handshake can be completed. | Same as the two rows above. |
 | **A key that was not created on the card.** | Latchwire only accepts keys the card reports as generated on the card (not imported), X25519, PIN policy "once", touch policy "never". There is no import path in v1. | `internal/keyprovider/piv/provider.go` (`Card.Provider` checks `Origin`, algorithm and policies); `internal/keyprovider/piv/generate.go` (`Card.Generate`). |
-| **A fake local agent pretending to be your card.** | Each identity in a tunnel configuration carries the expected `PublicKey` (written by the administrator, **never learned from the card**). Before the daemon binds a tunnel to an agent it requires (1) that the agent's `key.public` equals the configured key, and (2) a proof of possession: the agent must compute X25519 against a **fresh random ephemeral point** chosen by the daemon, and the result must equal what the daemon computes from its ephemeral private key and the configured public key. Only a holder of the real private key can do that. The ephemeral point is random, not a peer's key, so a fake agent learns nothing that helps it impersonate the server. No device, route or state change exists until this succeeds. | `internal/daemon/manager.go` (`proveOne`, `prove`, `connect`); `internal/config/config.go` (a missing `PublicKey` is a parse error). Tests: `TestFakeAgentWithWrongPublicKeyRefused`, `TestFakeAgentEchoingRightPublicKeyFailsPoP`, `TestProofOfPossessionBeforeDeviceAndWrongPIN` in `internal/daemon/manager_test.go`. |
+| **A fake local agent pretending to be your card.** | Each identity in a tunnel configuration carries the expected `PublicKey` (written by the administrator, **never learned from the card**). Before the daemon binds a tunnel to an agent it requires (1) that the agent's `key.public` equals the configured key, and (2) a proof of possession: the agent must compute X25519 against a **fresh random ephemeral point** chosen by the daemon, and the result must equal what the daemon computes from its ephemeral private key and the configured public key. Only a process that can use the real private key on the card can do that. This proves access to the card, **not which user is asking**: another local user who can reach your PIN-verified card passes it too (section 5.2). The ephemeral point is random, not a peer's key, so a fake agent learns nothing that helps it impersonate the server. No device, route or state change exists until this succeeds. | `internal/daemon/manager.go` (`proveOne`, `prove`, `connect`); `internal/config/config.go` (a missing `PublicKey` is a parse error). Tests: `TestFakeAgentWithWrongPublicKeyRefused`, `TestFakeAgentEchoingRightPublicKeyFailsPoP`, `TestProofOfPossessionBeforeDeviceAndWrongPIN` in `internal/daemon/manager_test.go`. |
 | **A fake daemon.** | The agent and the CLI refuse a socket served by any uid other than root or the current user, because configuration text and X25519 results travel over it. | `internal/agent/agent.go` (`session`); `cmd/latchwire/main.go` (`dialDaemon`). |
-| **Other local users rebinding, disconnecting or reconfiguring your tunnel.** | `tunnel.add` and `tunnel.remove` are administrator-only (root, macOS `admin`, Linux `sudo`, `wheel` or `latchwire`). A non-administrator can connect only through **its own** agent, and can disconnect only a tunnel bound to its own uid. An administrator tries its own agents first. A user whose agent has not registered cannot even read tunnel status. A failed or stalled connect by one user cannot bind or block a tunnel. | `internal/daemon/manager.go` (`handle`, `requestConnect`, `requestDisconnect`, `candidatesLocked`, `connect`, `boundTo`); `internal/ipc/admin_linux.go`, `internal/ipc/admin_darwin.go`. Tests: `TestNonAdminCannotAddTunnel`, `TestNonAdminConnectUsesOnlyOwnAgent`, `TestNonAdminCannotSquatTunnel`, `TestAdminTriesOwnAgentsAcrossAllIdentitiesFirst`. |
+| **Other local users reconfiguring your tunnels, or taking over a tunnel bound to you.** | `tunnel.add` and `tunnel.remove` are administrator-only (root, macOS `admin`, Linux `sudo`, `wheel` or `latchwire`). A non-administrator can connect only through **its own** agent, which must pass the proof of possession, and can disconnect only a tunnel bound to its own uid. A tunnel bound to you (`connecting`, `connected`, `card_removed`) cannot be taken over by a non-administrator. An administrator tries its own agents first. A failed or stalled connect by one user cannot bind or block a tunnel. **Limits:** this does not stop a local user who can reach your card through PC/SC from binding your tunnels that are not bound to you, and tunnel status is readable by any local user (section 5.2). | `internal/daemon/manager.go` (`handle`, `requestConnect`, `requestDisconnect`, `candidatesLocked`, `connect`, `boundTo`); `internal/ipc/admin_linux.go`, `internal/ipc/admin_darwin.go`. Tests: `TestNonAdminCannotAddTunnel`, `TestNonAdminConnectUsesOnlyOwnAgent`, `TestNonAdminCannotSquatTunnel`, `TestAdminTriesOwnAgentsAcrossAllIdentitiesFirst`. |
 | **A card that is swapped or re-seated under a connection.** | The vendored piv-go checks the card serial again after any reconnect, inside the new transaction, and refuses to send anything to a different card. A PIN meant for card A is never sent to card B. | `third_party/piv-go/PATCHES.md` (patch 6); `internal/keyprovider/piv/provider.go` (`mapCardErr`: `ErrCardChanged` becomes "unavailable"). |
 | **Handshake floods used to wear out or block the card.** | See section 8. | `internal/keyprovider/wgadapter/adapter.go`. |
 | **The program storing or leaking your PIN.** | The PIN is never stored: no struct field, file or environment variable. It is read from the terminal (no echo), handed straight to the card, and never logged. The buffer read from the terminal is cleared; the Go string passed on to the card cannot be erased (see 5.3). | `internal/agent/prompt_tty.go`, `internal/agent/agent.go` (package comment, `prompt`), `internal/keyprovider/piv/provider.go` (`promptPIN`), `cmd/latchwire/tty.go`. |
@@ -87,8 +90,9 @@ Read this section before you rely on Latchwire.
 ### 5.1 Malware running as you while the card is plugged in
 
 A hardware key stops **copying**, not **using**. If malicious code runs as your
-user (or as root) while your card is plugged in and the PIN has been entered,
-it can use the card and therefore the tunnel, and it can connect to the same
+user (or as root, or, where the platform's PC/SC policy lets other users reach
+the card, as any local user; see 5.2) while your card is plugged in and the PIN
+has been entered, it can use the card and therefore the tunnel, and it can connect to the same
 servers you can. What it cannot do is take the key with it: once the card is
 unplugged, or the machine is cleaned, the attacker has nothing reusable. This
 is the main difference to a key file, and it is also the limit of the design.
@@ -109,15 +113,48 @@ Authenticator and GPG keep working while the tunnel is up.
 
 The consequence is standard PIV behaviour (macOS CryptoTokenKit has the same
 property): the PIN policy of the Latchwire key is "once". After the PIN has
-been verified, **any process running as the same user can use that card's
+been verified, **any process that can reach the card can use that card's
 "PIN once" PIV keys without a PIN until the card is removed or reset** (or the
-verification is dropped by another program). This covers the Latchwire key
+verification is dropped by another program). That is always every process
+running as you; depending on the platform it can be every local user (see
+"Other local users" below). This covers the Latchwire key
 **and every other PIN-once key on the same card**, for example the key in slot
 `9a` used for macOS login. The PIN-verified state belongs to the card, not to
 Latchwire.
 
-Whether other local users or sessions can reach the card depends on the
-operating system's PC/SC access policy, which Latchwire does not change.
+**Other local users.** Whether other local users or sessions can reach the
+card depends on the operating system's PC/SC access policy, which Latchwire
+does not change:
+
+- **macOS** restricts smart-card access to the console user's session.
+- **Linux** depends on how `pcscd` is built and configured. With polkit, the
+  `org.debian.pcsc-lite.access_pcsc` and `org.debian.pcsc-lite.access_card`
+  actions decide, and their defaults differ between distributions; some allow
+  any local user, including SSH sessions. Without polkit, any local user who
+  can open the `pcscd` socket can use the card. Check with
+  `pkaction --verbose --action-id org.debian.pcsc-lite.access_card` and
+  restrict both actions to the console user on a machine with other users.
+
+Where other local users can reach the card, they get, while your card is
+plugged in and PIN-verified, the same powers as a process running as you,
+including in Latchwire:
+
+- Their agent passes the proof of possession with **your** card, because it
+  proves access to the card, not which user asks. So they can connect (and
+  bind to their own uid) any of your tunnels that is not currently bound to
+  you (state `disconnected` or `error`), and then disconnect it again. A
+  tunnel bound to you cannot be taken over by a non-administrator.
+- They do not need Latchwire at all: without root, they can run a userspace
+  WireGuard implementation that uses your card as its static key and connect
+  to any server that accepts your key.
+- Tunnel status (names, states, KeyRefs, last handshake) is readable by any
+  local user: the daemon shows it to any user with a registered agent, and
+  registering an agent needs no card.
+
+A per-tunnel allowed-user policy (only listed users' agents may bind a
+tunnel) is planned work; whether and how it is added is an open decision of
+the project owner. It would only limit Latchwire's daemon, not the second
+point above: the real fix is the PC/SC access policy.
 
 Also note: Latchwire's fresh-card hardening stores a random management key on
 the card protected by the PIN, which is what `ykman` calls "stored on the
@@ -287,9 +324,9 @@ Where this is enforced: `third_party/wireguard-go/PATCHES.md` and
 | Request | Who may make it |
 | --- | --- |
 | `tunnel.add`, `tunnel.remove` | Administrators only: root, macOS `admin`, Linux `sudo`, `wheel` or `latchwire`. |
-| `tunnel.connect` | An administrator, or a user whose own agent is registered. Non-administrators use only their own agent and cannot take over a tunnel bound to another user. |
+| `tunnel.connect` | An administrator, or a user whose own agent is registered and passes the proof of possession. Non-administrators use only their own agent and cannot take over a tunnel bound to another user. The proof shows access to the card, not which user owns it: a user who can reach your card through PC/SC can bind your unbound tunnels (section 5.2). |
 | `tunnel.disconnect` | An administrator, or the user the tunnel is bound to. |
-| `tunnel.status` | An administrator or a user with a registered agent. |
+| `tunnel.status` | An administrator or a user with a registered agent. Registering needs no card, so in practice any local user. |
 | `key.public`, `key.x25519` | The daemon, to the agent. The agent refuses a daemon that is neither root nor its own user. |
 
 Where this is enforced: `internal/daemon/manager.go` (`handle`), tests listed
