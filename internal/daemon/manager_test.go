@@ -729,11 +729,19 @@ func TestAgentExitTearsDownAfterGrace(t *testing.T) {
 	if d := time.Since(start); d < grace {
 		t.Errorf("torn down %v after the agent left, want >= grace %v", d, grace)
 	}
-	cfg.mu.Lock()
-	removed := cfg.removed
-	cfg.mu.Unlock()
-	if removed != 1 {
-		t.Errorf("Configurer.Remove called %d times, want 1 (device closed)", removed)
+	// The state changes before the device is closed; wait for the routes to
+	// go, which happens after the close.
+	for deadline := time.Now().Add(3 * time.Second); ; {
+		cfg.mu.Lock()
+		removed := cfg.removed
+		cfg.mu.Unlock()
+		if removed == 1 {
+			break
+		}
+		if removed > 1 || time.Now().After(deadline) {
+			t.Fatalf("Configurer.Remove called %d times, want 1 (device closed)", removed)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 	if err := get(tnet, time.Second); err == nil {
 		t.Fatal("GET succeeded after the tunnel was torn down")
