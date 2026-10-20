@@ -26,4 +26,21 @@ const (
 	ConfigDuplicateSectionFmt = "[%s] section appears more than once"
 	ConfigDuplicatePeer       = "the same PublicKey is used by more than one [Peer]"
 	ConfigMixedIdentities     = "KeyRef and Address belong in [Interface] or in [Identity] sections, not both"
+
+	// YubiKey PIV backend. None of these formats take a PIN, PUK or key.
+	PIVCardNotFound          = "no YubiKey with that serial number was found (is it plugged in, or in use by another program?)"
+	PIVFirmwareTooOld        = "YubiKey firmware is too old: X25519 keys in PIV need firmware 5.7.0 or later"
+	PIVSlotOccupied          = "the slot already holds a key; use --force to replace it (the old key is destroyed)"
+	PIVNoFreeSlot            = "no free retired slot (82-95) is left on this YubiKey"
+	PIVSlotEmpty             = "the slot holds no key"
+	PIVFreshCard             = "this YubiKey still uses the factory management key: give the current PIN and PUK and a new PIN and PUK (6-8 characters each, not the factory values) so it can be secured first"
+	PIVManagementKeyRequired = "the management key is needed: give the PIN if the management key is stored on the YubiKey protected by the PIN, or give the management key"
+	PIVImportedKey           = "the key in this slot was imported, not generated on the YubiKey; Latchwire only uses keys generated on the card"
+	PIVNotX25519             = "the key in this slot is not an X25519 key"
+	PIVSlotOutOfRangeFmt     = "slot %02x is not a retired key management slot (82-95)"
+	PIVWrongPUKFmt           = "wrong PUK, %d retries left"
+	PIVPUKBlocked            = "the PUK is blocked"
+	PIVStoredKeyMismatch     = "the management key stored on the YubiKey could not be read back correctly; the management key was not changed"
+	PIVEmptyPIN              = "no PIN was entered"
+	PIVUnexpectedPublicKey   = "the YubiKey returned an unexpected public key type"
 )
