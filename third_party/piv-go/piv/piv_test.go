@@ -131,16 +131,14 @@ func TestMultipleConnections(t *testing.T) {
 			}
 		}()
 
-		_, oerr := Open(card)
-		if oerr == nil {
-			t.Fatalf("expected second open operation to fail")
+		// Latchwire patch: connections are shared, so a second Open succeeds
+		// (upstream expected SCARD_E_SHARING_VIOLATION 0x8010000B).
+		yk2, oerr := Open(card)
+		if oerr != nil {
+			t.Fatalf("second open in shared mode: %v", oerr)
 		}
-		var e *scErr
-		if !errors.As(oerr, &e) {
-			t.Fatalf("expected scErr, got %v", oerr)
-		}
-		if e.rc != 0x8010000B {
-			t.Fatalf("expected return code 0x8010000B, got 0x%x", e.rc)
+		if err := yk2.Close(); err != nil {
+			t.Errorf("closing second yubikey: %v", err)
 		}
 		return
 	}

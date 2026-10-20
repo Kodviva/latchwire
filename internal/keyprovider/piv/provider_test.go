@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 
 	"github.com/Kodviva/latchwire/internal/keyprovider"
 	"github.com/Kodviva/latchwire/internal/keyref"
+	"github.com/Kodviva/latchwire/internal/msg"
 )
 
 func randPeer(t *testing.T) (*ecdh.PrivateKey, [32]byte) {
@@ -83,6 +85,46 @@ func TestProviderRejectsNonX25519(t *testing.T) {
 	_, err = c.Provider(keyref.Ref{Serial: testSerial, Slot: 0x82}, (&promptRec{}).fn)
 	if !errors.Is(err, ErrNotX25519) {
 		t.Fatalf("err = %v, want ErrNotX25519", err)
+	}
+}
+
+func TestProviderRejectsUnsupportedPolicy(t *testing.T) {
+	for _, pol := range []struct {
+		pin   piv.PINPolicy
+		touch piv.TouchPolicy
+	}{
+		{piv.PINPolicyNever, piv.TouchPolicyNever},
+		{piv.PINPolicyAlways, piv.TouchPolicyNever},
+		{piv.PINPolicyOnce, piv.TouchPolicyAlways},
+		{piv.PINPolicyOnce, piv.TouchPolicyCached},
+	} {
+		f := newFakeCard(t, testSerial)
+		f.occupyX25519(0x82)
+		ki := f.slots[0x82]
+		ki.PINPolicy, ki.TouchPolicy = pol.pin, pol.touch
+		f.slots[0x82] = ki
+		c := mustCard(t, f)
+		_, err := c.Provider(keyref.Ref{Serial: testSerial, Slot: 0x82}, (&promptRec{}).fn)
+		if !errors.Is(err, ErrUnsupportedPolicy) {
+			t.Fatalf("policy %+v: err = %v, want ErrUnsupportedPolicy", pol, err)
+		}
+	}
+}
+
+func TestProviderRejectsOverlongPIN(t *testing.T) {
+	f := newFakeCard(t, testSerial)
+	f.occupyX25519(0x82)
+	p := newProvider(t, f, 0x82, &promptRec{pins: []string{"123456789"}})
+	_, peer := randPeer(t)
+	_, err := p.X25519(context.Background(), peer)
+	if !errors.Is(err, keyprovider.ErrPINRequired) || errors.Is(err, keyprovider.ErrUnavailable) {
+		t.Fatalf("err = %v, want ErrPINRequired", err)
+	}
+	if !strings.Contains(err.Error(), msg.PIVPINTooLong) {
+		t.Fatalf("err = %v, want %q", err, msg.PIVPINTooLong)
+	}
+	if len(f.pinsSent) != 0 || f.pinRetries != 3 {
+		t.Fatal("overlong PIN reached the card")
 	}
 }
 

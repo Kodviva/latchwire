@@ -48,7 +48,8 @@ type provider struct {
 var _ keyprovider.Provider = (*provider)(nil)
 
 // Provider returns a provider for an existing key in ref's slot. The key
-// must be an X25519 key generated on this card. prompt is asked for the PIN
+// must be an X25519 key generated on this card with PIN policy once and
+// touch policy never (what Generate creates). prompt is asked for the PIN
 // only when the card needs it, with the number of retries left; it is never
 // called when the PIN is blocked. The PIN is passed straight to the card and
 // not kept.
@@ -84,6 +85,9 @@ func (c *Card) Provider(ref keyref.Ref, prompt func(retriesLeft int) (string, er
 	if !ok || ep.Curve() != ecdh.X25519() {
 		return nil, ErrNotX25519
 	}
+	if ki.PINPolicy != piv.PINPolicyOnce || ki.TouchPolicy != piv.TouchPolicyNever {
+		return nil, ErrUnsupportedPolicy
+	}
 
 	p := &provider{
 		card:   c,
@@ -101,6 +105,10 @@ func (c *Card) Provider(ref keyref.Ref, prompt func(retriesLeft int) (string, er
 
 	// The PIN policy comes from the card's own metadata, so piv-go does not
 	// need to guess it. KeyAuth.PIN stays empty: the PIN is never stored.
+	// With PINPolicyOnce the vendored piv-go asks promptPIN only when an
+	// empty VERIFY shows the card holds no verified PIN; if verification is
+	// lost between that check and the operation, the card answers 6982 and
+	// X25519 returns ErrPINRequired (the agent re-prompts once, R2).
 	priv, err := c.c.PrivateKey(slot, ep, piv.KeyAuth{PINPolicy: ki.PINPolicy, PINPrompt: p.promptPIN})
 	if err != nil {
 		return nil, mapCardErr(err)
@@ -220,6 +228,9 @@ func (p *provider) promptPIN() (string, error) {
 	}
 	if pin == "" {
 		return fail(fmt.Errorf("%w: %s", keyprovider.ErrPINRequired, msg.PIVEmptyPIN))
+	}
+	if len(pin) > maxSecretLen {
+		return fail(fmt.Errorf("%w: %s", keyprovider.ErrPINRequired, msg.PIVPINTooLong))
 	}
 	return pin, nil
 }

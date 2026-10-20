@@ -5,11 +5,13 @@ import (
 	"crypto/ecdh"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/go-piv/piv-go/v2/piv"
 
 	"github.com/Kodviva/latchwire/internal/keyprovider"
+	"github.com/Kodviva/latchwire/internal/msg"
 )
 
 const testSerial = 40727512
@@ -221,21 +223,25 @@ func TestFreshCardHardens(t *testing.T) {
 	var mutating []string
 	for _, c := range f.calls {
 		switch c {
-		case "SetPIN", "SetPUK", "SetMetadata", "Metadata", "SetManagementKey", "GenerateKey":
+		case "SetPIN", "SetPUK", "SetMetadata", "Metadata", "SetManagementKey", "SetPIVManFlags", "GenerateKey":
 			mutating = append(mutating, c)
 		}
 	}
 	// The first Metadata call is the lookup for a PIN-protected key; the
-	// second is the readback with the new PIN.
-	want := []string{"Metadata", "SetPIN", "SetPUK", "SetMetadata", "Metadata", "SetManagementKey", "GenerateKey"}
+	// first SetPUK only checks the current PUK (changes it to itself) before
+	// the PIN is touched; the second Metadata is the readback with the new PIN.
+	want := []string{"Metadata", "SetPUK", "SetPIN", "SetPUK", "SetMetadata", "Metadata", "SetManagementKey", "SetPIVManFlags", "GenerateKey"}
 	if !slices.Equal(mutating, want) {
 		t.Fatalf("calls = %v, want %v", mutating, want)
 	}
 	if f.pin != "135790" || f.puk != "86420975" {
 		t.Fatalf("PIN/PUK not changed")
 	}
-	if !slices.Equal(f.mgmtLens, []int{managementKeyLen}) {
-		t.Fatalf("new management key lengths = %v, want [%d]", f.mgmtLens, managementKeyLen)
+	if !slices.Equal(f.mgmtLens, []int{32}) {
+		t.Fatalf("new management key lengths = %v, want [32] (AES-256)", f.mgmtLens)
+	}
+	if f.pivman != piv.PIVManFlagMgmtKeyStored {
+		t.Fatalf("PIVMAN flags = %#x, want %#x", f.pivman, piv.PIVManFlagMgmtKeyStored)
 	}
 	if bytes.Equal(f.mgmtKey, piv.DefaultManagementKey) {
 		t.Fatal("management key is still the default")
@@ -249,14 +255,89 @@ func TestFreshCardAbortsOnBadMetadataReadback(t *testing.T) {
 	f := newFakeCard(t, testSerial).fresh()
 	f.truncateMeta = true
 	c := mustCard(t, f)
-	if _, _, err := c.Generate(freshOpts()); err == nil {
+	_, _, err := c.Generate(freshOpts())
+	if err == nil {
 		t.Fatal("Generate succeeded with a corrupted stored management key")
+	}
+	if !strings.Contains(err.Error(), msg.PIVPINAndPUKAlreadyChanged) || !strings.Contains(err.Error(), msg.PIVStoredKeyMismatch) {
+		t.Fatalf("err = %q, want it to say the PIN and PUK were already changed", err)
 	}
 	if n := f.callCount("SetManagementKey"); n != 0 {
 		t.Fatalf("SetManagementKey called %d times after a bad readback", n)
 	}
 	if !bytes.Equal(f.mgmtKey, piv.DefaultManagementKey) {
 		t.Fatal("management key changed after a bad readback")
+	}
+}
+
+func TestFreshCardChecksPUKBeforePIN(t *testing.T) {
+	f := newFakeCard(t, testSerial).fresh()
+	c := mustCard(t, f)
+	o := freshOpts()
+	o.CurrentPUK = "11112222"
+	_, _, err := c.Generate(o)
+	if err == nil || !strings.Contains(err.Error(), "wrong PUK") {
+		t.Fatalf("err = %v, want wrong PUK", err)
+	}
+	if n := f.callCount("SetPIN"); n != 0 {
+		t.Fatalf("SetPIN called %d times with a wrong PUK", n)
+	}
+	if f.pin != "246810" {
+		t.Fatal("PIN changed although the PUK was wrong")
+	}
+}
+
+func TestFreshCardFailuresAfterPINChangeSaySo(t *testing.T) {
+	boom := &fakeAPDUErr{0x6a80}
+	cases := []struct {
+		method string
+		nth    int
+		want   string
+		pukNew bool
+	}{
+		{"SetPUK", 2, msg.PIVPINAlreadyChanged, false},
+		{"SetMetadata", 1, msg.PIVPINAndPUKAlreadyChanged, true},
+		{"SetManagementKey", 1, msg.PIVPINAndPUKAlreadyChanged, true},
+		{"SetPIVManFlags", 1, msg.PIVPINAndPUKAlreadyChanged, true},
+	}
+	for _, tc := range cases {
+		f := newFakeCard(t, testSerial).fresh().failOn(tc.method, tc.nth, boom)
+		c := mustCard(t, f)
+		_, _, err := c.Generate(freshOpts())
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s fails: err = %v, want it to contain %q", tc.method, err, tc.want)
+		}
+		if f.pin != "135790" {
+			t.Fatalf("%s fails: PIN is not the new value, the message would lie", tc.method)
+		}
+		if (f.puk == "86420975") != tc.pukNew {
+			t.Fatalf("%s fails: PUK new = %v, want %v", tc.method, f.puk == "86420975", tc.pukNew)
+		}
+		if n := f.callCount("GenerateKey"); n != 0 {
+			t.Fatalf("%s fails: GenerateKey still called", tc.method)
+		}
+	}
+	// The PIVMAN failure happens after the switch: the message says so.
+	f := newFakeCard(t, testSerial).fresh().failOn("SetPIVManFlags", 1, boom)
+	c := mustCard(t, f)
+	_, _, err := c.Generate(freshOpts())
+	if !strings.Contains(err.Error(), msg.PIVPIVManFlagFailed) {
+		t.Fatalf("err = %v, want %q", err, msg.PIVPIVManFlagFailed)
+	}
+}
+
+func TestGenerateRejectsOverlongSecrets(t *testing.T) {
+	for _, o := range []GenerateOptions{{PIN: "123456789"}, {PIN: "246810", CurrentPUK: "123456789"}} {
+		f := newFakeCard(t, testSerial).fresh()
+		c := mustCard(t, f)
+		f.calls = nil
+		_, _, err := c.Generate(o)
+		if err == nil || err.Error() != msg.PIVSecretTooLong {
+			t.Fatalf("err = %v, want %q", err, msg.PIVSecretTooLong)
+		}
+		if len(f.calls) != 0 {
+			t.Fatalf("card calls %v, want none", f.calls)
+		}
 	}
 }
 

@@ -8,7 +8,11 @@
 //   - A factory-fresh card is detected only by whether the default management
 //     key authenticates (management keys have no retry counter).
 //   - Only slots 82-95 are read or written; 9a, 9c, 9d and 9e are never used.
-//   - Only keys generated on the card (Origin = generated) are accepted.
+//   - Only keys generated on the card (Origin = generated) with PIN policy
+//     once and touch policy never are accepted.
+//   - Cards are opened in shared mode with one PC/SC transaction per
+//     operation (patched piv-go in third_party/piv-go), so other programs
+//     can use the card between operations.
 package piv
 
 import (
@@ -31,6 +35,9 @@ type card interface {
 	SetPIN(oldPIN, newPIN string) error
 	SetPUK(oldPUK, newPUK string) error
 	SetManagementKey(oldKey, newKey []byte) error
+	// SetPIVManFlags ORs flag bits into ykman's PIVMAN data object
+	// (Latchwire patch to piv-go).
+	SetPIVManFlags(key []byte, flags byte) error
 	// AuthenticateManagementKey reports whether key is the card's management
 	// key, without changing anything on the card.
 	AuthenticateManagementKey(key []byte) error
@@ -71,7 +78,7 @@ type yubiKey struct {
 	*piv.YubiKey
 }
 
-// probeSentinel is the exact error piv-go v2.5.0 returns from GenerateKey
+// probeSentinel is the exact error the vendored piv-go v2.5.0 returns from GenerateKey
 // when management key authentication succeeded and the (deliberately invalid)
 // key options were then rejected locally, before any GENERATE command is
 // sent. See GenerateKey -> ykAuthenticate -> ykGenerateKey in piv/key.go.

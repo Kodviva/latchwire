@@ -43,7 +43,11 @@ type fakeCard struct {
 	slots map[uint32]piv.KeyInfo
 	privs map[uint32]*ecdh.PrivateKey
 
+	pivman byte // ykman PIVMAN flags
+
 	// failure injection
+	fail       map[string]failAt // fail the nth call of a method
+	counts     map[string]int
 	ecdhErr    error // returned by ECDH instead of computing
 	ecdhZero   bool  // ECDH returns all zeros
 	retriesErr error
@@ -85,7 +89,33 @@ func (f *fakeCard) protectMgmt() *fakeCard {
 	return f
 }
 
+type failAt struct {
+	nth int
+	err error
+}
+
+// failOn makes the nth (1-based) call of method name fail with err.
+func (f *fakeCard) failOn(name string, nth int, err error) *fakeCard {
+	if f.fail == nil {
+		f.fail = map[string]failAt{}
+	}
+	f.fail[name] = failAt{nth, err}
+	return f
+}
+
 func (f *fakeCard) record(c string) { f.calls = append(f.calls, c) }
+
+// injected counts a call and returns the injected failure, if any.
+func (f *fakeCard) injected(name string) error {
+	if f.counts == nil {
+		f.counts = map[string]int{}
+	}
+	f.counts[name]++
+	if fa, ok := f.fail[name]; ok && fa.nth == f.counts[name] {
+		return fa.err
+	}
+	return nil
+}
 
 func (f *fakeCard) callCount(name string) int {
 	f.mu.Lock()
@@ -188,6 +218,9 @@ func (f *fakeCard) SetMetadata(key []byte, m *piv.Metadata) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.record("SetMetadata")
+	if err := f.injected("SetMetadata"); err != nil {
+		return err
+	}
 	if !bytes.Equal(key, f.mgmtKey) {
 		return &fakeAPDUErr{0x6982}
 	}
@@ -207,6 +240,9 @@ func (f *fakeCard) SetPIN(oldPIN, newPIN string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.record("SetPIN")
+	if err := f.injected("SetPIN"); err != nil {
+		return err
+	}
 	if err := f.pinCheck(oldPIN); err != nil {
 		return err
 	}
@@ -219,6 +255,9 @@ func (f *fakeCard) SetPUK(oldPUK, newPUK string) error {
 	defer f.mu.Unlock()
 	f.record("SetPUK")
 	f.pinsSent = append(f.pinsSent, oldPUK)
+	if err := f.injected("SetPUK"); err != nil {
+		return err
+	}
 	if oldPUK != f.puk {
 		f.pukRetries--
 		return piv.AuthErr{Retries: f.pukRetries}
@@ -232,10 +271,27 @@ func (f *fakeCard) SetManagementKey(oldKey, newKey []byte) error {
 	defer f.mu.Unlock()
 	f.record("SetManagementKey")
 	f.mgmtLens = append(f.mgmtLens, len(newKey))
+	if err := f.injected("SetManagementKey"); err != nil {
+		return err
+	}
 	if !bytes.Equal(oldKey, f.mgmtKey) {
 		return &fakeAPDUErr{0x6982}
 	}
 	f.mgmtKey = append([]byte(nil), newKey...)
+	return nil
+}
+
+func (f *fakeCard) SetPIVManFlags(key []byte, flags byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.record("SetPIVManFlags")
+	if err := f.injected("SetPIVManFlags"); err != nil {
+		return err
+	}
+	if !bytes.Equal(key, f.mgmtKey) {
+		return fmt.Errorf("authenticating with management key: %w", &fakeAPDUErr{0x6982})
+	}
+	f.pivman |= flags
 	return nil
 }
 
