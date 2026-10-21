@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"github.com/Kodviva/latchwire/internal/keyref"
 	"github.com/Kodviva/latchwire/internal/killswitch"
 	"github.com/Kodviva/latchwire/internal/msg"
+	"github.com/Kodviva/latchwire/internal/netcfg"
 )
 
 const testNetwork = "0123456789abcdef"
@@ -653,5 +655,73 @@ func TestRevokeArmedTunnelKeepsBlocking(t *testing.T) {
 	e.fw.waitLast(t, "released", released)
 	if st := e.status(); st.State != StateDisconnected {
 		t.Fatalf("state %q after the administrator's down", st.State)
+	}
+}
+
+// P21 for a failed tunnel: denying the user an armed tunnel in state error
+// is bound to unbinds it too (it keeps blocking, in error), and the kill
+// switch record says so, so a restart after a crash restores it unbound:
+// the denied user's card reconnects nothing and that user cannot take it
+// down.
+func TestRevokeArmedErrorTunnelUnbinds(t *testing.T) {
+	e := newEnv(t, envOpts{present: []uint32{serialA}, admin: onlyAdmin})
+	srv := newServer(t, e.b.pub(serialA), "10.0.0.2")
+	if err := e.m.add(tunName, e.config([]keyref.Ref{refA}, []string{"10.0.0.2"}, srv, ""), 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.m.setPolicy(ipc.TunnelPolicySet{Name: tunName, KillSwitch: KillSwitchOn, Allow: []uint32{uidA}}); err != nil {
+		t.Fatal(err)
+	}
+	e.waitCard(serialA, true)
+	// The kill switch cannot be set: the connect fails, bound to uidA.
+	e.fw.setErr(errors.New("pfctl: /dev/pf: Permission denied"))
+	assertCode(t, e.call(ipc.MethodTunnelConnect, ipc.TunnelName{Name: tunName}, nil), ipc.CodeInternal)
+	if tn := e.tunnel(); tn.state != StateError || !tn.hasRef || tn.uid != uidA {
+		t.Fatalf("failed connect: state %q hasRef %v uid %d", tn.state, tn.hasRef, tn.uid)
+	}
+	e.fw.setErr(nil)
+
+	got, err := e.m.setPolicy(ipc.TunnelPolicySet{Name: tunName, Deny: []uint32{uidA}})
+	if err != nil || !got.RevokedBlocking {
+		t.Fatalf("deny: %+v, %v; want RevokedBlocking", got, err)
+	}
+	st := e.status()
+	if st.State != StateError || st.Identity != "" || st.KillSwitch != ipc.KillSwitchStatusBlocking {
+		t.Fatalf("status %+v, want error, unbound, blocking", st)
+	}
+	if tn := e.tunnel(); tn.hasRef || tn.uid != 0 || tn.adminBound {
+		t.Fatalf("tunnel still bound: hasRef %v uid %d adminBound %v", tn.hasRef, tn.uid, tn.adminBound)
+	}
+	e.fw.waitLast(t, "blocking", func(s killswitch.State) bool { return s.Block && len(s.Tunnels) == 0 })
+	rec, err := e.m.store.loadKillSwitchTunnels()
+	if err != nil || !reflect.DeepEqual(rec, []ksTunnel{{Name: tunName}}) {
+		t.Fatalf("kill switch record %+v, %v; want the tunnel unbound", rec, err)
+	}
+	assertCode(t, e.call(ipc.MethodTunnelDisconnect, ipc.TunnelName{Name: tunName}, nil), ipc.CodeForbidden)
+
+	// A crash now (the record and the journaled kill switch stay), then a
+	// restart: the tunnel waits unbound.
+	e.stop()
+	if err := e.m.store.saveKillSwitchTunnels(rec); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(e.store)
+	j, err := netcfg.OpenJournal(filepath.Join(dir, "journal.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := j.Record(killswitch.JournalOwner, []netcfg.Step{{Name: "nft", Args: []string{"-f", "-"}, Stdin: []byte("x"), Persistent: true}}); err != nil {
+		t.Fatal(err)
+	}
+	m := NewManager(Options{Socket: filepath.Join(dir, "s2"), StoreDir: e.store, JournalPath: filepath.Join(dir, "journal.json"),
+		Runner: &cmdRunner{}, TUN: (&netFactory{}).make, Firewall: &fakeFirewall{},
+		IsAdmin: func(uid uint32) (bool, error) { return onlyAdmin(uid), nil }})
+	serveManager(t, m)
+	m.mu.Lock()
+	tn := m.tunnels[tunName]
+	state, hasRef, uid := tn.state, tn.hasRef, tn.uid
+	m.mu.Unlock()
+	if state != StateCardRemoved || hasRef || uid != 0 {
+		t.Fatalf("after the restart: state %q hasRef %v uid %d; want card_removed, unbound", state, hasRef, uid)
 	}
 }

@@ -266,32 +266,40 @@ func (m *Manager) setPolicy(req ipc.TunnelPolicySet) (ipc.TunnelPolicy, error) {
 }
 
 // revoke takes t from its user when it is bound (connecting, connected,
-// waiting for its card) to a user that pol no longer allows, unless an
-// administrator made the binding or the user is an administrator. m.polMu
-// is held, so no connect can bind t under the old policy meanwhile (see
-// connect). It reports whether t was left blocking.
+// waiting for its card) to a user that pol no longer allows, or failed
+// (error) while bound to that user, unless an administrator made the
+// binding or the user is an administrator. m.polMu is held, so no connect
+// can bind t under the old policy meanwhile (see connect). It reports
+// whether t was left blocking.
 //
 // A tunnel whose kill switch is on (as installed: t.policy) is not
-// released (P21): it goes to card_removed unbound, as a restart restores
-// an unbound tunnel, so the kill switch keeps blocking, the denied user's
-// card reconnects nothing, and only an administrator's down lifts it. The
-// kill switch record follows (no key, no user). Any other tunnel is taken
+// released (P21): it loses its key and user (unbound, as a restart restores
+// an unbound tunnel) and keeps blocking, in card_removed, or in error when
+// it had failed; the denied user's card reconnects nothing, and only an
+// administrator's down lifts it. The kill switch record follows (no key,
+// no user), so a restart restores it unbound too. Any other tunnel is taken
 // down to disconnected.
 func (m *Manager) revoke(t *tunnel, pol Policy) (blocking bool) {
+	held := func(t *tunnel) bool { // under Manager.mu
+		return t.hasRef && (t.bound() || t.state == StateError)
+	}
 	m.mu.Lock()
 	uid := t.uid
-	cand := t.bound() && !t.adminBound && !pol.allows(uid)
+	cand := held(t) && !t.adminBound && !pol.allows(uid)
 	m.mu.Unlock()
 	if !cand || m.admin(uid) {
 		return false
 	}
 	state := StateDisconnected
 	cond := func(t *tunnel) bool { // under Manager.mu, with the teardown
-		if !t.bound() || t.adminBound || t.uid != uid {
+		if !held(t) || t.adminBound || t.uid != uid {
 			return false
 		}
 		if t.policy.armed(t.cfg) {
 			state = StateCardRemoved
+			if t.state == StateError {
+				state = StateError
+			}
 			t.hasRef, t.uid, t.adminBound = false, 0, false
 		}
 		return true
@@ -300,8 +308,8 @@ func (m *Manager) revoke(t *tunnel, pol Policy) (blocking bool) {
 	if !m.teardownTo(t, &state, cond) {
 		return false
 	}
-	if state == StateCardRemoved {
-		log.Printf("daemon: tunnel %s: uid %d is no longer an allowed user; tunnel down and unbound, its kill switch keeps blocking until an administrator takes it down", t.name, uid)
+	if state != StateDisconnected {
+		log.Printf("daemon: tunnel %s: uid %d is no longer an allowed user; tunnel down (%s) and unbound, its kill switch keeps blocking until an administrator takes it down", t.name, uid, state)
 		return true
 	}
 	log.Printf("daemon: tunnel %s: uid %d is no longer an allowed user, tunnel down", t.name, uid)
