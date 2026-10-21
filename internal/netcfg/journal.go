@@ -262,7 +262,7 @@ func Cleanup(ctx context.Context, r Runner, j *Journal, keep func(owner string) 
 		steps := entries[o]
 		for i := len(steps) - 1; i >= 0 && ctx.Err() == nil; i-- {
 			s := steps[i]
-			if _, err := r.Run(ctx, s.Name, s.Args, s.Stdin); err != nil {
+			if _, err := r.Run(ctx, s.Name, s.Args, s.Stdin); err != nil && !alreadyUndone(s, err) {
 				errs = append(errs, fmt.Errorf("cleanup %s: %s: %w", o, s, err))
 			}
 		}

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -25,6 +26,12 @@ const (
 	tablesTried = 1000
 
 	srcValidMarkKey = "net.ipv4.conf.all.src_valid_mark"
+
+	// ruleProtocol tags every ip rule Latchwire adds ("protocol 251"), and
+	// every delete names it, so an undo never removes an identical rule
+	// that another tool (wg-quick uses the same selectors) installed. 251 is
+	// not assigned in iproute2's rt_protos. Rule protocols need Linux 4.17.
+	ruleProtocol = "251"
 )
 
 // defaultFamilies reports which families have a default route in routes.
@@ -41,14 +48,40 @@ func defaultFamilies(routes []netip.Prefix) (v4, v6 bool) {
 	return
 }
 
+// noSuchTable reports whether err from "ip route show table T" says that T
+// was never created (recent kernels and iproute2 fail then instead of
+// printing nothing): such a table is free.
+func noSuchTable(err error) bool {
+	return strings.Contains(err.Error(), "FIB table does not exist")
+}
+
 // LinuxTable returns the first routing table from 51820 up that holds no
-// route, for a full tunnel's policy routing and fwmark. An error from the
-// IPv4 query fails; one from the IPv6 query (IPv6 disabled) does not.
+// route and that no ip rule looks up, for a full tunnel's policy routing and
+// fwmark. An error from an IPv4 query fails; one from an IPv6 query (IPv6
+// disabled) does not.
 func LinuxTable(ctx context.Context, r Runner) (uint32, error) {
+	used := map[string]bool{}
+	for _, fam := range []string{"-4", "-6"} {
+		out, err := r.Run(ctx, "ip", []string{fam, "rule", "show"}, nil)
+		if err != nil {
+			if fam == "-4" {
+				return 0, fmt.Errorf("netcfg: finding a free routing table: %w", err)
+			}
+			continue
+		}
+		for line := range strings.Lines(string(out)) {
+			if t := wordAfter(line, "lookup"); t != "" {
+				used[t] = true
+			}
+		}
+	}
 	for t := uint32(firstTable); t < firstTable+tablesTried; t++ {
 		n := strconv.FormatUint(uint64(t), 10)
+		if used[n] {
+			continue
+		}
 		out, err := r.Run(ctx, "ip", []string{"-4", "route", "show", "table", n}, nil)
-		if err != nil {
+		if err != nil && !noSuchTable(err) {
 			return 0, fmt.Errorf("netcfg: finding a free routing table: %w", err)
 		}
 		if strings.TrimSpace(string(out)) != "" {
@@ -135,21 +168,25 @@ func planLinuxFullTunnel(iface string, table uint32, v4, v6 bool, addrs []netip.
 				undo: undoOf("ip", f.flag, "route", "del", f.dst, "dev", iface, "table", t),
 			},
 			step{
-				do:   command("ip", f.flag, "rule", "add", "not", "fwmark", t, "table", t),
-				undo: persistentUndo("ip", f.flag, "rule", "del", "not", "fwmark", t, "table", t),
+				do:   command("ip", f.flag, "rule", "add", "not", "fwmark", t, "table", t, "protocol", ruleProtocol),
+				undo: persistentUndo("ip", f.flag, "rule", "del", "not", "fwmark", t, "table", t, "protocol", ruleProtocol),
 			},
 			step{
-				do:   command("ip", f.flag, "rule", "add", "table", "main", "suppress_prefixlength", "0"),
-				undo: persistentUndo("ip", f.flag, "rule", "del", "table", "main", "suppress_prefixlength", "0"),
+				do:   command("ip", f.flag, "rule", "add", "table", "main", "suppress_prefixlength", "0", "protocol", ruleProtocol),
+				undo: persistentUndo("ip", f.flag, "rule", "del", "table", "main", "suppress_prefixlength", "0", "protocol", ruleProtocol),
 			},
 		)
 	}
 	name := rpTableName(iface)
 	nft := command("nft", "-f", "-")
 	nft.Stdin = rpScript(iface, name, t, addrs)
+	// Declaring the table before deleting it makes the undo succeed when
+	// the table is already gone.
+	del := persistentUndo("nft", "-f", "-")
+	del.Stdin = []byte(fmt.Sprintf("table inet %s {}\ndelete table inet %s\n", name, name))
 	out = append(out, step{
 		do:      nft,
-		undo:    persistentUndo("nft", "delete", "table", "inet", name),
+		undo:    del,
 		missing: fmt.Sprintf(msg.NetNoRPFilterFmt, iface),
 	})
 	return out
@@ -200,4 +237,13 @@ func rpScript(iface, name, mark string, addrs []netip.Prefix) []byte {
 	fmt.Fprintf(&b, "\tchain prerouting_mangle {\n\t\ttype filter hook prerouting priority -150; policy accept;\n\t\tmeta l4proto udp ct mark %s meta mark set ct mark\n\t}\n", mark)
 	b.WriteString("}\n")
 	return []byte(b.String())
+}
+
+// alreadyUndone reports whether err from undo step s only says that what s
+// removes is already gone: "ip rule del" of a rule that does not exist
+// (ENOENT; the runner's environment fixes the C locale). Such an undo
+// succeeded. (The nft undo is idempotent by itself.)
+func alreadyUndone(s Step, err error) bool {
+	return s.Name == "ip" && slices.Contains(s.Args, "rule") && slices.Contains(s.Args, "del") &&
+		strings.Contains(err.Error(), "No such file or directory")
 }

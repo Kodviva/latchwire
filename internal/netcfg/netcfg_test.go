@@ -22,6 +22,7 @@ type recorder struct {
 	cmds    []string
 	failOn  string
 	missing string
+	failErr error // returned by failOn; default "exit status 1"
 	out     map[string]string
 	stdin   map[string]string
 	onRun   func(cmd string)
@@ -43,6 +44,9 @@ func (r *recorder) Run(_ context.Context, name string, args []string, in []byte)
 		return nil, fmt.Errorf("%s: %w", name, exec.ErrNotFound)
 	}
 	if r.failOn != "" && strings.HasPrefix(c, r.failOn) {
+		if r.failErr != nil {
+			return nil, r.failErr
+		}
 		return nil, errors.New("exit status 1")
 	}
 	return []byte(r.out[c]), nil

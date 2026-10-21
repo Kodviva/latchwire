@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -34,22 +35,22 @@ func TestLinuxFullTunnelPlan(t *testing.T) {
 	wantDo := []string{
 		"sysctl -q net.ipv4.conf.all.src_valid_mark=1",
 		"ip -4 route add 0.0.0.0/0 dev wg0 table 51820",
-		"ip -4 rule add not fwmark 51820 table 51820",
-		"ip -4 rule add table main suppress_prefixlength 0",
+		"ip -4 rule add not fwmark 51820 table 51820 protocol 251",
+		"ip -4 rule add table main suppress_prefixlength 0 protocol 251",
 		"ip -6 route add ::/0 dev wg0 table 51820",
-		"ip -6 rule add not fwmark 51820 table 51820",
-		"ip -6 rule add table main suppress_prefixlength 0",
+		"ip -6 rule add not fwmark 51820 table 51820 protocol 251",
+		"ip -6 rule add table main suppress_prefixlength 0 protocol 251",
 		"nft -f -",
 	}
 	// The table route goes with the interface, so it is not persistent;
 	// rules, the sysctl and the nft table outlive it.
 	wantUndo := []string{
-		"P nft delete table inet latchwire_rp_wg0",
-		"P ip -6 rule del table main suppress_prefixlength 0",
-		"P ip -6 rule del not fwmark 51820 table 51820",
+		"P nft -f -",
+		"P ip -6 rule del table main suppress_prefixlength 0 protocol 251",
+		"P ip -6 rule del not fwmark 51820 table 51820 protocol 251",
 		"  ip -6 route del ::/0 dev wg0 table 51820",
-		"P ip -4 rule del table main suppress_prefixlength 0",
-		"P ip -4 rule del not fwmark 51820 table 51820",
+		"P ip -4 rule del table main suppress_prefixlength 0 protocol 251",
+		"P ip -4 rule del not fwmark 51820 table 51820 protocol 251",
 		"  ip -4 route del 0.0.0.0/0 dev wg0 table 51820",
 		"P sysctl -q net.ipv4.conf.all.src_valid_mark=0",
 	}
@@ -62,6 +63,19 @@ func TestLinuxFullTunnelPlan(t *testing.T) {
 	nft := ss[len(ss)-1]
 	if nft.missing == "" {
 		t.Error("the nft step must be skipped when nft is not installed")
+	}
+	// The nft undo succeeds whether or not the table is still there.
+	if got, want := string(nft.undo.Stdin), "table inet latchwire_rp_wg0 {}\ndelete table inet latchwire_rp_wg0\n"; got != want {
+		t.Errorf("nft undo script %q, want %q", got, want)
+	}
+	// Every rule Latchwire adds or deletes carries its protocol tag, so
+	// an identical rule of another tool is never removed.
+	for _, s := range ss {
+		for _, st := range []*Step{&s.do, s.undo} {
+			if st != nil && slices.Contains(st.Args, "rule") && !strings.HasSuffix(st.String(), " protocol 251") {
+				t.Errorf("%q lacks protocol 251", st)
+			}
+		}
 	}
 	script := string(nft.do.Stdin)
 	for _, want := range []string{
@@ -94,7 +108,25 @@ func TestLinuxFullTunnelPlan(t *testing.T) {
 }
 
 func TestLinuxTablePicksFirstFree(t *testing.T) {
+	// A table only a rule looks up (its routes gone, e.g. with a stale
+	// rule left by another tunnel or tool) is not free either.
 	r := &recorder{out: map[string]string{
+		"ip -4 rule show": "0:\tfrom all lookup local\n32765:\tnot from all fwmark 0xca6c lookup 51820 proto 251\n32766:\tfrom all lookup main\n",
+		"ip -6 rule show": "32765:\tfrom all fwmark 0x1 lookup 51821\n",
+	}}
+	if got, err := LinuxTable(ctx, r); err != nil || got != 51822 {
+		t.Fatalf("LinuxTable = %d, %v; want 51822 (51820 and 51821 looked up by rules)", got, err)
+	}
+	for _, c := range r.cmds {
+		if strings.Contains(c, "table 51820") || strings.Contains(c, "table 51821") {
+			t.Errorf("probed a table a rule uses: %q", c)
+		}
+	}
+	if _, err := LinuxTable(ctx, &recorder{failOn: "ip -4 rule show"}); err == nil {
+		t.Fatal("LinuxTable succeeded although ip rule failed")
+	}
+
+	r = &recorder{out: map[string]string{
 		"ip -4 route show table 51820": "default dev other scope link \n",
 		"ip -6 route show table 51821": "default dev other metric 1024 pref medium\n",
 	}}
@@ -105,6 +137,12 @@ func TestLinuxTablePicksFirstFree(t *testing.T) {
 	// Free at once.
 	if got, err := LinuxTable(ctx, &recorder{}); err != nil || got != 51820 {
 		t.Fatalf("LinuxTable = %d, %v; want 51820", got, err)
+	}
+	// A table that was never created is free: recent kernels fail the
+	// query instead of printing nothing.
+	r = &recorder{failOn: "ip -4 route show table 5182", failErr: errors.New("exit status 2: Error: ipv4: FIB table does not exist.\nDump terminated")}
+	if got, err := LinuxTable(ctx, r); err != nil || got != 51820 {
+		t.Fatalf("LinuxTable with no such table = %d, %v; want 51820", got, err)
 	}
 	// ip itself failing is an error, not a free table.
 	if _, err := LinuxTable(ctx, &recorder{failOn: "ip -4 route show"}); err == nil {
@@ -161,9 +199,20 @@ func TestLinuxSrcValidMarkRestored(t *testing.T) {
 			t.Errorf("prev %q: set %q undo %q, want undo %q", tc.prev, set, undo, tc.wantUndo)
 		}
 	}
-	// A value other than a number is not written back.
-	if _, err := newLinux(&recorder{out: map[string]string{srcValidMarkRead: "1; reboot\n"}}, nil).Apply(ctx, full); err != nil {
+	// A value other than a number is not written back: the kernel
+	// default 0 is restored instead.
+	j, _ := newJournal(t)
+	if _, err := newLinux(&recorder{out: map[string]string{srcValidMarkRead: "1; reboot\n"}}, j).Apply(ctx, full); err != nil {
 		t.Fatal(err)
+	}
+	var undo []string
+	for _, s := range j.Entries()["wg0"] {
+		if s.Name == "sysctl" {
+			undo = append(undo, s.String())
+		}
+	}
+	if want := []string{"sysctl -q net.ipv4.conf.all.src_valid_mark=0"}; !reflect.DeepEqual(undo, want) {
+		t.Errorf("sysctl undo %q, want %q", undo, want)
 	}
 }
 
@@ -181,6 +230,8 @@ func TestFullTunnelNoLongerRejected(t *testing.T) {
 		t.Errorf("Applied = %+v, want %+v", a, want)
 	}
 	want := []string{
+		"ip -4 rule show",
+		"ip -6 rule show",
 		"ip -4 route show table 51820",
 		"ip -4 route show table 51821",
 		"ip -6 route show table 51821",
@@ -190,11 +241,11 @@ func TestFullTunnelNoLongerRejected(t *testing.T) {
 		"ip link set wg0 up",
 		"sysctl -q net.ipv4.conf.all.src_valid_mark=1",
 		"ip -4 route add 0.0.0.0/0 dev wg0 table 51821",
-		"ip -4 rule add not fwmark 51821 table 51821",
-		"ip -4 rule add table main suppress_prefixlength 0",
+		"ip -4 rule add not fwmark 51821 table 51821 protocol 251",
+		"ip -4 rule add table main suppress_prefixlength 0 protocol 251",
 		"ip -6 route add ::/0 dev wg0 table 51821",
-		"ip -6 rule add not fwmark 51821 table 51821",
-		"ip -6 rule add table main suppress_prefixlength 0",
+		"ip -6 rule add not fwmark 51821 table 51821 protocol 251",
+		"ip -6 rule add table main suppress_prefixlength 0 protocol 251",
 		"nft -f -",
 	}
 	if !reflect.DeepEqual(r.cmds, want) {
@@ -284,6 +335,7 @@ func TestRemoveKeepsFailedPersistentSteps(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.failOn = "ip -4 r" // the rules (persistent) and the table route (not)
+	r.failErr = errors.New("exit status 2: RTNETLINK answers: Operation not permitted")
 	if err := c.Remove(ctx); err == nil {
 		t.Fatal("Remove error = nil, want the failures reported")
 	}
@@ -292,8 +344,8 @@ func TestRemoveKeepsFailedPersistentSteps(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"ip -4 rule del not fwmark 51820 table 51820",
-		"ip -4 rule del table main suppress_prefixlength 0",
+		"ip -4 rule del not fwmark 51820 table 51820 protocol 251",
+		"ip -4 rule del table main suppress_prefixlength 0 protocol 251",
 	}
 	if got := journalStrings(j2, "wg0"); !reflect.DeepEqual(got, want) {
 		t.Fatalf("journal after Remove:\n%q\nwant:\n%q", got, want)
@@ -306,7 +358,8 @@ func TestRemoveKeepsFailedPersistentSteps(t *testing.T) {
 
 	// The next Apply for the same interface retries them first, and keeps
 	// what still fails ahead of its own steps.
-	r = &recorder{out: map[string]string{srcValidMarkRead: "0\n"}, failOn: "ip -4 rule del table main"}
+	r = &recorder{out: map[string]string{srcValidMarkRead: "0\n"}, failOn: "ip -4 rule del table main",
+		failErr: errors.New("exit status 2: RTNETLINK answers: Operation not permitted")}
 	c = newLinux(r, j)
 	if _, err := c.Apply(ctx, fullPlan()); err != nil {
 		t.Fatal(err)
@@ -399,5 +452,50 @@ func TestRPTableName(t *testing.T) {
 	ss := planLinuxFullTunnel("a=b", 51820, true, false, pfx("10.0.0.2/32"), "1")
 	if s := string(ss[len(ss)-1].do.Stdin); !strings.Contains(s, `iifname != "a=b"`) || !strings.Contains(s, "table inet latchwire_rpx_613d62 {") {
 		t.Errorf("script:\n%s", s)
+	}
+}
+
+// An undo whose target is already gone (a rule another program such as
+// systemd-networkd removed) succeeded: it is not reported, not kept and not
+// retried, so it can never later remove a rule a newer tunnel added.
+func TestAbsentRuleUndoForgotten(t *testing.T) {
+	gone := errors.New("exit status 2: RTNETLINK answers: No such file or directory")
+	j, path := newJournal(t)
+	r := &recorder{}
+	c := newLinux(r, j)
+	if _, err := c.Apply(ctx, fullPlan()); err != nil {
+		t.Fatal(err)
+	}
+	r.failOn, r.failErr = "ip -4 rule del", gone
+	if err := c.Remove(ctx); err != nil {
+		t.Fatalf("Remove = %v, want nil: the rules were already gone", err)
+	}
+	j2, _ := OpenJournal(path)
+	if e := j2.Entries(); len(e) != 0 {
+		t.Fatalf("journal after Remove: %v, want empty", e)
+	}
+
+	// The same for a kept step retried by Apply and for Cleanup.
+	kept := Step{Name: "ip", Args: []string{"-4", "rule", "del", "not", "fwmark", "51820", "table", "51820", "protocol", "251"}, Persistent: true}
+	j.Record("wg0", []Step{kept})
+	r = &recorder{failOn: "ip -4 rule del", failErr: gone}
+	c = newLinux(r, j)
+	if _, err := c.Apply(ctx, fullPlan()); err != nil {
+		t.Fatal(err)
+	}
+	if got := journalStrings(j, "wg0"); slices.Contains(got[:1], kept.String()) {
+		t.Errorf("journal after Apply still carries the gone rule: %q", got)
+	}
+	j.Record("other", []Step{kept})
+	if err := Cleanup(ctx, &recorder{failOn: "ip", failErr: gone}, j, func(o string) bool { return o == "wg0" }); err != nil {
+		t.Errorf("Cleanup = %v, want nil for a gone rule", err)
+	}
+
+	// Any other failure is still a failure.
+	if alreadyUndone(kept, errors.New("exit status 2: RTNETLINK answers: Operation not permitted")) {
+		t.Error("EPERM taken for an absent rule")
+	}
+	if alreadyUndone(Step{Name: "ip", Args: []string{"route", "del", "x"}}, gone) {
+		t.Error("only rule deletes are recognised")
 	}
 }

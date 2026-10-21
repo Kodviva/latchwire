@@ -181,7 +181,7 @@ func (c *configurer) retryLocked(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := c.exec(ctx, old[i]); err != nil && old[i].Persistent && ctx.Err() == nil {
+		if err := c.exec(ctx, old[i]); err != nil && old[i].Persistent && ctx.Err() == nil && !alreadyUndone(old[i], err) {
 			c.carried = append(c.carried, old[i])
 		}
 	}
@@ -233,7 +233,7 @@ func (c *configurer) undoLocked(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := c.exec(ctx, all[i]); err != nil {
+		if err := c.exec(ctx, all[i]); err != nil && !alreadyUndone(all[i], err) {
 			if first == nil {
 				first = err
 			}
