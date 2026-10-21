@@ -638,8 +638,9 @@ func TestRedialsAfterDaemonRestart(t *testing.T) {
 
 func TestPINNotLogged(t *testing.T) {
 	var buf syncBuffer
+	prev := log.Writer()
 	log.SetOutput(&buf)
-	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	t.Cleanup(func() { log.SetOutput(prev) })
 
 	d := newDaemon(t)
 	b := newFakeBackend(t, serialA)
@@ -892,4 +893,11 @@ func TestExpiredDeadlineDoesNotPrompt(t *testing.T) {
 	if _, err := x25519(t, c, refA, peer); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// TestMain keeps the test output clean: the agent logs card and request
+// events; tests that check the log capture it themselves.
+func TestMain(m *testing.M) {
+	log.SetOutput(io.Discard)
+	os.Exit(m.Run())
 }

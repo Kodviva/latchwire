@@ -94,9 +94,7 @@ func newPinentryPrompter() *pinentryPrompter {
 	return &pinentryPrompter{
 		find: func() string { return findPinentry(pinentryDirs) },
 		command: func(ctx context.Context, path string) *exec.Cmd {
-			c := exec.CommandContext(ctx, path)
-			c.Env = pinentryEnv(os.Getenv)
-			return c
+			return childCommand(ctx, path, nil, pinentryEnv(os.Getenv))
 		},
 		timeout: dialogTimeout,
 		grace:   childGrace,
@@ -163,7 +161,7 @@ func (p *pinentryPrompter) PIN(d keyprovider.Description, retriesLeft int) (stri
 		}
 		if timedOut {
 			// Killed; like an osascript dialog that gave up.
-			return "", fmt.Errorf("%w: pinentry did not answer in time (%v)", keyprovider.ErrPINRequired, err)
+			return "", fmt.Errorf("%w: %s (%v)", keyprovider.ErrPINRequired, msg.AgentPINDialogLate, err)
 		}
 		if s := strings.TrimSpace(string(stderr.buf)); s != "" {
 			return "", fmt.Errorf("%w (pinentry said: %s)", err, s)

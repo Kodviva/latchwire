@@ -31,8 +31,11 @@ import (
 
 const (
 	// dialogTimeout is how long a PIN dialog waits for the user before it
-	// gives up by itself (counts as cancelled).
-	dialogTimeout = 2 * time.Minute
+	// gives up by itself (counts as cancelled). Together with childGrace it
+	// must stay below the daemon's warmUpTimeout (internal/daemon,
+	// 2 minutes), the longest the daemon waits for a PIN: a PIN typed after
+	// the daemon gave up would still reach the card for nothing.
+	dialogTimeout = 100 * time.Second
 	// childGrace is the extra time a dialog child gets beyond its own
 	// timeout before it is killed.
 	childGrace = 10 * time.Second
@@ -113,28 +116,32 @@ func (e *childError) Error() string {
 
 func (e *childError) Unwrap() error { return e.err }
 
-// runChild runs path with args, exactly the environment env and stdin, and
-// returns its stdout. The caller wipes the returned bytes. The child is
-// killed when ctx ends; output beyond maxChildOutput is an error.
+// childCommand returns the command for a dialog child: path with args and
+// exactly the environment env, killed when ctx ends.
+func childCommand(ctx context.Context, path string, args []string, env []string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, path, args...)
+	// A nil Env would inherit the agent's environment.
+	cmd.Env = append([]string{}, env...)
+	cmd.WaitDelay = childWaitDelay
+	return cmd
+}
+
+// runChild runs cmd (from childCommand with the same ctx) with stdin and
+// returns its stdout. The caller wipes the returned bytes. Output beyond
+// maxChildOutput is an error.
 //
 // stdout is read here from a pipe straight into one fixed buffer: with an
 // io.Writer as Stdout, exec would copy the output (the PIN) through its own
 // buffer, which cannot be wiped.
-func runChild(ctx context.Context, path string, args []string, stdin []byte, env []string) ([]byte, error) {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+func runChild(ctx context.Context, cmd *exec.Cmd, stdin []byte) ([]byte, error) {
 	outR, outW, err := os.Pipe()
 	if err != nil {
 		return nil, err
 	}
 	defer outR.Close()
 	stderr := newLimitBuffer(maxChildOutput)
-	cmd := exec.CommandContext(ctx, path, args...)
-	// A nil Env would inherit the agent's environment.
-	cmd.Env = append([]string{}, env...)
 	cmd.Stdin = bytes.NewReader(stdin)
 	cmd.Stdout, cmd.Stderr = outW, stderr
-	cmd.WaitDelay = childWaitDelay
 	err = cmd.Start()
 	outW.Close()
 	if err != nil {
@@ -158,13 +165,13 @@ func runChild(ctx context.Context, path string, args []string, stdin []byte, env
 		}
 	}
 	if overflow {
-		cancel()
+		cmd.Process.Kill()
 	}
 	err = cmd.Wait()
 	switch {
 	case overflow:
 		clear(buf)
-		return nil, errors.New("dialog program output too long")
+		return nil, errors.New(msg.AgentPINDialogLong)
 	case err != nil:
 		clear(buf)
 		return nil, &childError{err: err, stderr: strings.TrimSpace(string(stderr.buf))}

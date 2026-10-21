@@ -77,6 +77,11 @@ const (
 	AgentPINDialogCancel = "Cancel"
 	AgentNoPinentry      = "no terminal is available to ask for the PIN and no pinentry program (pinentry, pinentry-gnome3, pinentry-qt or pinentry-curses in /usr/bin, /bin or /usr/local/bin) was found"
 	AgentNoPINDialog     = "no terminal is available to ask for the PIN and this system has no supported PIN dialog"
+	AgentPINDialogLate   = "the PIN dialog was not answered in time"
+	AgentPINDialogFailed = "the PIN dialog failed"
+	AgentPINDialogBadOut = "the PIN dialog program gave unexpected output"
+	AgentPINDialogLong   = "the PIN dialog program gave too much output"
+	AgentNotifyFailed    = "showing a notification failed"
 	AgentRequestExpired  = "the request expired before the YubiKey could be used"
 	// AgentUntrustedDaemonFmt takes the uid of the socket's owner process.
 	AgentUntrustedDaemonFmt = "refusing the service socket: it is served by uid %d, not by root or this user"

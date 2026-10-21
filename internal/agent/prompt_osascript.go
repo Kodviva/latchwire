@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -51,16 +52,19 @@ const osascriptCancelled = "(-128)"
 const notifyTimeout = 10 * time.Second
 
 type osascriptPrompter struct {
-	// run runs osascript; runChild with osascriptEnv in production.
-	run     func(ctx context.Context, path string, args []string, stdin []byte) ([]byte, error)
+	// command builds the osascript command (fixed environment); run runs
+	// it with the script on stdin (runChild in production).
+	command func(ctx context.Context, args []string) *exec.Cmd
+	run     func(ctx context.Context, cmd *exec.Cmd, stdin []byte) ([]byte, error)
 	timeout time.Duration
 }
 
 func newOsascriptPrompter() *osascriptPrompter {
 	return &osascriptPrompter{
-		run: func(ctx context.Context, path string, args []string, stdin []byte) ([]byte, error) {
-			return runChild(ctx, path, args, stdin, osascriptEnv)
+		command: func(ctx context.Context, args []string) *exec.Cmd {
+			return childCommand(ctx, osascriptPath, args, osascriptEnv)
 		},
+		run:     runChild,
 		timeout: dialogTimeout,
 	}
 }
@@ -71,7 +75,7 @@ func (p *osascriptPrompter) PIN(d keyprovider.Description, retriesLeft int) (str
 	secs := max(1, int(p.timeout/time.Second))
 	args := []string{"-", dialogText(d, retriesLeft), msg.AgentPINDialogTitle,
 		msg.AgentPINDialogOK, msg.AgentPINDialogCancel, strconv.Itoa(secs)}
-	out, err := p.run(ctx, osascriptPath, args, []byte(osascriptPINScript))
+	out, err := p.run(ctx, p.command(ctx, args), []byte(osascriptPINScript))
 	defer clear(out)
 	if err != nil {
 		var ce *childError
@@ -82,15 +86,15 @@ func (p *osascriptPrompter) PIN(d keyprovider.Description, retriesLeft int) (str
 			// The dialog outlived its own timeout and was killed. Not
 			// wrapped: the agent would report a context error as an
 			// expired request.
-			return "", fmt.Errorf("%w: the PIN dialog did not answer in time (%v)", keyprovider.ErrPINRequired, ctx.Err())
+			return "", fmt.Errorf("%w: %s (%v)", keyprovider.ErrPINRequired, msg.AgentPINDialogLate, ctx.Err())
 		}
-		return "", fmt.Errorf("PIN dialog: %w", err)
+		return "", fmt.Errorf("%s: %w", msg.AgentPINDialogFailed, err)
 	}
 	// osascript ends its result with one newline; everything before it is
 	// the answer as typed.
 	pin, ok := bytes.CutSuffix(out, []byte("\n"))
 	if !ok {
-		return "", errors.New("PIN dialog: unexpected output from osascript")
+		return "", errors.New(msg.AgentPINDialogBadOut)
 	}
 	return string(pin), nil
 }
@@ -101,9 +105,10 @@ func (p *osascriptPrompter) Warn(m string) {
 	log.Print(m)
 	ctx, cancel := context.WithTimeout(context.Background(), notifyTimeout)
 	defer cancel()
-	out, err := p.run(ctx, osascriptPath, []string{"-", m, msg.AgentPINDialogTitle}, []byte(osascriptNotifyScript))
+	cmd := p.command(ctx, []string{"-", m, msg.AgentPINDialogTitle})
+	out, err := p.run(ctx, cmd, []byte(osascriptNotifyScript))
 	clear(out)
 	if err != nil {
-		log.Printf("showing a notification: %v", err)
+		log.Printf("%s: %v", msg.AgentNotifyFailed, err)
 	}
 }

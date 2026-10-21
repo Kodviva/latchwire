@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,24 +26,29 @@ var descA = keyprovider.Description{Kind: "piv", Serial: serialA, Slot: 0x82}
 type osaCall struct {
 	path  string
 	args  []string
+	env   []string
 	stdin []byte
 }
 
-// osaRecorder records osascript calls and answers with out/err.
-func osaRecorder(calls *[]osaCall, out string, err error) func(ctx context.Context, path string, args []string, stdin []byte) ([]byte, error) {
-	return func(ctx context.Context, path string, args []string, stdin []byte) ([]byte, error) {
-		*calls = append(*calls, osaCall{path, slices.Clone(args), slices.Clone(stdin)})
+// testOsascript returns the production osascript prompter (its command
+// builder included) with run replaced by a recorder answering out/err.
+func testOsascript(calls *[]osaCall, out string, err error) *osascriptPrompter {
+	p := newOsascriptPrompter()
+	p.timeout = time.Minute
+	p.run = func(ctx context.Context, cmd *exec.Cmd, stdin []byte) ([]byte, error) {
+		*calls = append(*calls, osaCall{cmd.Path, slices.Clone(cmd.Args[1:]), slices.Clone(cmd.Env), slices.Clone(stdin)})
 		if err != nil {
 			return nil, err
 		}
 		return []byte(out), nil
 	}
+	return p
 }
 
 func TestOsascriptPromptNeverPutsPINInArgs(t *testing.T) {
 	var calls []osaCall
 	// A trailing space belongs to the PIN; only osascript's newline goes.
-	p := &osascriptPrompter{run: osaRecorder(&calls, testPIN+" \n", nil), timeout: time.Minute}
+	p := testOsascript(&calls, testPIN+" \n", nil)
 	pin, err := p.PIN(descA, 3)
 	if err != nil {
 		t.Fatal(err)
@@ -56,6 +62,14 @@ func TestOsascriptPromptNeverPutsPINInArgs(t *testing.T) {
 	c := calls[0]
 	if c.path != "/usr/bin/osascript" {
 		t.Fatalf("ran %q, want /usr/bin/osascript", c.path)
+	}
+	if !slices.Equal(c.env, osascriptEnv) {
+		t.Fatalf("osascript env %q, want %q", c.env, osascriptEnv)
+	}
+	for _, kv := range c.env {
+		if strings.Contains(kv, testPIN) {
+			t.Fatalf("PIN in environment %q", kv)
+		}
 	}
 	if len(c.args) == 0 || c.args[0] != "-" {
 		t.Fatalf("args %q: the script must come from stdin (first argument \"-\")", c.args)
@@ -81,7 +95,7 @@ func TestOsascriptPromptNeverPutsPINInArgs(t *testing.T) {
 
 func TestOsascriptLastRetryInDialog(t *testing.T) {
 	var calls []osaCall
-	p := &osascriptPrompter{run: osaRecorder(&calls, testPIN+"\n", nil), timeout: time.Minute}
+	p := testOsascript(&calls, testPIN+"\n", nil)
 	if _, err := p.PIN(descA, 1); err != nil {
 		t.Fatal(err)
 	}
@@ -92,24 +106,34 @@ func TestOsascriptLastRetryInDialog(t *testing.T) {
 
 func TestOsascriptWarnNotifies(t *testing.T) {
 	var calls []osaCall
-	p := &osascriptPrompter{run: osaRecorder(&calls, "", errors.New("no notification")), timeout: time.Minute}
+	var buf syncBuffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(prev) })
+
+	p := testOsascript(&calls, "", errors.New("no notification"))
 	p.Warn(msg.LastPINRetry) // a failed notification is only logged
 	if len(calls) != 1 || calls[0].path != osascriptPath || calls[0].args[0] != "-" ||
-		calls[0].args[1] != msg.LastPINRetry || !strings.Contains(string(calls[0].stdin), "display notification") {
+		calls[0].args[1] != msg.LastPINRetry || !strings.Contains(string(calls[0].stdin), "display notification") ||
+		!slices.Equal(calls[0].env, osascriptEnv) {
 		t.Fatalf("calls %+v", calls)
+	}
+	out := buf.String()
+	if !strings.Contains(out, msg.LastPINRetry) || !strings.Contains(out, msg.AgentNotifyFailed+": no notification") {
+		t.Fatalf("log %q lacks the warning or the notification failure", out)
 	}
 }
 
 func TestOsascriptCancel(t *testing.T) {
 	var calls []osaCall
 	cancel := &childError{err: errors.New("exit status 1"), stderr: "0:310: execution error: User canceled. (-128)"}
-	p := &osascriptPrompter{run: osaRecorder(&calls, "", cancel), timeout: time.Minute}
+	p := testOsascript(&calls, "", cancel)
 	if _, err := p.PIN(descA, 3); !errors.Is(err, keyprovider.ErrPINRequired) {
 		t.Fatalf("cancel gave %v, want ErrPINRequired", err)
 	}
 
 	other := &childError{err: errors.New("exit status 1"), stderr: "execution error: No user interaction allowed. (-1713)"}
-	p = &osascriptPrompter{run: osaRecorder(&calls, "", other), timeout: time.Minute}
+	p = testOsascript(&calls, "", other)
 	_, err := p.PIN(descA, 3)
 	if err == nil || errors.Is(err, keyprovider.ErrPINRequired) {
 		t.Fatalf("dialog failure gave %v, want a real error", err)
@@ -120,11 +144,12 @@ func TestOsascriptCancel(t *testing.T) {
 }
 
 func TestOsascriptKilledIsPINRequired(t *testing.T) {
-	p := &osascriptPrompter{timeout: -childGrace, // ctx already expired
-		run: func(ctx context.Context, _ string, _ []string, _ []byte) ([]byte, error) {
-			<-ctx.Done()
-			return nil, &childError{err: errors.New("signal: killed")}
-		}}
+	p := newOsascriptPrompter()
+	p.timeout = -childGrace // ctx already expired
+	p.run = func(ctx context.Context, _ *exec.Cmd, _ []byte) ([]byte, error) {
+		<-ctx.Done()
+		return nil, &childError{err: errors.New("signal: killed")}
+	}
 	_, err := p.PIN(descA, 3)
 	if !errors.Is(err, keyprovider.ErrPINRequired) || errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("killed dialog gave %v, want ErrPINRequired (not a context error)", err)
@@ -133,9 +158,39 @@ func TestOsascriptKilledIsPINRequired(t *testing.T) {
 
 func TestOsascriptEmptyOutputIsError(t *testing.T) {
 	var calls []osaCall
-	p := &osascriptPrompter{run: osaRecorder(&calls, "", nil), timeout: time.Minute}
+	p := testOsascript(&calls, "", nil)
 	if _, err := p.PIN(descA, 3); err == nil {
 		t.Fatal("no output accepted as a PIN")
+	}
+}
+
+// runHelper runs this test binary as a dialog child in the mode of env.
+func runHelper(ctx context.Context, env []string, stdin []byte) ([]byte, error) {
+	return runChild(ctx, childCommand(ctx, os.Args[0], []string{"-test.run=^TestHelperProcess$"}, env), stdin)
+}
+
+// The production command builders give the children only the fixed
+// environments.
+func TestPromptCommandsUseFixedEnv(t *testing.T) {
+	ctx := context.Background()
+	c := newOsascriptPrompter().command(ctx, []string{"-"})
+	if c.Path != osascriptPath || !slices.Equal(c.Args, []string{osascriptPath, "-"}) {
+		t.Fatalf("osascript command %q %q", c.Path, c.Args)
+	}
+	if !slices.Equal(c.Env, osascriptEnv) {
+		t.Fatalf("osascript env %q, want %q", c.Env, osascriptEnv)
+	}
+	const pe = "/usr/bin/pinentry"
+	c = newPinentryPrompter().command(ctx, pe)
+	if c.Path != pe || !slices.Equal(c.Args, []string{pe}) {
+		t.Fatalf("pinentry command %q %q", c.Path, c.Args)
+	}
+	if want := pinentryEnv(os.Getenv); !slices.Equal(c.Env, want) {
+		t.Fatalf("pinentry env %q, want %q", c.Env, want)
+	}
+	// An empty environment stays empty instead of inheriting the agent's.
+	if c := childCommand(ctx, osascriptPath, nil, nil); c.Env == nil {
+		t.Fatal("nil environment would inherit the agent's")
 	}
 }
 
@@ -143,7 +198,7 @@ func TestOsascriptEmptyOutputIsError(t *testing.T) {
 // script on stdin, and refuses oversized output.
 func TestRunChildEnvAndCaps(t *testing.T) {
 	env := helperEnv("echo")
-	out, err := runChild(context.Background(), os.Args[0], []string{"-test.run=^TestHelperProcess$"}, []byte("script-on-stdin"), env)
+	out, err := runHelper(context.Background(), env, []byte("script-on-stdin"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,12 +215,12 @@ func TestRunChildEnvAndCaps(t *testing.T) {
 	}
 
 	env = helperEnv("flood")
-	if _, err := runChild(context.Background(), os.Args[0], []string{"-test.run=^TestHelperProcess$"}, nil, env); err == nil {
+	if _, err := runHelper(context.Background(), env, nil); err == nil {
 		t.Fatal("oversized output accepted")
 	}
 
 	env = helperEnv("fail")
-	_, err = runChild(context.Background(), os.Args[0], []string{"-test.run=^TestHelperProcess$"}, nil, env)
+	_, err = runHelper(context.Background(), env, nil)
 	var ce *childError
 	if !errors.As(err, &ce) || !strings.Contains(ce.stderr, "helper failed") {
 		t.Fatalf("failure gave %v, want a childError carrying stderr", err)
@@ -175,7 +230,7 @@ func TestRunChildEnvAndCaps(t *testing.T) {
 	defer cancel()
 	env = helperEnv("hang")
 	start := time.Now()
-	if _, err := runChild(ctx, os.Args[0], []string{"-test.run=^TestHelperProcess$"}, nil, env); err == nil {
+	if _, err := runHelper(ctx, env, nil); err == nil {
 		t.Fatal("hung child succeeded")
 	}
 	if d := time.Since(start); d > 5*time.Second {

@@ -20,7 +20,8 @@ const (
 	// publicKeyTimeout bounds key.public; no PIN is needed for it.
 	publicKeyTimeout = 10 * time.Second
 	// warmUpTimeout bounds the first X25519 at connect, which may wait for
-	// the user to type the PIN.
+	// the user to type the PIN. The agent's PIN dialogs give up before it
+	// (internal/agent dialogTimeout plus childGrace); keep them below it.
 	warmUpTimeout = 2 * time.Minute
 )
 

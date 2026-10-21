@@ -3,6 +3,8 @@
 <!--
   Latchwire tunnel daemon (root): TUN devices, routes, DNS, kill switch.
   Install: /Library/LaunchDaemons/com.latchwire.daemon.plist (root:wheel 0644).
+  Create /var/log/latchwire-daemon.log first (root:admin 0640): launchd
+  keeps an existing file's mode but creates a missing one world-readable.
   See docs/manual-install.md.
 -->
 <plist version="1.0">

@@ -26,6 +26,12 @@ Install the property lists (owner root, mode 0644, or launchd refuses them):
     sudo install -o root -g wheel -m 0644 packaging/macos/com.latchwire.daemon.plist /Library/LaunchDaemons/
     sudo install -o root -g wheel -m 0644 packaging/macos/com.latchwire.agent.plist /Library/LaunchAgents/
 
+Create the daemon's log file before the first start, readable only by root
+and administrators (launchd keeps the mode of an existing file; a file it
+creates itself would be readable by every user):
+
+    sudo install -o root -g admin -m 0640 /dev/null /var/log/latchwire-daemon.log
+
 Start the daemon now (it also starts at every boot):
 
     sudo launchctl bootstrap system /Library/LaunchDaemons/com.latchwire.daemon.plist
@@ -38,8 +44,8 @@ the logged-in user (not with sudo):
 
 Check: `sudo launchctl print system/com.latchwire.daemon` and
 `launchctl print gui/$(id -u)/com.latchwire.agent` show `state = running`.
-The daemon logs to `/var/log/latchwire-daemon.log` (readable by all users;
-it holds tunnel names and endpoints, never keys or PINs). The agent's log
+The daemon logs to `/var/log/latchwire-daemon.log` (tunnel names and
+endpoints, never keys or PINs; mode 0640 from the step above). The agent's log
 goes nowhere when started by launchd; start it from a terminal to see it.
 
 Remove:
@@ -104,7 +110,7 @@ attempt unless a wrong PIN is typed on purpose.
       the attempts left. The right PIN connects.
 - [ ] macOS: Cancel in the dialog ends `up` with "PIN required"; no attempt
       is used (`ykman piv info` shows the same count).
-- [ ] macOS: leaving the dialog open for 2 minutes closes it and counts as
+- [ ] macOS: leaving the dialog open for 100 seconds closes it and counts as
       cancelled.
 - [ ] macOS: with one attempt left the dialog carries the last-attempt
       warning and a notification shows it too.
