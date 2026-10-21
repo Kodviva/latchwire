@@ -114,10 +114,10 @@ func cmdDown(ctx context.Context, e *env, args []string) error {
 		if err := c.Call(ctx, ipc.MethodTunnelStatus, ipc.TunnelName{Name: name}, &sts); err != nil {
 			return err
 		}
-		prev := ""
+		prev, blocking := "", false
 		for _, st := range sts {
 			if st.Name == name {
-				prev = st.State
+				prev, blocking = st.State, st.KillSwitch == ipc.KillSwitchStatusBlocking
 			}
 		}
 		var st ipc.TunnelStatus
@@ -130,6 +130,11 @@ func cmdDown(ctx context.Context, e *env, args []string) error {
 		case prev == daemon.StateDisconnected && (err == nil || refused),
 			prev == daemon.StateError && refused:
 			fmt.Fprintf(e.stdout, msg.DownAlreadyFmt+"\n", name)
+			if prev == daemon.StateError && blocking {
+				// Only an administrator's down lifts a failed tunnel's
+				// kill switch (fail-closed).
+				fmt.Fprintf(e.stdout, msg.DownStillBlockingFmt+"\n", name)
+			}
 			return nil
 		case err != nil:
 			return err

@@ -298,12 +298,14 @@ are never tried automatically.`
 	UpDoneFmt      = "tunnel %s is %s"
 	DownAlreadyFmt = "tunnel %s is already disconnected"
 	DownDoneFmt    = "tunnel %s disconnected"
-	StatusNone     = "no tunnels configured"
-	StatusHeader   = "NAME\tSTATE\tIDENTITY\tLAST HANDSHAKE\tINTERFACE\tMTU\tROUTES\tDNS\tKILL SWITCH"
-	StatusRowFmt   = "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s"
-	StatusDash     = "-"
-	StatusFull     = "all"   // ROUTES of a full tunnel
-	StatusSplit    = "split" // ROUTES of any other tunnel
+	// DownStillBlockingFmt takes the tunnel name.
+	DownStillBlockingFmt = "note: tunnel %[1]s failed and its kill switch still blocks traffic outside the tunnel; an administrator can lift it with: sudo latchwire down %[1]s"
+	StatusNone           = "no tunnels configured"
+	StatusHeader         = "NAME\tSTATE\tIDENTITY\tLAST HANDSHAKE\tINTERFACE\tMTU\tROUTES\tDNS\tKILL SWITCH"
+	StatusRowFmt         = "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s"
+	StatusDash           = "-"
+	StatusFull           = "all"   // ROUTES of a full tunnel
+	StatusSplit          = "split" // ROUTES of any other tunnel
 	// StatusWarningFmt takes the tunnel name and the warning.
 	StatusWarningFmt = "warning: %s: %s"
 	// policy

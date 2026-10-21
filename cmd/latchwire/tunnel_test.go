@@ -400,3 +400,27 @@ func TestDownFailedTunnel(t *testing.T) {
 		t.Errorf("stdout %q, want %q", te.out, want)
 	}
 }
+
+// A user's down of a failed tunnel whose kill switch still blocks says that
+// only an administrator can lift it.
+func TestDownFailedBlockingTunnelHint(t *testing.T) {
+	for _, ks := range []string{ipc.KillSwitchStatusBlocking, ipc.KillSwitchStatusOff} {
+		te := newTestEnv(nil)
+		withRPC(te, &fakeRPC{replies: map[string]func(any, any) error{
+			ipc.MethodTunnelStatus: func(_, r any) error {
+				setResult(t, r, []ipc.TunnelStatus{{Name: "office", State: "error", KillSwitch: ks}})
+				return nil
+			},
+			ipc.MethodTunnelDisconnect: func(_, _ any) error {
+				return &ipc.Error{Code: ipc.CodeForbidden, Message: msg.DaemonNotYourTunnel}
+			},
+		}})
+		if code := run(context.Background(), te.env, []string{"down", "office"}); code != 0 {
+			t.Fatalf("%s: exit %d: %s", ks, code, te.errOut)
+		}
+		hint := fmt.Sprintf(msg.DownStillBlockingFmt, "office")
+		if has := strings.Contains(te.out.String(), hint); has != (ks == ipc.KillSwitchStatusBlocking) {
+			t.Errorf("kill switch %s: stdout %q", ks, te.out)
+		}
+	}
+}

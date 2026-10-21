@@ -688,3 +688,116 @@ func TestManualDownOnUnidentifiedNetwork(t *testing.T) {
 	change(t, notes, net, 1)
 	e.waitState(StateConnected, 5*time.Second)
 }
+
+// agentNoAuto reports whether the agents of uid hold noAuto for the test
+// tunnel (all of them, and at least one is registered).
+func (e *env) agentNoAuto(uid uint32) bool {
+	e.m.mu.Lock()
+	defer e.m.mu.Unlock()
+	found := false
+	for _, a := range e.m.agents {
+		if a.seq != 0 && a.uid == uid {
+			if !a.noAuto[tunName] {
+				return false
+			}
+			found = true
+		}
+	}
+	return found
+}
+
+func (e *env) suppressed() bool {
+	e.m.mu.Lock()
+	defer e.m.mu.Unlock()
+	return e.m.tunnels[tunName].odSuppressed
+}
+
+// A down is per user: an allowed user cannot take down an idle tunnel (and
+// so silence on-demand or AutoConnect for everyone), nor abandon another
+// user's pending attempt; abandoning its own only sets its own agents'
+// noAuto.
+func TestDownOfAutomaticConnectIsPerUser(t *testing.T) {
+	net := &fakeNet{}
+	net.set(netHome)
+	e, notes := odEnv(t, envOpts{present: []uint32{}, admin: onlyAdmin}, net)
+	if err := e.m.add(tunName, e.config([]keyref.Ref{refA}, []string{"10.0.0.2"}, newServer(t, e.b.pub(serialA), "10.0.0.2"), ""), uidB); err != nil {
+		t.Fatal(err)
+	}
+	e.allow(uidA)
+	e.waitAgentRegistered(uidA)
+	gate := make(chan struct{})
+	defer close(gate)
+	key := e.b.cards[serialA].key
+	fb := newLyingAgent(t, e, uidB, key.PublicKey(), key, gate, serialA)
+	setOnDemand(t, e.m, net, netHome)
+
+	for _, uid := range []uint32{uidA, uidB} {
+		_, err := e.m.requestDisconnect(uid, tunName)
+		assertCode(t, err, ipc.CodeForbidden)
+	}
+	if e.suppressed() || e.agentNoAuto(uidA) || e.agentNoAuto(uidB) {
+		t.Fatal("a refused down of an idle tunnel suppressed something")
+	}
+
+	net.set(netCafe)
+	change(t, notes, net, 1)
+	deadline := time.Now().Add(5 * time.Second)
+	for fb.x25519s.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("no on-demand attempt for B")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	_, err := e.m.requestDisconnect(uidA, tunName)
+	assertCode(t, err, ipc.CodeForbidden)
+	if e.suppressed() || e.agentNoAuto(uidA) || e.agentNoAuto(uidB) {
+		t.Fatal("A's refused down of B's attempt suppressed something")
+	}
+	if _, err := e.m.requestDisconnect(uidB, tunName); err != nil {
+		t.Fatalf("B abandoning its own attempt: %v", err)
+	}
+	if !e.agentNoAuto(uidB) || e.agentNoAuto(uidA) {
+		t.Fatalf("noAuto: B %v (want true), A %v (want false)", e.agentNoAuto(uidB), e.agentNoAuto(uidA))
+	}
+	if !e.suppressed() {
+		t.Fatal("abandoning one's own on-demand attempt did not suppress on-demand")
+	}
+}
+
+// A report by a user who may not connect the tunnel does not take the
+// epoch's attempt (AutoConnect would stamp it before connect refuses): the
+// allowed user's on-demand attempt still happens.
+func TestNotAllowedReportKeepsOnDemandAttempt(t *testing.T) {
+	net := &fakeNet{}
+	net.set(netCafe)
+	e, _ := odEnv(t, envOpts{present: []uint32{serialA}, admin: onlyAdmin}, net)
+	if err := e.m.add(tunName, e.config([]keyref.Ref{refA}, []string{"10.0.0.2"}, newServer(t, e.b.pub(serialA), "10.0.0.2"), ""), uidB); err != nil {
+		t.Fatal(err)
+	}
+	e.waitAgentCard(uidA, serialA, true)
+	yes := true
+	setPolicyOD(t, e.m, net, ipc.TunnelPolicySet{AutoConnect: &yes, OnDemand: &yes})
+	tried := func() (uint64, uint64) {
+		e.m.mu.Lock()
+		defer e.m.mu.Unlock()
+		return e.m.tunnels[tunName].odTried, e.m.odEpoch
+	}
+	before, _ := tried()
+	e.b.setPresent(serialA, false)
+	e.waitAgentCard(uidA, serialA, false)
+	e.b.setPresent(serialA, true)
+	e.waitAgentCard(uidA, serialA, true)
+	e.kick(net)
+	time.Sleep(200 * time.Millisecond)
+	if got, epoch := tried(); got != before || got == epoch {
+		t.Fatalf("odTried %d (was %d, epoch %d): taken by a user who is not allowed", got, before, epoch)
+	}
+	if n := e.p.count(); n != 0 {
+		t.Fatalf("A was asked for its PIN %d times", n)
+	}
+	newFakeAgent(t, e, uidB, e.b.cards[serialA].key, serialA)
+	e.waitState(StateConnected, 5*time.Second)
+	if u := e.boundUID(); u != uidB {
+		t.Fatalf("bound to %d, want B", u)
+	}
+}

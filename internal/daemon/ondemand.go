@@ -66,7 +66,7 @@ import (
 // one before), the next identified network is taken as the down's, so
 // only a change between two identified networks lifts it. A down also
 // abandons an on-demand or AutoConnect attempt still waiting for its PIN
-// (requestDisconnect lets the tunnel's allowed users do that). This is
+// (requestDisconnect lets the user it runs for do that). This is
 // independent of AutoConnect's suppression (agentState.noAuto), which lasts
 // for the agent sessions registered at the down: each feature stays quiet
 // by its own rule, and a down sets both.
@@ -244,13 +244,13 @@ func (m *Manager) connectOnDemand(t *tunnel, pol Policy, uids []uint32, id strin
 		m.mu.Unlock()
 		return
 	}
-	t.odPending, t.odTried = true, m.odEpoch
+	t.odPending, t.pendingUID, t.odTried = true, uid, m.odEpoch
 	m.mu.Unlock()
 	log.Printf("daemon: tunnel %s: network %s is not trusted: connecting on demand with the YubiKey of uid %d", t.name, id, uid)
 	go func() {
 		defer func() {
 			m.mu.Lock()
-			t.odPending = false
+			t.odPending, t.pendingUID = false, 0
 			m.mu.Unlock()
 		}()
 		if _, err := m.connect(context.Background(), t.name, uid, false, connectOpts{onlyFrom: StateDisconnected, want: t, onDemand: true}); err != nil {
