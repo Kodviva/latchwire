@@ -560,7 +560,9 @@ func TestRestartRestoresKillSwitchTunnelAndReconnects(t *testing.T) {
 	fe.connect()
 	rec := filepath.Join(fe.store, ksTunnelsFile)
 	got, err := (&store{dir: fe.store}).loadKillSwitchTunnels()
-	if err != nil || len(got) != 1 || got[0] != (ksTunnel{Name: tunName, Ref: refA.String(), UID: fe.boundUID()}) {
+	// An administrator connected it (everyone is one in this env): the
+	// restarted daemon, where nobody is, still reconnects it (P20).
+	if err != nil || len(got) != 1 || got[0] != (ksTunnel{Name: tunName, Ref: refA.String(), UID: fe.boundUID(), Admin: true}) {
 		t.Fatalf("record %+v, %v", got, err)
 	}
 

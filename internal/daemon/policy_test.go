@@ -389,3 +389,146 @@ func TestPolicySetAdminOnly(t *testing.T) {
 		t.Fatalf("untrust left %v", got.TrustedNetworks)
 	}
 }
+
+// P20: denying a user revokes: its binding goes down at once, and the card
+// coming back reconnects nothing (no PIN asked). The connect gate also
+// refuses the reconnect when the policy file changed without
+// tunnel.policy.set.
+func TestDenyRevokesUserBinding(t *testing.T) {
+	e := newEnv(t, envOpts{present: []uint32{serialA}, admin: onlyAdmin})
+	srv := newServer(t, e.b.pub(serialA), "10.0.0.2")
+	if err := e.m.add(tunName, e.config([]keyref.Ref{refA}, []string{"10.0.0.2"}, srv, ""), 0); err != nil {
+		t.Fatal(err)
+	}
+	e.allow(uidA)
+	e.waitCard(serialA, true)
+	e.connect()
+
+	if _, err := e.m.setPolicy(ipc.TunnelPolicySet{Name: tunName, Deny: []uint32{uidA}}); err != nil {
+		t.Fatal(err)
+	}
+	if st := e.status(); st.State != StateDisconnected {
+		t.Fatalf("state %q after denying the bound user, want disconnected", st.State)
+	}
+	prompts := e.p.count()
+	e.b.setPresent(serialA, false)
+	e.waitAgentCard(uidA, serialA, false)
+	e.b.setPresent(serialA, true)
+	e.waitAgentCard(uidA, serialA, true)
+	time.Sleep(300 * time.Millisecond)
+	if st := e.status(); st.State != StateDisconnected {
+		t.Fatalf("state %q after the card came back, want disconnected", st.State)
+	}
+	if n := e.p.count(); n != prompts {
+		t.Fatalf("denied user asked for its PIN %d times", n-prompts)
+	}
+
+	// Card removed while allowed; the file then denies A (edited by hand):
+	// the reconnect is refused by connect itself.
+	e.allow(uidA)
+	e.connect()
+	e.b.setPresent(serialA, false)
+	e.waitState(StateCardRemoved, 3*time.Second)
+	if err := os.WriteFile(filepath.Join(e.store, tunName+".policy"), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prompts = e.p.count()
+	e.b.setPresent(serialA, true)
+	e.waitAgentCard(uidA, serialA, true)
+	time.Sleep(300 * time.Millisecond)
+	if st := e.status(); st.State != StateCardRemoved {
+		t.Fatalf("state %q after the card came back to a denied user, want card_removed", st.State)
+	}
+	if n := e.p.count(); n != prompts {
+		t.Fatalf("denied user asked for its PIN %d times", n-prompts)
+	}
+}
+
+// P20: a binding an administrator made (sudo up through B's agent) is not
+// revoked by denying B and reconnects when B's card comes back.
+func TestAdminBindingSurvivesDeny(t *testing.T) {
+	e := newEnv(t, envOpts{present: []uint32{}, admin: onlyAdmin})
+	srv := newServer(t, e.b.pub(serialA), "10.0.0.2")
+	if err := e.m.add(tunName, e.config([]keyref.Ref{refA}, []string{"10.0.0.2"}, srv, ""), 0); err != nil {
+		t.Fatal(err)
+	}
+	fb := newFakeAgent(t, e, uidB, e.b.cards[serialA].key, serialA)
+	if st, err := e.m.requestConnect(context.Background(), uidAdmin, tunName); err != nil || st.State != StateConnected {
+		t.Fatalf("administrator's connect: %+v, %v", st, err)
+	}
+	if u := e.boundUID(); u != uidB {
+		t.Fatalf("bound to %d, want B", u)
+	}
+	if _, err := e.m.setPolicy(ipc.TunnelPolicySet{Name: tunName, Allow: []uint32{uidA}, Deny: []uint32{uidB}}); err != nil {
+		t.Fatal(err)
+	}
+	if st := e.status(); st.State != StateConnected {
+		t.Fatalf("state %q: an administrator's binding was revoked", st.State)
+	}
+	e.m.agentEvent(fb.dc, uidB, ipc.AgentEvent{Type: ipc.EventCardRemoved, Serial: serialA})
+	e.waitState(StateCardRemoved, 3*time.Second)
+	e.m.agentEvent(fb.dc, uidB, ipc.AgentEvent{Type: ipc.EventCardInserted, Serial: serialA})
+	e.waitState(StateConnected, 5*time.Second)
+	if u := e.boundUID(); u != uidB {
+		t.Fatalf("reconnected bound to %d, want B", u)
+	}
+}
+
+// connect itself re-checks what autoConnect saw: a down marked since the
+// report wins, and a tunnel replaced under the same name is not connected.
+func TestAutoConnectRechecksInConnect(t *testing.T) {
+	e := newEnv(t, envOpts{present: []uint32{}, admin: onlyAdmin})
+	srv := newServer(t, e.b.pub(serialA), "10.0.0.2")
+	cfg := e.config([]keyref.Ref{refA}, []string{"10.0.0.2"}, srv, "")
+	if err := e.m.add(tunName, cfg, uidB); err != nil {
+		t.Fatal(err)
+	}
+	fb := newFakeAgent(t, e, uidB, e.b.cards[serialA].key, serialA)
+	e.m.mu.Lock()
+	a := e.m.agents[fb.dc]
+	old := e.m.tunnels[tunName]
+	a.noAuto[tunName] = true
+	e.m.mu.Unlock()
+	ctx := context.Background()
+	st, err := e.m.connect(ctx, tunName, uidB, false, connectOpts{onlyFrom: StateDisconnected, want: old, auto: a})
+	if err != nil || st.State != StateDisconnected {
+		t.Fatalf("auto-connect after a down: %+v, %v", st, err)
+	}
+
+	e.m.mu.Lock()
+	delete(a.noAuto, tunName)
+	e.m.mu.Unlock()
+	if err := e.m.remove(tunName); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.m.add(tunName, cfg, uidB); err != nil {
+		t.Fatal(err)
+	}
+	_, err = e.m.connect(ctx, tunName, uidB, false, connectOpts{onlyFrom: StateDisconnected, want: old, auto: a})
+	assertCode(t, err, ipc.CodeUnavailable)
+	if n := fb.publics.Load(); n != 0 {
+		t.Fatalf("B's agent was asked %d times", n)
+	}
+	if st := e.status(); st.State != StateDisconnected {
+		t.Fatalf("replacement tunnel state %q", st.State)
+	}
+}
+
+// tunnel.policy.get reports the kill switch a running tunnel still uses
+// when the file now says otherwise.
+func TestPolicyReportsKillSwitchInEffect(t *testing.T) {
+	e, _ := connected(t, envOpts{})
+	got, err := e.m.setPolicy(ipc.TunnelPolicySet{Name: tunName, KillSwitch: KillSwitchOn})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.KillSwitch != KillSwitchOn || got.KillSwitchInEffect != KillSwitchAuto {
+		t.Fatalf("policy %+v, want on with auto in effect", got)
+	}
+	if _, err := e.m.requestDisconnect(uidA, tunName); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := e.m.getPolicy(tunName); got.KillSwitchInEffect != "" {
+		t.Fatalf("disconnected tunnel reports %q in effect", got.KillSwitchInEffect)
+	}
+}

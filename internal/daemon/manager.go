@@ -227,6 +227,10 @@ type tunnel struct {
 	cfgr   netcfg.Configurer
 	iface  string // the device's interface (utunN on macOS)
 	devGen uint64
+
+	// adminBound says that an administrator's connect made the binding to
+	// uid: uid need not be an allowed user to keep it (P20).
+	adminBound bool
 	// policy is the tunnel's policy, read at load, add and every connect.
 	policy Policy
 	// What the kill switch passes for the device: the resolved endpoints,
@@ -541,37 +545,24 @@ func (m *Manager) agentUser(uid uint32) bool {
 }
 
 // requestConnect is tunnel.connect from uid (R19, R21). A non-administrator
-// must be one of the tunnel's allowed users (its policy), only ever uses its
+// must be one of the tunnel's allowed users (its policy; checked by
+// connect), only ever uses its
 // own agent and may not take over a tunnel bound to another user; an
 // administrator tries its own agents first, then other users'. Either way
 // an agent is used only after it proved it holds the configured key.
 func (m *Manager) requestConnect(ctx context.Context, uid uint32, name string) (ipc.TunnelStatus, error) {
 	admin := m.admin(uid)
-	if !admin {
-		if !m.agentUser(uid) {
-			return ipc.TunnelStatus{}, errForbidden
-		}
-		if err := m.allowed(name, uid); err != nil {
-			return ipc.TunnelStatus{}, err
-		}
+	if !admin && !m.agentUser(uid) {
+		return ipc.TunnelStatus{}, errForbidden
 	}
-	return m.connect(ctx, name, uid, admin, "")
+	return m.connect(ctx, name, uid, admin, connectOpts{})
 }
 
-// allowed returns nil when the tunnel name exists and uid is one of its
-// allowed users. The policy file is read, so a change applies at once.
-func (m *Manager) allowed(name string, uid uint32) error {
-	m.mu.Lock()
-	t := m.tunnels[name]
-	m.mu.Unlock()
-	if t == nil {
-		return errNotFound
-	}
-	if !m.store.policyFor(name).allows(uid) {
-		log.Printf("daemon: tunnel %s: uid %d is not an allowed user", name, uid)
-		return &ipc.Error{Code: ipc.CodeForbidden, Message: fmt.Sprintf(msg.DaemonNotAllowedUserFmt, name)}
-	}
-	return nil
+// notAllowed logs and returns the refusal of a connect for uid, which is
+// not one of the tunnel's allowed users (P20).
+func notAllowed(name string, uid uint32) error {
+	log.Printf("daemon: tunnel %s: not connecting for uid %d: not an allowed user", name, uid)
+	return &ipc.Error{Code: ipc.CodeForbidden, Message: fmt.Sprintf(msg.DaemonNotAllowedUserFmt, name)}
 }
 
 // requestDisconnect is tunnel.disconnect from uid. A non-administrator may
@@ -749,78 +740,6 @@ func (m *Manager) remove(name string) error {
 	}
 	log.Printf("daemon: tunnel %s removed", name)
 	return nil
-}
-
-// getPolicy is tunnel.policy.get: the policy in effect for the tunnel (the
-// fail-closed one when its file is unusable).
-func (m *Manager) getPolicy(name string) (ipc.TunnelPolicy, error) {
-	m.mu.Lock()
-	t := m.tunnels[name]
-	m.mu.Unlock()
-	if t == nil {
-		return ipc.TunnelPolicy{}, errNotFound
-	}
-	return policyStatus(name, m.store.policyFor(name)), nil
-}
-
-// setPolicy is tunnel.policy.set (administrators only): it applies req to
-// the tunnel's policy file and returns the new policy. A file that cannot
-// be used is replaced, starting from the fail-closed policy. The allowed
-// users, AutoConnect and the trusted networks count from the next connect
-// or agent report; the kill switch from the tunnel's next connect.
-func (m *Manager) setPolicy(req ipc.TunnelPolicySet) (ipc.TunnelPolicy, error) {
-	m.polMu.Lock()
-	defer m.polMu.Unlock()
-	m.mu.Lock()
-	t := m.tunnels[req.Name]
-	m.mu.Unlock()
-	if t == nil {
-		return ipc.TunnelPolicy{}, errNotFound
-	}
-	pol, err := m.store.loadPolicy(req.Name)
-	if err != nil {
-		log.Printf("daemon: tunnel %s: replacing the unusable policy (%v), starting from the fail-closed one", req.Name, err)
-		pol = failClosedPolicy()
-	}
-	if req.KillSwitch != "" {
-		pol.KillSwitch = req.KillSwitch
-	}
-	if req.AutoConnect != nil {
-		pol.AutoConnect = *req.AutoConnect
-	}
-	if req.OnDemand != nil {
-		pol.OnDemand = *req.OnDemand
-	}
-	pol.TrustedNetworks = editList(pol.TrustedNetworks, req.Trust, req.Untrust)
-	pol.AllowedUsers = editList(pol.AllowedUsers, req.Allow, req.Deny)
-	if err := pol.validate(); err != nil {
-		return ipc.TunnelPolicy{}, &ipc.Error{Code: ipc.CodeBadRequest, Message: fmt.Sprintf(msg.DaemonBadPolicyFmt, err)}
-	}
-	if err := m.store.savePolicy(req.Name, pol); err != nil {
-		log.Printf("daemon: store %s policy: %v", req.Name, err)
-		return ipc.TunnelPolicy{}, &ipc.Error{Code: ipc.CodeInternal, Message: fmt.Sprintf(msg.DaemonPolicyStoreFailedFmt, err)}
-	}
-	log.Printf("daemon: tunnel %s: policy set: %+v", req.Name, pol)
-	return policyStatus(req.Name, pol), nil
-}
-
-// editList returns list with add added and then remove removed, sorted and
-// without duplicates (nil when empty).
-func editList[T cmp.Ordered](list, add, remove []T) []T {
-	out := append(slices.Clone(list), add...)
-	out = slices.DeleteFunc(out, func(v T) bool { return slices.Contains(remove, v) })
-	slices.Sort(out)
-	out = slices.Compact(out)
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
-// policyStatus is p as tunnel.policy.get and tunnel.policy.set report it.
-func policyStatus(name string, p Policy) ipc.TunnelPolicy {
-	return ipc.TunnelPolicy{Name: name, KillSwitch: p.KillSwitch, AutoConnect: p.AutoConnect, OnDemand: p.OnDemand,
-		TrustedNetworks: slices.Clone(p.TrustedNetworks), AllowedUsers: slices.Clone(p.AllowedUsers)}
 }
 
 // disconnect takes the tunnel down if cond (checked under Manager.mu, nil:
@@ -1043,19 +962,20 @@ func (m *Manager) reconcile(uid uint32) {
 func (m *Manager) cardInserted(serial, uid uint32) {
 	for _, t := range m.matching(func(t *tunnel) bool { return t.state == StateCardRemoved && t.uses(serial, uid) }) {
 		go func() {
-			if _, err := m.connect(context.Background(), t.name, uid, false, StateCardRemoved); err != nil {
+			if _, err := m.connect(context.Background(), t.name, uid, false, connectOpts{onlyFrom: StateCardRemoved, want: t}); err != nil {
 				log.Printf("daemon: tunnel %s: reconnect: %v", t.name, err)
 			}
 		}()
 	}
 }
 
-// autoConnect connects, with the card of agent c (of uid), the tunnels whose
-// policy has AutoConnect on, that are disconnected and have an identity on
-// one of serials, the cards c has just reported (agent.register at login,
-// card_inserted). uid must be one of a tunnel's allowed users or an
-// administrator; only uid's own agent is used (as for a non-administrator's
-// connect), and it asks for the PIN.
+// autoConnect connects, for uid, the tunnels whose policy has AutoConnect
+// on, that are disconnected and have an identity on one of serials, the
+// cards agent c (of uid) has just reported (agent.register at login,
+// card_inserted). It connects as uid's own connect would: uid must be one
+// of a tunnel's allowed users or an administrator (connect checks it), and
+// only uid's agents serve the key (the earliest registered one reporting
+// the card, which need not be c), asking for the PIN.
 //
 // Each report starts at most one attempt per tunnel, and none while one is
 // running: a failed attempt (a cancelled PIN) is not retried until the card
@@ -1082,20 +1002,9 @@ func (m *Manager) autoConnect(c *ipc.Conn, uid uint32, serials []uint32) {
 	}
 	m.mu.Unlock()
 	slices.Sort(names)
-	var admin, adminKnown bool
 	for _, name := range names {
-		pol := m.store.policyFor(name)
-		if !pol.AutoConnect {
+		if !m.store.policyFor(name).AutoConnect {
 			continue
-		}
-		if !pol.allows(uid) {
-			if !adminKnown {
-				admin, adminKnown = m.admin(uid), true
-			}
-			if !admin {
-				log.Printf("daemon: tunnel %s: not connecting automatically for uid %d: not an allowed user", name, uid)
-				continue
-			}
 		}
 		m.mu.Lock()
 		t := m.tunnels[name]
@@ -1112,7 +1021,7 @@ func (m *Manager) autoConnect(c *ipc.Conn, uid uint32, serials []uint32) {
 				t.autoPending = false
 				m.mu.Unlock()
 			}()
-			if _, err := m.connect(context.Background(), name, uid, false, StateDisconnected); err != nil {
+			if _, err := m.connect(context.Background(), name, uid, false, connectOpts{onlyFrom: StateDisconnected, want: t, auto: a}); err != nil {
 				log.Printf("daemon: tunnel %s: automatic connect: %v", name, err)
 			}
 		}()
@@ -1237,23 +1146,68 @@ func (m *Manager) candidatesLocked(cfg *config.Tunnel, uid uint32, admin bool) [
 
 // ---- connect and teardown ----
 
+// connectOpts are what an automatic connect adds to a connect.
+type connectOpts struct {
+	// onlyFrom, when set, makes connect a no-op unless the tunnel is in
+	// that state.
+	onlyFrom string
+	// want, when set, is the tunnel the caller chose: a tunnel of the same
+	// name that replaced it (remove, add) is not connected.
+	want *tunnel
+	// auto, when set, is the agent whose report started an auto-connect:
+	// a tunnel it marked noAuto (a down meanwhile) is not connected.
+	auto *agentState
+}
+
 // connect brings tunnel name up. caller is the requester's context: the
-// attempt is abandoned when it ends. A non-empty onlyFrom makes connect a
-// no-op unless the tunnel is in that state (automatic reconnect).
+// attempt is abandoned when it ends. admin says that an administrator asked
+// (any user's agent may serve, and the binding is the administrator's).
+//
+// Unless admin, uid must be one of the tunnel's allowed users or an
+// administrator (P20): this is the one gate for a user's own connect, an
+// auto-connect and the reconnect when the card comes back. A reconnect of a
+// binding an administrator made (adminBound) is exempt. The policy decides
+// at the start (no PIN for a refusal) and again when the tunnel is
+// reserved, under polMu, so that a tunnel.policy.set that denies uid is
+// either seen there or finds the binding and revokes it.
 //
 // Nothing about the tunnel changes until an agent has proved it holds the
 // configured key (R21), so a failed or stalled connect by another user can
 // neither bind nor block the tunnel.
-func (m *Manager) connect(caller context.Context, name string, uid uint32, admin bool, onlyFrom string) (ipc.TunnelStatus, error) {
+func (m *Manager) connect(caller context.Context, name string, uid uint32, admin bool, o connectOpts) (ipc.TunnelStatus, error) {
 	m.mu.Lock()
 	t := m.tunnels[name]
+	m.mu.Unlock()
 	if t == nil {
-		m.mu.Unlock()
 		return ipc.TunnelStatus{}, errNotFound
 	}
-	if onlyFrom != "" && t.state != onlyFrom {
+	// uidOK: uid may connect whatever AllowedUsers says (file I/O and the
+	// admin lookup stay outside Manager.mu).
+	uidOK := admin || m.store.policyFor(name).allows(uid)
+	if !uidOK {
+		uidOK = m.admin(uid)
+	}
+	m.mu.Lock()
+	switch cur := m.tunnels[name]; {
+	case cur == nil:
+		m.mu.Unlock()
+		return ipc.TunnelStatus{}, errNotFound
+	case cur != t || (o.want != nil && t != o.want):
+		m.mu.Unlock()
+		return ipc.TunnelStatus{}, errAborted // removed (and added again) meanwhile
+	}
+	if o.onlyFrom != "" && t.state != o.onlyFrom {
 		m.mu.Unlock()
 		return m.status(t), nil
+	}
+	if o.auto != nil && o.auto.noAuto[name] {
+		m.mu.Unlock()
+		return m.status(t), nil // taken down by hand since the report
+	}
+	exempt := o.onlyFrom == StateCardRemoved && t.adminBound && t.hasRef && t.uid == uid
+	if !uidOK && !exempt {
+		m.mu.Unlock()
+		return ipc.TunnelStatus{}, notAllowed(name, uid)
 	}
 	if !admin && t.bound() && t.uid != uid {
 		m.mu.Unlock()
@@ -1278,8 +1232,6 @@ func (m *Manager) connect(caller context.Context, name string, uid uint32, admin
 		m.failUnbound(t, uid, gen0)
 		return ipc.TunnelStatus{}, errNoCard
 	}
-	// The policy is read again, so a changed file applies at this connect.
-	pol := m.store.policyFor(name)
 	proving, cancelProving := context.WithCancel(m.ctx)
 	defer cancelProving()
 	defer context.AfterFunc(caller, cancelProving)()
@@ -1291,42 +1243,55 @@ func (m *Manager) connect(caller context.Context, name string, uid uint32, admin
 		return ipc.TunnelStatus{}, userErr(err)
 	}
 
-	// Bind the tunnel to the proven agent's user.
+	// Bind the tunnel to the proven agent's user. The policy is read
+	// again (a changed file applies at this connect), under polMu: see
+	// above.
+	m.polMu.Lock()
+	pol := m.store.policyFor(name)
 	m.mu.Lock()
+	unlock := func() {
+		m.mu.Unlock()
+		m.polMu.Unlock()
+	}
 	switch {
 	case m.tunnels[name] != t:
-		m.mu.Unlock()
+		unlock()
 		return ipc.TunnelStatus{}, errAborted // removed meanwhile
 	case !admin && t.bound() && t.uid != uid:
-		m.mu.Unlock()
+		unlock()
 		return ipc.TunnelStatus{}, errNotYours
 	case t.state == StateConnecting || t.state == StateConnected:
-		m.mu.Unlock()
+		unlock()
 		return m.status(t), nil // a concurrent connect won
 	case t.gen != gen0:
-		m.mu.Unlock()
+		unlock()
 		return ipc.TunnelStatus{}, errAborted // disconnected or card removed meanwhile
+	case !uidOK && !exempt && !pol.allows(uid):
+		// The gen check above keeps exempt true: the binding is unchanged.
+		unlock()
+		return ipc.TunnelStatus{}, notAllowed(name, uid)
 	}
 	// The check and the reservation (state connecting) are one step under
 	// Manager.mu, so of two conflicting connects only one gets past it; the
 	// DNS role is chosen in the same step.
 	if err := m.conflictLocked(t); err != nil {
-		m.mu.Unlock()
+		unlock()
 		log.Printf("daemon: tunnel %s: connect: %v", name, err)
 		return ipc.TunnelStatus{}, err
 	}
 	t.dnsRole = m.dnsRoleLocked(t)
 	demote := m.demotionLocked(t)
-	prev := reservation{state: t.state, ref: t.ref, hasRef: t.hasRef, uid: t.uid, policy: t.policy}
+	prev := reservation{state: t.state, ref: t.ref, hasRef: t.hasRef, uid: t.uid, adminBound: t.adminBound, policy: t.policy}
 	t.gen++
 	gen := t.gen
 	t.state = StateConnecting
 	t.ref, t.hasRef, t.uid = c.id.Ref, true, c.uid
+	t.adminBound = admin || (exempt && t.adminBound)
 	t.policy, t.mark, t.endpoints = pol, 0, nil
 	life, cancelLife := context.WithCancel(m.ctx)
 	attempt, cancelAttempt := context.WithCancel(life)
 	t.cancel = cancelLife
-	m.mu.Unlock()
+	unlock()
 	defer cancelAttempt()
 	defer context.AfterFunc(caller, cancelAttempt)()
 
@@ -1338,6 +1303,7 @@ func (m *Manager) connect(caller context.Context, name string, uid uint32, admin
 			m.mu.Lock()
 			if t.gen == gen {
 				t.state, t.ref, t.hasRef, t.uid, t.policy = prev.state, prev.ref, prev.hasRef, prev.uid, prev.policy
+				t.adminBound = prev.adminBound
 				t.cancel = nil
 			}
 			m.mu.Unlock()
@@ -1624,11 +1590,12 @@ func (t *tunnel) active() bool {
 // reservation is what a connect changed when it reserved the tunnel, so
 // that a refused demotion can put it back.
 type reservation struct {
-	state  string
-	ref    keyref.Ref
-	hasRef bool
-	uid    uint32
-	policy Policy
+	state      string
+	ref        keyref.Ref
+	hasRef     bool
+	uid        uint32
+	adminBound bool
+	policy     Policy
 }
 
 // demotionLocked returns the split tunnel whose DNS servers answer every
@@ -2037,11 +2004,13 @@ func (m *Manager) killSwitchState() killswitch.State {
 
 // ksTunnel is one tunnel the kill switch blocks for, as recorded in the
 // store so that a restarted daemon restores it (P17): its name and, when
-// bound, the key and the user whose agent serves it.
+// bound, the key, the user whose agent serves it and whether an
+// administrator made the binding (P20).
 type ksTunnel struct {
-	Name string `json:"name"`
-	Ref  string `json:"ref,omitempty"`
-	UID  uint32 `json:"uid"`
+	Name  string `json:"name"`
+	Ref   string `json:"ref,omitempty"`
+	UID   uint32 `json:"uid"`
+	Admin bool   `json:"admin,omitempty"`
 }
 
 // killSwitchStateAndOwners returns killSwitchState and the armed tunnels
@@ -2066,7 +2035,7 @@ func (m *Manager) killSwitchStateAndOwners() (killswitch.State, []ksTunnel) {
 				s.Block = true
 				o := ksTunnel{Name: n}
 				if t.hasRef {
-					o.Ref, o.UID = t.ref.String(), t.uid
+					o.Ref, o.UID, o.Admin = t.ref.String(), t.uid, t.adminBound
 				}
 				owners = append(owners, o)
 			}
@@ -2307,7 +2276,7 @@ func (m *Manager) restoreKillSwitchTunnels(recs []ksTunnel) []string {
 		}
 		t.state = StateCardRemoved
 		if ref, err := keyref.Parse(r.Ref); err == nil && slices.ContainsFunc(t.cfg.Identities, func(id config.Identity) bool { return id.Ref == ref }) {
-			t.ref, t.hasRef, t.uid = ref, true, r.UID
+			t.ref, t.hasRef, t.uid, t.adminBound = ref, true, r.UID, r.Admin
 		} else if r.Ref != "" {
 			log.Printf("daemon: tunnel %s: the recorded key %q is not one of its identities; it waits unbound", r.Name, r.Ref)
 		}

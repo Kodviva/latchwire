@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/Kodviva/latchwire/internal/config"
+	"github.com/Kodviva/latchwire/internal/ipc"
 	"github.com/Kodviva/latchwire/internal/msg"
 	"github.com/Kodviva/latchwire/internal/netmon"
 )
@@ -71,10 +73,10 @@ func (p Policy) validate() error {
 	switch p.KillSwitch {
 	case KillSwitchAuto, KillSwitchOn, KillSwitchOff:
 	default:
-		return fmt.Errorf("kill_switch must be auto, on or off, not %q", p.KillSwitch)
+		return fmt.Errorf(msg.PolicyKillSwitchValueFmt, p.KillSwitch)
 	}
 	if len(p.TrustedNetworks) > maxPolicyList || len(p.AllowedUsers) > maxPolicyList {
-		return fmt.Errorf("more than %d trusted networks or allowed users", maxPolicyList)
+		return fmt.Errorf(msg.PolicyListTooLongFmt, maxPolicyList)
 	}
 	for _, id := range p.TrustedNetworks {
 		if err := ValidTrustedNetwork(id); err != nil {
@@ -201,4 +203,105 @@ func (s *store) removePolicy(name string) error {
 		return nil
 	}
 	return err
+}
+
+// getPolicy is tunnel.policy.get: the policy in effect for the tunnel (the
+// fail-closed one when its file is unusable).
+func (m *Manager) getPolicy(name string) (ipc.TunnelPolicy, error) {
+	m.mu.Lock()
+	t := m.tunnels[name]
+	m.mu.Unlock()
+	if t == nil {
+		return ipc.TunnelPolicy{}, errNotFound
+	}
+	return m.policyStatus(t, m.store.policyFor(name)), nil
+}
+
+// setPolicy is tunnel.policy.set (administrators only): it applies req to
+// the tunnel's policy file and returns the new policy. A file that cannot
+// be used is replaced, starting from the fail-closed policy. AutoConnect and
+// the trusted networks count from the next agent report or connect; the
+// kill switch from the tunnel's next connect. A user no longer allowed loses
+// the tunnel at once: a binding of that user that no administrator made is
+// taken down (P20).
+func (m *Manager) setPolicy(req ipc.TunnelPolicySet) (ipc.TunnelPolicy, error) {
+	m.polMu.Lock()
+	defer m.polMu.Unlock()
+	m.mu.Lock()
+	t := m.tunnels[req.Name]
+	m.mu.Unlock()
+	if t == nil {
+		return ipc.TunnelPolicy{}, errNotFound
+	}
+	pol, err := m.store.loadPolicy(req.Name)
+	if err != nil {
+		log.Printf("daemon: tunnel %s: replacing the unusable policy (%v), starting from the fail-closed one", req.Name, err)
+		pol = failClosedPolicy()
+	}
+	if req.KillSwitch != "" {
+		pol.KillSwitch = req.KillSwitch
+	}
+	if req.AutoConnect != nil {
+		pol.AutoConnect = *req.AutoConnect
+	}
+	if req.OnDemand != nil {
+		pol.OnDemand = *req.OnDemand
+	}
+	pol.TrustedNetworks = editList(pol.TrustedNetworks, req.Trust, req.Untrust)
+	pol.AllowedUsers = editList(pol.AllowedUsers, req.Allow, req.Deny)
+	if err := pol.validate(); err != nil {
+		return ipc.TunnelPolicy{}, &ipc.Error{Code: ipc.CodeBadRequest, Message: fmt.Sprintf(msg.DaemonBadPolicyFmt, err)}
+	}
+	if err := m.store.savePolicy(req.Name, pol); err != nil {
+		log.Printf("daemon: store %s policy: %v", req.Name, err)
+		return ipc.TunnelPolicy{}, &ipc.Error{Code: ipc.CodeInternal, Message: fmt.Sprintf(msg.DaemonPolicyStoreFailedFmt, err)}
+	}
+	log.Printf("daemon: tunnel %s: policy set: %+v", req.Name, pol)
+	m.revoke(t, pol)
+	return m.policyStatus(t, pol), nil
+}
+
+// revoke takes t down when it is bound (connecting, connected, waiting for
+// its card) to a user that pol no longer allows, unless an administrator
+// made the binding or the user is an administrator. m.polMu is held, so no
+// connect can bind t under the old policy meanwhile (see connect).
+func (m *Manager) revoke(t *tunnel, pol Policy) {
+	m.mu.Lock()
+	uid := t.uid
+	cand := t.bound() && !t.adminBound && !pol.allows(uid)
+	m.mu.Unlock()
+	if !cand || m.admin(uid) {
+		return
+	}
+	if m.teardown(t, StateDisconnected, func(t *tunnel) bool { return t.bound() && !t.adminBound && t.uid == uid }) {
+		log.Printf("daemon: tunnel %s: uid %d is no longer an allowed user, tunnel down", t.name, uid)
+	}
+}
+
+// editList returns list with add added and then remove removed, sorted and
+// without duplicates (nil when empty).
+func editList[T cmp.Ordered](list, add, remove []T) []T {
+	out := append(slices.Clone(list), add...)
+	out = slices.DeleteFunc(out, func(v T) bool { return slices.Contains(remove, v) })
+	slices.Sort(out)
+	out = slices.Compact(out)
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// policyStatus is p, t's policy file, as tunnel.policy.get and
+// tunnel.policy.set report it. While t is not disconnected its kill switch
+// follows the policy read at its connect; when that setting differs from
+// p's, it is reported as KillSwitchInEffect.
+func (m *Manager) policyStatus(t *tunnel, p Policy) ipc.TunnelPolicy {
+	st := ipc.TunnelPolicy{Name: t.name, KillSwitch: p.KillSwitch, AutoConnect: p.AutoConnect, OnDemand: p.OnDemand,
+		TrustedNetworks: slices.Clone(p.TrustedNetworks), AllowedUsers: slices.Clone(p.AllowedUsers)}
+	m.mu.Lock()
+	if t.state != StateDisconnected && t.policy.KillSwitch != p.KillSwitch {
+		st.KillSwitchInEffect = t.policy.KillSwitch
+	}
+	m.mu.Unlock()
+	return st
 }

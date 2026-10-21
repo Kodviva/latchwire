@@ -88,6 +88,10 @@ const (
 	// network ID.
 	PolicyUntrustableNetworkFmt = "network %q cannot be trusted: it stands for no network or a network whose gateway could not be identified"
 	PolicyBadNetworkIDFmt       = "invalid network ID %q: a network ID is 16 lowercase hexadecimal digits"
+	// PolicyKillSwitchValueFmt takes the value given.
+	PolicyKillSwitchValueFmt = "the kill switch must be auto, on or off, not %q"
+	// PolicyListTooLongFmt takes the limit.
+	PolicyListTooLongFmt = "more than %d trusted networks or allowed users"
 )
 
 // Network configuration.
@@ -300,6 +304,9 @@ are never tried automatically.`
 	PolicyAdminsOnly = "administrators only"
 	// PolicyUserFmt takes a user name and its uid.
 	PolicyUserFmt = "%s (%d)"
+	// PolicyKillSwitchPendingFmt takes the tunnel name, the kill switch
+	// setting it runs with and the policy's.
+	PolicyKillSwitchPendingFmt = "note: tunnel %s still runs with kill switch %s; %s applies when it next connects"
 	// CLIUntrustedDaemonFmt takes the uid of the socket's owner process.
 	CLIUntrustedDaemonFmt = "refusing the service socket: it is served by uid %d, not by root or this user"
 )

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/Kodviva/latchwire/internal/ipc"
+	"github.com/Kodviva/latchwire/internal/msg"
 )
 
 const (
@@ -69,11 +71,9 @@ func TestPolicyCLIParsesFlags(t *testing.T) {
 		if got := rpc.calls[0].params.(ipc.TunnelPolicySet); !reflect.DeepEqual(got, want) {
 			t.Errorf("%v: params %+v, want %+v", args, got, want)
 		}
-		out := te.out.String()
-		for _, s := range []string{"office", "on", netHome, "alice (1001)", "4711"} {
-			if !strings.Contains(out, s) {
-				t.Errorf("%v: output lacks %q:\n%s", args, s, out)
-			}
+		wantOut := fmt.Sprintf(msg.PolicyPrintFmt+"\n", "office", "on", msg.PolicyOn, msg.PolicyOff, netHome, "alice (1001), 4711")
+		if out := te.out.String(); out != wantOut {
+			t.Errorf("%v: output\n%s\nwant\n%s", args, out, wantOut)
 		}
 	}
 
@@ -96,8 +96,24 @@ func TestPolicyCLIParsesFlags(t *testing.T) {
 	if p := rpc.calls[0].params.(ipc.TunnelName); p.Name != "office" {
 		t.Errorf("params %+v", p)
 	}
-	if out := te.out.String(); !strings.Contains(out, "auto") || !strings.Contains(out, "administrators only") {
-		t.Errorf("output:\n%s", out)
+	wantOut := fmt.Sprintf(msg.PolicyPrintFmt+"\n", "office", "auto", msg.PolicyOff, msg.PolicyOff, msg.PolicyNone, msg.PolicyAdminsOnly)
+	if out := te.out.String(); out != wantOut {
+		t.Errorf("output\n%s\nwant\n%s", out, wantOut)
+	}
+
+	// A connected tunnel still running with another kill switch setting.
+	te = newTestEnv(nil)
+	withRPC(te, &fakeRPC{replies: map[string]func(any, any) error{
+		ipc.MethodTunnelPolicyGet: func(_, r any) error {
+			setResult(t, r, ipc.TunnelPolicy{Name: "office", KillSwitch: "on", KillSwitchInEffect: "auto"})
+			return nil
+		},
+	}})
+	if code := run(context.Background(), te.env, []string{"policy", "office"}); code != 0 {
+		t.Fatalf("exit %d: %s", code, te.errOut)
+	}
+	if note := fmt.Sprintf(msg.PolicyKillSwitchPendingFmt, "office", "auto", "on"); !strings.Contains(te.out.String(), note) {
+		t.Errorf("output lacks %q:\n%s", note, te.out)
 	}
 
 	// Mistakes never reach the daemon.
@@ -113,8 +129,8 @@ func TestPolicyCLIParsesFlags(t *testing.T) {
 		{[]string{"policy", "office", "--trust-network", "none"}, 2},
 		{[]string{"policy", "office", "--trust-network", "home-wifi"}, 2},
 		{[]string{"policy", "office", "--trust-current-network"}, 2},
-		{[]string{"policy", "office", "--allow-user", "mallory"}, 1},
-		{[]string{"policy", "office", "--deny-user", ""}, 1},
+		{[]string{"policy", "office", "--allow-user", "mallory"}, 2},
+		{[]string{"policy", "office", "--deny-user", ""}, 2},
 	} {
 		te := newTestEnv(nil)
 		withUsers(te)

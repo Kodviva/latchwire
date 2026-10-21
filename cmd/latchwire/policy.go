@@ -122,7 +122,7 @@ func setFlag(fs *flag.FlagSet, name string) bool {
 }
 
 // uids resolves user names (or decimal uids of users that no longer
-// exist) to uids.
+// exist) to uids. An unknown name is a usage error.
 func (e *env) uids(names []string) ([]uint32, error) {
 	var out []uint32
 	for _, name := range names {
@@ -130,7 +130,7 @@ func (e *env) uids(names []string) ([]uint32, error) {
 		if err != nil {
 			n, perr := strconv.ParseUint(name, 10, 32)
 			if perr != nil {
-				return nil, fmt.Errorf(msg.PolicyUnknownUserFmt, name)
+				return nil, usageErr(policySynopsis, msg.PolicyUnknownUserFmt, name)
 			}
 			uid = uint32(n)
 		}
@@ -163,6 +163,9 @@ func (e *env) printPolicy(p ipc.TunnelPolicy) {
 		users = strings.Join(us, ", ")
 	}
 	fmt.Fprintf(e.stdout, msg.PolicyPrintFmt+"\n", p.Name, p.KillSwitch, onOff(p.AutoConnect), onOff(p.OnDemand), nets, users)
+	if p.KillSwitchInEffect != "" {
+		fmt.Fprintf(e.stdout, msg.PolicyKillSwitchPendingFmt+"\n", p.Name, p.KillSwitchInEffect, p.KillSwitch)
+	}
 }
 
 // sudoUID is the user who ran this command through sudo (SUDO_UID), or 0.

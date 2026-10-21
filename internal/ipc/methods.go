@@ -97,13 +97,17 @@ type TunnelName struct {
 // when the card is inserted). OnDemand and TrustedNetworks (network IDs)
 // drive the automatic connect on untrusted networks. AllowedUsers are the
 // uids that may connect the tunnel besides the administrators.
+// KillSwitchInEffect, when set, is the kill switch setting the tunnel still
+// runs with (it is not disconnected): KillSwitch applies at its next
+// connect.
 type TunnelPolicy struct {
-	Name            string   `json:"name"`
-	KillSwitch      string   `json:"killSwitch"`
-	AutoConnect     bool     `json:"autoConnect,omitempty"`
-	OnDemand        bool     `json:"onDemand,omitempty"`
-	TrustedNetworks []string `json:"trustedNetworks,omitempty"`
-	AllowedUsers    []uint32 `json:"allowedUsers,omitempty"`
+	Name               string   `json:"name"`
+	KillSwitch         string   `json:"killSwitch"`
+	AutoConnect        bool     `json:"autoConnect,omitempty"`
+	OnDemand           bool     `json:"onDemand,omitempty"`
+	TrustedNetworks    []string `json:"trustedNetworks,omitempty"`
+	AllowedUsers       []uint32 `json:"allowedUsers,omitempty"`
+	KillSwitchInEffect string   `json:"killSwitchInEffect,omitempty"`
 }
 
 // TunnelPolicySet is the params of tunnel.policy.set: the changes to make
