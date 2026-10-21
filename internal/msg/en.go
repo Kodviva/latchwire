@@ -84,6 +84,8 @@ const (
 	NetDNSUnsupported = "the tunnel sets DNS servers, but this system has neither systemd-resolved nor resolvconf to apply them; install one, or remove the DNS line from the tunnel configuration"
 	// NetDNSScopedUnsupportedFmt takes the interface name.
 	NetDNSScopedUnsupportedFmt = "DNS for %s is limited to its search domains, which resolvconf cannot do: the tunnel's DNS servers are not applied; use systemd-resolved to enable them"
+	// NetDNSSharedFmt takes the interface name.
+	NetDNSSharedFmt = "DNS for %s is not exclusive on this system: the classic resolvconf keeps the other interfaces' DNS servers next to the tunnel's, so names may still be sent outside the tunnel; install openresolv or systemd-resolved, or turn the kill switch on"
 	// NetBadSearchDomainFmt takes the search domain.
 	NetBadSearchDomainFmt = "invalid DNS search domain %q"
 	// NetZonedDNSFmt takes the DNS server address.

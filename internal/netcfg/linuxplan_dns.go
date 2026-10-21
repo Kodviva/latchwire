@@ -18,7 +18,8 @@ import (
 const (
 	DNSOutcomeNone              = "none"               // the tunnel sets no DNS
 	DNSOutcomeResolved          = "resolved"           // through systemd-resolved
-	DNSOutcomeResolvconf        = "resolvconf"         // through resolvconf
+	DNSOutcomeResolvconf        = "resolvconf"         // through openresolv, which takes the servers exclusively
+	DNSOutcomeResolvconfShared  = "resolvconf-shared"  // through classic resolvconf: other interfaces' servers stay in the list
 	DNSOutcomeScopedUnsupported = "scoped-unsupported" // scoped DNS wanted, resolvconf cannot do it: not applied
 )
 
@@ -73,7 +74,13 @@ func linuxDNS(ctx context.Context, r Runner, resolvConf string, p Plan) ([]step,
 		log.Printf(msg.NetDNSScopedUnsupportedFmt, p.Iface)
 		return nil, DNSOutcomeScopedUnsupported, nil
 	}
-	return planResolvconf(p, flavor == resolvconfOpen), DNSOutcomeResolvconf, nil
+	if flavor == resolvconfOpen {
+		return planResolvconf(p, true), DNSOutcomeResolvconf, nil
+	}
+	// The classic resolvconf has no exclusive mode: names may still go to
+	// other interfaces' servers, outside the tunnel.
+	log.Printf(msg.NetDNSSharedFmt, p.Iface)
+	return planResolvconf(p, false), DNSOutcomeResolvconfShared, nil
 }
 
 // usesResolved reports whether systemd-resolved manages the system's DNS:
@@ -107,20 +114,34 @@ const (
 
 // resolvconfFlavor finds which resolvconf is installed. Only a missing
 // command means none. openresolv prints a first line starting with
-// "openresolv" for --version; any other answer, even an error, is the
-// classic resolvconf, which rejects openresolv's flags (-m, -x, -f).
+// "openresolv" for --version; when that fails or prints nothing useful, its
+// -V is tried (openresolv answers it with its version or with its variables,
+// NAMESERVERS=...; the classic resolvconf rejects it). Any other answer is
+// the classic resolvconf, which rejects openresolv's flags (-m, -x, -f).
 func resolvconfFlavor(ctx context.Context, r Runner) resolvconfKind {
 	out, err := r.Run(ctx, "resolvconf", []string{"--version"}, nil)
 	if errors.Is(err, exec.ErrNotFound) {
 		return resolvconfAbsent
 	}
-	if err == nil {
-		first, _, _ := strings.Cut(string(out), "\n")
-		if strings.HasPrefix(strings.TrimSpace(first), "openresolv") {
-			return resolvconfOpen
-		}
+	if err == nil && isOpenresolv(out) {
+		return resolvconfOpen
+	}
+	if out, err = r.Run(ctx, "resolvconf", []string{"-V"}, nil); err == nil && isOpenresolv(out) {
+		return resolvconfOpen
 	}
 	return resolvconfClassic
+}
+
+// isOpenresolv reports whether the output of "resolvconf --version" or
+// "-V" is openresolv's.
+func isOpenresolv(out []byte) bool {
+	for line := range strings.Lines(string(out)) {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "openresolv") || strings.HasPrefix(line, "NAMESERVERS=") {
+			return true
+		}
+	}
+	return false
 }
 
 // plainDomain reports whether d is safe as one resolvectl argument and one

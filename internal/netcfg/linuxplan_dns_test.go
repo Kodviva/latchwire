@@ -3,10 +3,12 @@ package netcfg
 import (
 	"context"
 	"errors"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -141,6 +143,24 @@ func TestLinuxDNSResolvconfFallback(t *testing.T) {
 // The Debian/Ubuntu resolvconf has no -m, -x or -f: it must get plain
 // "-a IFACE" and "-d IFACE" (its delete of an unknown interface succeeds).
 func TestLinuxDNSClassicResolvconf(t *testing.T) {
+	// Classic resolvconf has no exclusive mode (P11): primary DNS is
+	// reported as shared, with a warning saying why.
+	var logs strings.Builder
+	log.SetOutput(&logs)
+	defer log.SetOutput(os.Stderr)
+	if _, got, _ := linuxDNS(ctx, &recorder{failOn: "resolvectl"}, resolvFile(t, ""), dnsPlan(DNSPrimary)); got != DNSOutcomeResolvconfShared {
+		t.Errorf("classic primary: %q", got)
+	}
+	if !strings.Contains(logs.String(), "not exclusive") || !strings.Contains(logs.String(), "kill switch") {
+		t.Errorf("warning %q", logs.String())
+	}
+	// openresolv is exclusive: no warning.
+	logs.Reset()
+	r := &recorder{failOn: "resolvectl", out: map[string]string{"resolvconf --version": openresolvVersion}}
+	if _, got, _ := linuxDNS(ctx, r, resolvFile(t, ""), dnsPlan(DNSPrimary)); got != DNSOutcomeResolvconf || logs.Len() != 0 {
+		t.Errorf("openresolv: %q, log %q", got, logs.String())
+	}
+
 	for name, r := range map[string]*recorder{
 		"debian version":        {failOn: "resolvectl", out: map[string]string{"resolvconf --version": "Debian resolvconf 1.91+nmu1\nCopyright: \n"}},
 		"silent version":        {failOn: "resolvectl"},
@@ -148,7 +168,7 @@ func TestLinuxDNSClassicResolvconf(t *testing.T) {
 		"openresolv not first":  {failOn: "resolvectl", out: map[string]string{"resolvconf --version": "Debian resolvconf (openresolv compatible)\n"}},
 	} {
 		ss, got, err := linuxDNS(ctx, r, resolvFile(t, ""), dnsPlan(DNSPrimary, "lan"))
-		if err != nil || got != DNSOutcomeResolvconf {
+		if err != nil || got != DNSOutcomeResolvconfShared {
 			t.Fatalf("%s: got %q, %v", name, got, err)
 		}
 		do, undo := render(ss)
@@ -161,6 +181,38 @@ func TestLinuxDNSClassicResolvconf(t *testing.T) {
 		if want := "nameserver 10.0.0.1\nnameserver fd00::1\nsearch lan\n"; string(ss[0].do.Stdin) != want {
 			t.Errorf("%s: stdin %q", name, ss[0].do.Stdin)
 		}
+	}
+}
+
+// openresolv found through -V when --version fails or says nothing useful;
+// the classic resolvconf rejects -V.
+func TestLinuxDNSOpenresolvDashV(t *testing.T) {
+	vars := "DOMAIN=''\nSEARCH=''\nNAMESERVERS=''\nLOCALNAMESERVERS=''\nDOMAINS=''\n"
+	for name, r := range map[string]*recorder{
+		"--version fails, -V prints variables": {failOn: "resolvectl", fail: map[string]error{"resolvconf --version": errors.New("exit status 1")},
+			out: map[string]string{"resolvconf -V": vars}},
+		"--version silent, -V prints version": {failOn: "resolvectl", out: map[string]string{"resolvconf -V": "openresolv 3.5.0\n"}},
+	} {
+		ss, got, err := linuxDNS(ctx, r, resolvFile(t, ""), dnsPlan(DNSPrimary))
+		if err != nil || got != DNSOutcomeResolvconf {
+			t.Fatalf("%s: %q, %v", name, got, err)
+		}
+		if do, _ := render(ss); !reflect.DeepEqual(do, []string{"resolvconf -a wg0 -m 0 -x"}) {
+			t.Errorf("%s: apply %q", name, do)
+		}
+	}
+	// Both fail (classic rejects -V): classic.
+	r := &recorder{failOn: "resolvectl", fail: map[string]error{
+		"resolvconf --version": errors.New("exit status 1"),
+		"resolvconf -V":        errors.New("exit status 99"),
+	}}
+	if _, got, err := linuxDNS(ctx, r, resolvFile(t, ""), dnsPlan(DNSPrimary)); err != nil || got != DNSOutcomeResolvconfShared {
+		t.Errorf("classic: %q, %v", got, err)
+	}
+	// Not installed: --version says so and -V is not tried.
+	r = &recorder{failOn: "resolvectl", fail: map[string]error{"resolvconf --version": exec.ErrNotFound}}
+	if _, _, err := linuxDNS(ctx, r, resolvFile(t, ""), dnsPlan(DNSPrimary)); !errors.Is(err, ErrDNSUnsupported) || slices.Contains(r.cmds, "resolvconf -V") {
+		t.Errorf("absent: %v, ran %q", err, r.cmds)
 	}
 }
 
