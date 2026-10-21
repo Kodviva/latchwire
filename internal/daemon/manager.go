@@ -164,6 +164,16 @@ type Manager struct {
 	agentGrace time.Duration
 	journal    *netcfg.Journal // set by Serve
 
+	// On-demand (ondemand.go). networkID identifies the network the
+	// machine is on (netmon.NetworkID run by runner); odRecheck is how long
+	// an unidentified network is given before it is looked up again (P9);
+	// odKick asks onDemandLoop for an evaluation; odErr is the last lookup
+	// error it logged (used by that loop only).
+	networkID func(ctx context.Context) (string, error)
+	odRecheck time.Duration
+	odKick    chan struct{}
+	odErr     string
+
 	// The kill switch. ksMu serializes Firewall.Set calls (and orders
 	// them: the state set is computed inside); it is never taken with mu
 	// held. fw is Options.Firewall or made on first use (fwErr: the
@@ -190,6 +200,11 @@ type Manager struct {
 	tunnels map[string]*tunnel
 	agents  map[*ipc.Conn]*agentState
 	nextSeq uint64
+	// netID is the network the last on-demand evaluation saw ("" before
+	// the first). odEpoch changes with it and whenever an agent registers
+	// or reports a card anew: an on-demand attempt is made once per epoch.
+	netID   string
+	odEpoch uint64
 }
 
 // agentState is one agent connection. seq orders registrations (0: not
@@ -250,6 +265,19 @@ type tunnel struct {
 	abortCancel context.CancelFunc
 	// autoPending says that an automatic connect of the tunnel is running.
 	autoPending bool
+
+	// On-demand (ondemand.go). odConnected says that an on-demand connect
+	// made the current binding (kept through a card_removed reconnect,
+	// cleared at disconnected and by a connect by hand); odPending that an
+	// on-demand connect is running; odTried is the Manager.odEpoch of the
+	// last on-demand attempt. odSuppressed says that a down by hand on
+	// network odSuppress keeps on-demand from connecting the tunnel until
+	// the machine is on another identified network.
+	odConnected  bool
+	odPending    bool
+	odTried      uint64
+	odSuppressed bool
+	odSuppress   string
 }
 
 func newTunnel(name string, cfg *config.Tunnel, pol Policy) *tunnel {
@@ -280,7 +308,11 @@ func NewManager(o Options) *Manager {
 		verifyEvery: o.VerifyEvery,
 		fw:          o.Firewall,
 		ksLast:      &killswitch.State{}, // Serve finds out what a crash left
+		odRecheck:   onDemandRecheck,
+		odKick:      make(chan struct{}, 1),
+		odEpoch:     1,
 	}
+	m.networkID = func(ctx context.Context) (string, error) { return netmon.NetworkID(ctx, m.runner) }
 	if m.verifyEvery <= 0 {
 		m.verifyEvery = verifyEvery
 	}
@@ -365,6 +397,11 @@ func (m *Manager) Serve(ctx context.Context) error {
 		defer close(watched)
 		m.watchNetwork(wctx)
 	}()
+	odDone := make(chan struct{})
+	go func() {
+		defer close(odDone)
+		m.onDemandLoop(wctx)
+	}()
 
 	var wg sync.WaitGroup
 	var acceptErr error
@@ -394,6 +431,7 @@ func (m *Manager) Serve(ctx context.Context) error {
 	wg.Wait()
 	stopWatch()
 	<-watched
+	<-odDone
 	m.shutdown()
 	if acceptErr != nil {
 		return acceptErr
@@ -405,7 +443,8 @@ func (m *Manager) Serve(ctx context.Context) error {
 // endpoint routes that follow the gateway, the automatic MTU, the DNS that
 // follows the primary service) after every network change, and every
 // verifyEvery without one (P12: DHCP renewals rewrite the DNS silently),
-// until ctx ends. Refresh changes nothing when nothing changed (P9).
+// until ctx ends. Refresh changes nothing when nothing changed (P9). Each
+// time, on-demand is evaluated next (kickOnDemand).
 // Notifications about the tunnels' own interfaces are not changes of the
 // network. When the notifications fail, the periodic check goes on.
 func (m *Manager) watchNetwork(ctx context.Context) {
@@ -429,9 +468,11 @@ func (m *Manager) watchNetwork(ctx context.Context) {
 				continue
 			}
 			m.refreshAll(ctx)
+			m.kickOnDemand()
 		case <-tick.C:
 			m.refreshAll(ctx)
 			m.verifyKillSwitch(ctx)
+			m.kickOnDemand()
 		case <-ctx.Done():
 			if changes != nil {
 				for range changes { // the watcher ends with ctx
@@ -567,17 +608,23 @@ func notAllowed(name string, uid uint32) error {
 
 // requestDisconnect is tunnel.disconnect from uid. A non-administrator may
 // only disconnect a tunnel bound to its own uid. The agents registered now
-// do not auto-connect the tunnel again (agentState.noAuto).
+// do not auto-connect the tunnel again (agentState.noAuto), and on-demand
+// does not connect it again until the machine is on another network
+// (tunnel.odSuppress).
 func (m *Manager) requestDisconnect(uid uint32, name string) (ipc.TunnelStatus, error) {
 	admin := m.admin(uid)
 	if !admin && !m.agentUser(uid) {
 		return ipc.TunnelStatus{}, errForbidden
 	}
+	odNet, od := m.downNetwork(name)
 	// Under Manager.mu, in the same step as the teardown: no automatic
 	// connect can slip in between.
 	return m.disconnect(name, func(t *tunnel) bool {
 		if !admin && !t.boundTo(uid) {
 			return false
+		}
+		if od {
+			t.odSuppressed, t.odSuppress = true, odNet
 		}
 		for _, a := range m.agents {
 			if a.seq != 0 {
@@ -671,6 +718,7 @@ func (m *Manager) handle(c *ipc.Conn) {
 		}
 		return m.setPolicy(p)
 	})
+	m.handleNetwork(c)
 }
 
 // add stores a new tunnel and its policy: the default one, with owner (the
@@ -858,6 +906,9 @@ func (m *Manager) agentRegister(c *ipc.Conn, uid uint32, serials []uint32) {
 			inserted = append(inserted, s)
 		}
 	}
+	if len(inserted) > 0 {
+		m.odEpoch++ // a card reported anew: on-demand may try again
+	}
 	m.mu.Unlock()
 	log.Printf("daemon: agent of uid %d registered with %d card(s)", uid, len(serials))
 	// A card pulled while this user's agent was away is noticed here: the
@@ -867,6 +918,7 @@ func (m *Manager) agentRegister(c *ipc.Conn, uid uint32, serials []uint32) {
 		m.cardInserted(s, uid)
 	}
 	m.autoConnect(c, uid, inserted)
+	m.kickOnDemand()
 }
 
 // agentEvent handles card changes. pin_ready may arrive out of order with
@@ -882,10 +934,14 @@ func (m *Manager) agentEvent(c *ipc.Conn, uid uint32, ev ipc.AgentEvent) {
 	case ipc.EventCardInserted:
 		fresh := !a.serials[ev.Serial]
 		a.serials[ev.Serial] = true
+		if fresh {
+			m.odEpoch++
+		}
 		m.mu.Unlock()
 		m.cardInserted(ev.Serial, uid)
 		if fresh {
 			m.autoConnect(c, uid, []uint32{ev.Serial})
+			m.kickOnDemand()
 		}
 	case ipc.EventCardRemoved:
 		delete(a.serials, ev.Serial)
@@ -993,7 +1049,7 @@ func (m *Manager) autoConnect(c *ipc.Conn, uid uint32, serials []uint32) {
 	}
 	var names []string
 	for name, t := range m.tunnels {
-		if t.state != StateDisconnected || t.autoPending || a.noAuto[name] {
+		if t.state != StateDisconnected || t.autoPending || t.odPending || a.noAuto[name] {
 			continue
 		}
 		if slices.ContainsFunc(t.cfg.Identities, func(id config.Identity) bool { return slices.Contains(serials, id.Ref.Serial) }) {
@@ -1008,7 +1064,7 @@ func (m *Manager) autoConnect(c *ipc.Conn, uid uint32, serials []uint32) {
 		}
 		m.mu.Lock()
 		t := m.tunnels[name]
-		if t == nil || t.state != StateDisconnected || t.autoPending || a.noAuto[name] {
+		if t == nil || t.state != StateDisconnected || t.autoPending || t.odPending || a.noAuto[name] {
 			m.mu.Unlock()
 			continue
 		}
@@ -1157,6 +1213,10 @@ type connectOpts struct {
 	// auto, when set, is the agent whose report started an auto-connect:
 	// a tunnel it marked noAuto (a down meanwhile) is not connected.
 	auto *agentState
+	// onDemand says that on-demand starts the connect: a tunnel taken
+	// down by hand meanwhile (odSuppressed) is not connected, and the
+	// binding is marked as on-demand's (odConnected).
+	onDemand bool
 }
 
 // connect brings tunnel name up. caller is the requester's context: the
@@ -1205,6 +1265,10 @@ func (m *Manager) connect(caller context.Context, name string, uid uint32, admin
 		m.mu.Unlock()
 		return m.status(t), nil // taken down by hand since the report
 	}
+	if o.onDemand && t.odSuppressed {
+		m.mu.Unlock()
+		return m.status(t), nil // taken down by hand since the evaluation
+	}
 	exempt := o.onlyFrom == StateCardRemoved && t.adminBound && t.hasRef && t.uid == uid
 	if !uidOK && !exempt {
 		m.mu.Unlock()
@@ -1215,6 +1279,9 @@ func (m *Manager) connect(caller context.Context, name string, uid uint32, admin
 		return ipc.TunnelStatus{}, errNotYours
 	}
 	if t.state == StateConnecting || t.state == StateConnected {
+		if o == (connectOpts{}) {
+			t.odConnected = false // a connect by hand claims the tunnel
+		}
 		m.mu.Unlock()
 		return m.status(t), nil
 	}
@@ -1283,12 +1350,15 @@ func (m *Manager) connect(caller context.Context, name string, uid uint32, admin
 	}
 	t.dnsRole = m.dnsRoleLocked(t)
 	demote := m.demotionLocked(t)
-	prev := reservation{state: t.state, ref: t.ref, hasRef: t.hasRef, uid: t.uid, adminBound: t.adminBound, policy: t.policy}
+	prev := reservation{state: t.state, ref: t.ref, hasRef: t.hasRef, uid: t.uid, adminBound: t.adminBound, policy: t.policy, odConnected: t.odConnected}
 	t.gen++
 	gen := t.gen
 	t.state = StateConnecting
 	t.ref, t.hasRef, t.uid = c.id.Ref, true, c.uid
 	t.adminBound = admin || (exempt && t.adminBound)
+	// On-demand's binding: made by it, or its tunnel reconnecting when
+	// the card comes back.
+	t.odConnected = o.onDemand || (o.onlyFrom == StateCardRemoved && t.odConnected)
 	t.policy, t.mark, t.endpoints = pol, 0, nil
 	life, cancelLife := context.WithCancel(m.ctx)
 	attempt, cancelAttempt := context.WithCancel(life)
@@ -1305,7 +1375,7 @@ func (m *Manager) connect(caller context.Context, name string, uid uint32, admin
 			m.mu.Lock()
 			if t.gen == gen {
 				t.state, t.ref, t.hasRef, t.uid, t.policy = prev.state, prev.ref, prev.hasRef, prev.uid, prev.policy
-				t.adminBound = prev.adminBound
+				t.adminBound, t.odConnected = prev.adminBound, prev.odConnected
 				t.cancel = nil
 			}
 			m.mu.Unlock()
@@ -1598,6 +1668,8 @@ type reservation struct {
 	uid        uint32
 	adminBound bool
 	policy     Policy
+	// odConnected is tunnel.odConnected.
+	odConnected bool
 }
 
 // demotionLocked returns the split tunnel whose DNS servers answer every
@@ -1929,6 +2001,9 @@ func (m *Manager) teardownTo(t *tunnel, state *string, cond func(*tunnel) bool) 
 	}
 	t.gen++
 	t.state = *state
+	if t.state == StateDisconnected {
+		t.odConnected = false
+	}
 	if t.cancel != nil {
 		t.cancel()
 		t.cancel = nil

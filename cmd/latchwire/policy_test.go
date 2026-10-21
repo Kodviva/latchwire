@@ -144,7 +144,7 @@ func TestPolicyCLIParsesFlags(t *testing.T) {
 		{[]string{"policy", "office", "--trust-network", "unknown"}, 2},
 		{[]string{"policy", "office", "--trust-network", "none"}, 2},
 		{[]string{"policy", "office", "--trust-network", "home-wifi"}, 2},
-		{[]string{"policy", "office", "--trust-current-network"}, 2},
+		{[]string{"policy", "office", "--trust-current-network=maybe"}, 2},
 		{[]string{"policy", "office", "--allow-user", "mallory"}, 2},
 		{[]string{"policy", "office", "--deny-user", ""}, 2},
 	} {

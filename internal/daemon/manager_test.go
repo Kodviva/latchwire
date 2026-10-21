@@ -484,6 +484,8 @@ func newEnv(t *testing.T, o envOpts) *env {
 	})
 	// No host network notifications: tests that need them inject theirs.
 	e.m.netSource = func() (netmon.Source, error) { return make(chanSource), nil }
+	// No network: on-demand does nothing and runs no command.
+	e.m.networkID = func(context.Context) (string, error) { return netmon.NoNetwork, nil }
 	e.m.netDebounce = 10 * time.Millisecond
 	if o.hook != nil {
 		o.hook(e.m)

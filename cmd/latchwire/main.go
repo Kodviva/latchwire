@@ -157,6 +157,7 @@ func commands() map[string]command {
 		"down":    {"down <name>", cmdDown},
 		"status":  {"status [name]", cmdStatus},
 		"policy":  {policySynopsis, cmdPolicy},
+		"network": {"network", cmdNetwork},
 	}
 }
 

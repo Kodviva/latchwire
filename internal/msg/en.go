@@ -167,6 +167,8 @@ const (
 	DaemonPolicyStoreFailedFmt = "could not save the tunnel's policy: %v"
 	// DaemonBadPolicyFmt takes what is wrong with the requested policy.
 	DaemonBadPolicyFmt = "invalid policy: %v"
+	// DaemonNetworkFailedFmt takes the error of the network lookup.
+	DaemonNetworkFailedFmt = "could not identify the current network: %v"
 	// DaemonKillSwitchRefusedFmt takes the error that kept the kill switch
 	// from blocking.
 	DaemonKillSwitchRefusedFmt = "not connecting: this tunnel's kill switch is on and could not block traffic outside the tunnel: %v"
@@ -209,10 +211,12 @@ commands:
   down <name>                   disconnect a tunnel
   status [name]                 show tunnels
   policy <name> [--kill-switch auto|on|off] [--auto-connect=true|false]
-         [--on-demand=true|false] [--trust-network ID] [--untrust-network ID]
+         [--on-demand=true|false] [--trust-network ID]
+         [--trust-current-network] [--untrust-network ID]
          [--allow-user NAME] [--deny-user NAME]
                                 show a tunnel's policy, or change it
-                                (administrator)`
+                                (administrator)
+  network                       print the ID of the current network`
 
 	CLIUnknownCommandFmt = "unknown command %q"
 	CLIUsageErrorFmt     = "usage: latchwire %s"
@@ -324,6 +328,9 @@ are never tried automatically.`
 	PolicyKillSwitchPendingFmt = "note: tunnel %s still runs with kill switch %s; %s applies when it next connects"
 	// PolicyRevokedBlockingFmt takes the tunnel name.
 	PolicyRevokedBlockingFmt = "note: tunnel %[1]s was taken from a user who is no longer allowed and stays blocked by its kill switch; run sudo latchwire down %[1]s to lift it"
+	// network
+	// NetworkUntrustableNoteFmt takes the network ID ("none" or "unknown").
+	NetworkUntrustableNoteFmt = "note: %s names no particular network (no default gateway, or its hardware address is not known yet) and cannot be trusted"
 	// CLIUntrustedDaemonFmt takes the uid of the socket's owner process.
 	CLIUntrustedDaemonFmt = "refusing the service socket: it is served by uid %d, not by root or this user"
 )

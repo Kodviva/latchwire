@@ -2,7 +2,7 @@ package ipc
 
 // Method names. Direction is part of the name's prefix: agent.* go from the
 // per-user agent to the daemon, key.* from the daemon to the agent, and
-// tunnel.* from the CLI to the daemon.
+// tunnel.* and network.* from the CLI to the daemon.
 const (
 	MethodAgentRegister = "agent.register"
 	MethodAgentEvent    = "agent.event"
@@ -17,6 +17,8 @@ const (
 	MethodTunnelStatus     = "tunnel.status"
 	MethodTunnelPolicyGet  = "tunnel.policy.get"
 	MethodTunnelPolicySet  = "tunnel.policy.set"
+
+	MethodNetworkCurrent = "network.current"
 )
 
 // Error codes carried in Error.Code.
@@ -125,6 +127,14 @@ type TunnelPolicySet struct {
 	Untrust     []string `json:"untrust,omitempty"`
 	Allow       []uint32 `json:"allow,omitempty"`
 	Deny        []uint32 `json:"deny,omitempty"`
+}
+
+// NetworkCurrent is the result of network.current: the ID of the network
+// the machine is on (netmon.NetworkID), "none" without a network, or
+// "unknown" when its gateway cannot be identified. Neither of the last two
+// can be trusted.
+type NetworkCurrent struct {
+	ID string `json:"id"`
 }
 
 // TunnelStatus is one element of the tunnel.status result. The fields after

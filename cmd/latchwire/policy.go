@@ -15,7 +15,7 @@ import (
 )
 
 const policySynopsis = "policy <name> [--kill-switch auto|on|off] [--auto-connect=true|false] [--on-demand=true|false]" +
-	" [--trust-network ID] [--untrust-network ID] [--allow-user NAME] [--deny-user NAME]"
+	" [--trust-network ID] [--trust-current-network] [--untrust-network ID] [--allow-user NAME] [--deny-user NAME]"
 
 // listFlag collects the values of a flag that may be given several times.
 type listFlag []string
@@ -25,11 +25,14 @@ func (l *listFlag) Set(v string) error { *l = append(*l, v); return nil }
 
 // cmdPolicy prints a tunnel's policy, or changes it (administrators) when
 // flags are given. User names are resolved here; the daemon gets uids.
+// --trust-current-network trusts the network the daemon sees now (network
+// current), which must be an identified one (P10).
 func cmdPolicy(ctx context.Context, e *env, args []string) error {
 	fs := newFlagSet("policy")
 	killSwitch := fs.String("kill-switch", "", "")
 	autoConnect := fs.Bool("auto-connect", false, "")
 	onDemand := fs.Bool("on-demand", false, "")
+	trustCurrent := fs.Bool("trust-current-network", false, "")
 	var trust, untrust, allow, deny listFlag
 	fs.Var(&trust, "trust-network", "")
 	fs.Var(&untrust, "untrust-network", "")
@@ -80,6 +83,16 @@ func cmdPolicy(ctx context.Context, e *env, args []string) error {
 	return withDaemon(ctx, e, func(c rpcConn) error {
 		var p ipc.TunnelPolicy
 		var err error
+		if *trustCurrent {
+			id, err := currentNetwork(ctx, c)
+			if err != nil {
+				return err
+			}
+			if err := daemon.ValidTrustedNetwork(id); err != nil {
+				return err
+			}
+			set.Trust = append(set.Trust, id)
+		}
 		if changed {
 			err = c.Call(ctx, ipc.MethodTunnelPolicySet, set, &p)
 		} else {
