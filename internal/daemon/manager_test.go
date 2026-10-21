@@ -200,6 +200,7 @@ type recCfg struct {
 	iface    string
 	addrs    []netip.Prefix
 	routes   []netip.Prefix
+	fwmark   uint32
 	applied  bool
 	removed  int
 	onRemove func()
@@ -208,8 +209,8 @@ type recCfg struct {
 func (c *recCfg) Apply(_ context.Context, p netcfg.Plan) (netcfg.Applied, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.iface, c.addrs, c.routes, c.applied = p.Iface, p.Addresses, p.Routes, true
-	return netcfg.Applied{MTU: p.MTU}, nil
+	c.iface, c.addrs, c.routes, c.fwmark, c.applied = p.Iface, p.Addresses, p.Routes, p.FwMark, true
+	return netcfg.Applied{MTU: p.MTU, FullTunnel: p.FwMark != 0, Table: p.FwMark, RPFilter: p.FwMark != 0}, nil
 }
 
 func (c *recCfg) Refresh(context.Context) error { return nil }
@@ -1117,9 +1118,12 @@ func TestEndpointHostnameResolvedAtConnect(t *testing.T) {
 		fail    bool
 	)
 	hook := func(m *Manager) {
-		m.resolve = func(ctx context.Context, host string) ([]netip.Addr, error) {
+		m.resolve = func(ctx context.Context, host string, mark uint32) ([]netip.Addr, error) {
 			mu.Lock()
 			defer mu.Unlock()
+			if mark != 0 {
+				t.Errorf("split tunnel resolved %s with mark %d", host, mark)
+			}
 			lookups = append(lookups, host)
 			if fail {
 				return nil, errors.New("no such host")
@@ -1768,5 +1772,124 @@ func TestServeStartsWithCorruptJournal(t *testing.T) {
 	}
 	if aside, _ := filepath.Glob(jpath + ".corrupt-*"); len(aside) != 1 {
 		t.Fatalf("aside files %v, want one", aside)
+	}
+}
+
+// fullTunnelEnv is an environment whose tunnel routes everything (0.0.0.0/0)
+// through a server reached at a host name. supported says whether the
+// platform supports full tunnels; ipcSet strings and resolver marks are
+// recorded.
+type fullTunnelEnv struct {
+	*env
+	srv *server
+
+	mu    sync.Mutex
+	uapis []string
+	marks []uint32
+}
+
+func newFullTunnelEnv(t *testing.T, supported bool) *fullTunnelEnv {
+	t.Helper()
+	fe := &fullTunnelEnv{}
+	hook := func(m *Manager) {
+		m.fullTunnel = supported
+		m.pickTable = func(context.Context) (uint32, error) { return 51820, nil }
+		m.resolve = func(_ context.Context, host string, mark uint32) ([]netip.Addr, error) {
+			fe.mu.Lock()
+			defer fe.mu.Unlock()
+			fe.marks = append(fe.marks, mark)
+			return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
+		}
+		real := m.ops.ipcSet
+		m.ops.ipcSet = func(d *device.Device, s string) error {
+			fe.mu.Lock()
+			fe.uapis = append(fe.uapis, s)
+			fe.mu.Unlock()
+			// The test's sockets cannot take SO_MARK without
+			// CAP_NET_ADMIN; the mark itself is not under test here.
+			s, _ = strings.CutPrefix(s, "fwmark=51820\n")
+			return real(d, s)
+		}
+	}
+	fe.env = newEnv(t, envOpts{present: []uint32{serialA}, hook: hook})
+	fe.srv = newServer(t, fe.b.pub(serialA), "10.0.0.2")
+	cfg := fe.config([]keyref.Ref{refA}, []string{"10.0.0.2"}, fe.srv, fmt.Sprintf("vpn.example.test:%d", fe.srv.port))
+	fe.add(strings.Replace(cfg, "AllowedIPs = "+serverIP.String()+"/32", "AllowedIPs = 0.0.0.0/0", 1))
+	fe.waitCard(serialA, true)
+	return fe
+}
+
+// A full tunnel's device gets fwmark=<table> as the first UAPI line (before
+// Up, R7), the endpoint is resolved with that mark, and the Configurer is
+// handed the same table; a split tunnel has no fwmark.
+func TestDaemonPrependsFwmarkForFullTunnel(t *testing.T) {
+	fe := newFullTunnelEnv(t, true)
+	if st := fe.connect(); st.State != StateConnected {
+		t.Fatalf("connect state %q, want connected", st.State)
+	}
+	tnet, cfg := fe.f.last()
+	if err := get(tnet, 5*time.Second); err != nil {
+		t.Fatalf("GET over the full tunnel: %v", err)
+	}
+	fe.mu.Lock()
+	uapis, marks := fe.uapis, fe.marks
+	fe.mu.Unlock()
+	if len(uapis) != 1 || !strings.HasPrefix(uapis[0], "fwmark=51820\n") {
+		t.Fatalf("ipcSet %q, want one starting with fwmark=51820", uapis)
+	}
+	if strings.Count(uapis[0], "fwmark=") != 1 {
+		t.Errorf("ipcSet %q sets fwmark more than once", uapis[0])
+	}
+	if !slices.Equal(marks, []uint32{51820}) {
+		t.Errorf("resolver marks %v, want [51820]", marks)
+	}
+	cfg.mu.Lock()
+	fw, routes := cfg.fwmark, cfg.routes
+	cfg.mu.Unlock()
+	if fw != 51820 || len(routes) != 1 || routes[0].Bits() != 0 {
+		t.Errorf("plan FwMark %d routes %v, want 51820 and 0.0.0.0/0", fw, routes)
+	}
+}
+
+func TestSplitTunnelHasNoFwmark(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		uapis []string
+	)
+	hook := func(m *Manager) {
+		m.fullTunnel = true
+		real := m.ops.ipcSet
+		m.ops.ipcSet = func(d *device.Device, s string) error {
+			mu.Lock()
+			uapis = append(uapis, s)
+			mu.Unlock()
+			return real(d, s)
+		}
+	}
+	e, _ := connected(t, envOpts{hook: hook})
+	_, cfg := e.f.last()
+	mu.Lock()
+	defer mu.Unlock()
+	if len(uapis) != 1 || strings.Contains(uapis[0], "fwmark") {
+		t.Fatalf("ipcSet %q, want one without fwmark", uapis)
+	}
+	if cfg.fwmark != 0 {
+		t.Errorf("plan FwMark %d, want 0", cfg.fwmark)
+	}
+}
+
+// Where full tunnels are not supported yet (macOS until Task 5) the connect
+// is refused before any device or lookup.
+func TestFullTunnelRejectedWhereUnsupported(t *testing.T) {
+	fe := newFullTunnelEnv(t, false)
+	err := fe.call(ipc.MethodTunnelConnect, ipc.TunnelName{Name: tunName}, nil)
+	assertCode(t, err, ipc.CodeBadRequest)
+	if n := fe.f.count(); n != 0 {
+		t.Errorf("%d devices made, want 0", n)
+	}
+	fe.mu.Lock()
+	defer fe.mu.Unlock()
+	if len(fe.marks) != 0 {
+		t.Errorf("endpoint resolved %d times, want 0", len(fe.marks))
 	}
 }

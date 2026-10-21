@@ -76,6 +76,8 @@ const (
 const (
 	NetFullTunnelUnsupported = "routing all traffic through the tunnel (AllowedIPs 0.0.0.0/0 or ::/0) is not supported yet; list the networks to reach instead"
 	NetAlreadyApplied        = "network configuration is already applied to this interface"
+	// NetNoRPFilterFmt takes the interface name.
+	NetNoRPFilterFmt = "nft is not installed: the full tunnel on %s runs without its reverse-path filter (packets addressed to the tunnel that arrive on other interfaces are not dropped); install nftables to enable it"
 )
 
 // Tunnel daemon. None of these formats take key material or a PIN.

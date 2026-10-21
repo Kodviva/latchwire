@@ -3,8 +3,10 @@ package netcfg
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/netip"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -12,24 +14,38 @@ import (
 )
 
 // recorder records commands instead of running them. failOn makes the
-// command whose rendering starts with it fail. onRun, if set, sees every
+// command whose rendering starts with it fail; missing makes it fail as a
+// command that is not installed. out maps a rendered command to its
+// output, stdin collects what each command read. onRun, if set, sees every
 // command before it is recorded.
 type recorder struct {
-	cmds   []string
-	failOn string
-	onRun  func(cmd string)
+	cmds    []string
+	failOn  string
+	missing string
+	out     map[string]string
+	stdin   map[string]string
+	onRun   func(cmd string)
 }
 
-func (r *recorder) Run(_ context.Context, name string, args []string, _ []byte) ([]byte, error) {
+func (r *recorder) Run(_ context.Context, name string, args []string, in []byte) ([]byte, error) {
 	c := strings.Join(append([]string{name}, args...), " ")
 	if r.onRun != nil {
 		r.onRun(c)
 	}
 	r.cmds = append(r.cmds, c)
+	if len(in) > 0 {
+		if r.stdin == nil {
+			r.stdin = map[string]string{}
+		}
+		r.stdin[c] = string(in)
+	}
+	if r.missing != "" && strings.HasPrefix(c, r.missing) {
+		return nil, fmt.Errorf("%s: %w", name, exec.ErrNotFound)
+	}
 	if r.failOn != "" && strings.HasPrefix(c, r.failOn) {
 		return nil, errors.New("exit status 1")
 	}
-	return nil, nil
+	return []byte(r.out[c]), nil
 }
 
 func pfx(s ...string) []netip.Prefix {
@@ -142,18 +158,18 @@ func TestLinuxSkipsConnectedRoute(t *testing.T) {
 	}
 }
 
+// macOS still refuses a full tunnel (until Task 5); Linux supports it (see
+// TestFullTunnelNoLongerRejected).
 func TestFullTunnelRejected(t *testing.T) {
 	for _, full := range []string{"0.0.0.0/0", "::/0"} {
-		for name, f := range platforms {
-			r := &recorder{}
-			j, _ := newJournal(t)
-			_, err := f(r, j).Apply(ctx, plan("X", pfx("10.0.0.2/32"), pfx("10.0.0.0/24", full)))
-			if !errors.Is(err, ErrFullTunnelUnsupported) {
-				t.Errorf("%s %s: err = %v, want ErrFullTunnelUnsupported", name, full, err)
-			}
-			if len(r.cmds) != 0 || len(j.Entries()) != 0 {
-				t.Errorf("%s %s: commands ran %q or journal written %v", name, full, r.cmds, j.Entries())
-			}
+		r := &recorder{}
+		j, _ := newJournal(t)
+		_, err := newDarwin(r, j).Apply(ctx, plan("X", pfx("10.0.0.2/32"), pfx("10.0.0.0/24", full)))
+		if !errors.Is(err, ErrFullTunnelUnsupported) {
+			t.Errorf("darwin %s: err = %v, want ErrFullTunnelUnsupported", full, err)
+		}
+		if len(r.cmds) != 0 || len(j.Entries()) != 0 {
+			t.Errorf("darwin %s: commands ran %q or journal written %v", full, r.cmds, j.Entries())
 		}
 	}
 }

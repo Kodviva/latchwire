@@ -19,10 +19,15 @@ const DefaultJournalPath = "/var/run/latchwire/journal.json"
 
 // Step is one system command. Stdin carries data that must not appear in the
 // arguments; secrets never belong in a Step, because the journal is a file.
+//
+// Persistent marks an undo step whose change outlives the interface (an ip
+// rule, a sysctl, an nft table): when it fails, Remove keeps it in the
+// journal for a retry instead of forgetting it.
 type Step struct {
-	Name  string   `json:"name"`
-	Args  []string `json:"args,omitempty"`
-	Stdin []byte   `json:"stdin,omitempty"`
+	Name       string   `json:"name"`
+	Args       []string `json:"args,omitempty"`
+	Stdin      []byte   `json:"stdin,omitempty"`
+	Persistent bool     `json:"persistent,omitempty"`
 }
 
 func (s Step) String() string {

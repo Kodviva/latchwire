@@ -123,8 +123,15 @@ type Manager struct {
 	jpath   string
 	bind    func() conn.Bind
 	isAdmin func(uint32) (bool, error)
-	resolve func(ctx context.Context, host string) ([]netip.Addr, error)
-	ops     devOps
+	// resolve looks up an endpoint host; mark != 0 marks its queries
+	// (SO_MARK, Linux) so they leave outside a full tunnel.
+	resolve func(ctx context.Context, host string, mark uint32) ([]netip.Addr, error)
+	// fullTunnel says whether this platform routes 0.0.0.0/0 and ::/0
+	// (Linux; macOS from Task 5). pickTable chooses a full tunnel's routing
+	// table, which is also its fwmark.
+	fullTunnel bool
+	pickTable  func(ctx context.Context) (uint32, error)
+	ops        devOps
 	// agentGrace is the agentGrace constant; tests shorten it.
 	agentGrace time.Duration
 
@@ -193,10 +200,10 @@ func NewManager(o Options) *Manager {
 		ctx:        context.Background(),
 		tunnels:    map[string]*tunnel{},
 		agents:     map[*ipc.Conn]*agentState{},
-		resolve: func(ctx context.Context, host string) ([]netip.Addr, error) {
-			return net.DefaultResolver.LookupNetIP(ctx, "ip", host)
-		},
+		resolve:    lookupHost,
+		fullTunnel: runtime.GOOS == "linux",
 	}
+	m.pickTable = func(ctx context.Context) (uint32, error) { return netcfg.LinuxTable(ctx, m.runner) }
 	if m.socket == "" {
 		m.socket = DefaultSocket
 	}
@@ -983,18 +990,29 @@ func (m *Manager) proveOne(ctx context.Context, c candidate) error {
 // key: resolve endpoints, then NewDevice, SetStaticKey (once, before Up),
 // IpcSet, addresses and routes, Up. life bounds the key's calls for the
 // device's whole lifetime; attempt only this connect.
+//
+// A full tunnel (a default route in some peer's AllowedIPs) gets a routing
+// table T first: its endpoint lookups and its WireGuard socket carry the
+// mark T (fwmark=T leads the UAPI text, a device key that must precede the
+// first peer), and its routes go through table T.
 func (m *Manager) build(attempt, life context.Context, cfg *config.Tunnel, c candidate) (*device.Device, netcfg.Configurer, error) {
 	id := c.id
 	var routes []netip.Prefix
 	for _, peer := range cfg.Peers {
 		routes = append(routes, peer.AllowedIPs...)
 	}
-	for _, r := range routes {
-		if r.Bits() == 0 {
+	var mark uint32
+	if slices.ContainsFunc(routes, func(r netip.Prefix) bool { return r.Bits() == 0 }) {
+		if !m.fullTunnel {
 			return nil, nil, netcfg.ErrFullTunnelUnsupported
 		}
+		t, err := m.pickTable(attempt)
+		if err != nil {
+			return nil, nil, err
+		}
+		mark = t
 	}
-	rt, err := m.resolveTunnel(attempt, cfg)
+	rt, err := m.resolveTunnel(attempt, cfg, mark)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1024,10 +1042,16 @@ func (m *Manager) build(attempt, life context.Context, cfg *config.Tunnel, c can
 	if err := m.ops.setStaticKey(dev, wgadapter.New(key, wgadapter.DefaultLimits)); err != nil {
 		return fail(err)
 	}
-	if err := m.ops.ipcSet(dev, rt.UAPI()); err != nil {
+	uapi := rt.UAPI()
+	if mark != 0 {
+		uapi = fmt.Sprintf("fwmark=%d\n", mark) + uapi
+	}
+	if err := m.ops.ipcSet(dev, uapi); err != nil {
 		return fail(err)
 	}
-	if _, err := cfgr.Apply(attempt, netcfg.Plan{Iface: iface, Addresses: id.Addresses, Routes: routes, MTU: mtu}); err != nil {
+	plan := netcfg.Plan{Iface: iface, Addresses: id.Addresses, Routes: routes, MTU: mtu,
+		Endpoints: resolvedEndpoints(rt), FwMark: mark}
+	if _, err := cfgr.Apply(attempt, plan); err != nil {
 		return fail(err)
 	}
 	if err := m.ops.up(dev); err != nil {
@@ -1048,8 +1072,9 @@ func resolvedEndpoints(rt *config.Tunnel) []netip.AddrPort {
 }
 
 // resolveTunnel returns a copy of cfg whose endpoints are literal IP:port.
-// Names are resolved at every connect; IPv4 is preferred.
-func (m *Manager) resolveTunnel(ctx context.Context, cfg *config.Tunnel) (*config.Tunnel, error) {
+// Names are resolved at every connect, with mark (see Manager.resolve); IPv4
+// is preferred.
+func (m *Manager) resolveTunnel(ctx context.Context, cfg *config.Tunnel, mark uint32) (*config.Tunnel, error) {
 	rt := *cfg
 	rt.Peers = slices.Clone(cfg.Peers)
 	for i := range rt.Peers {
@@ -1068,7 +1093,7 @@ func (m *Manager) resolveTunnel(ctx context.Context, cfg *config.Tunnel) (*confi
 		addr, err := netip.ParseAddr(host)
 		if err != nil {
 			rctx, cancel := context.WithTimeout(ctx, resolveTimeout)
-			addrs, lerr := m.resolve(rctx, host)
+			addrs, lerr := m.resolve(rctx, host, mark)
 			cancel()
 			if lerr != nil || len(addrs) == 0 {
 				return nil, &ipc.Error{Code: ipc.CodeUnavailable, Message: fmt.Sprintf(msg.DaemonResolveFmt, host)}
