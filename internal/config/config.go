@@ -52,12 +52,18 @@ type Peer struct {
 	PersistentKeepalive int
 }
 
+// The MTU a configuration may set; 0 means automatic.
+const (
+	minMTU = 1280
+	maxMTU = 9000
+)
+
 // Tunnel is a parsed tunnel configuration. Identities are in order of
 // preference.
 type Tunnel struct {
 	Name       string
 	ListenPort int
-	MTU        int
+	MTU        int          // 0 = automatic
 	DNS        []netip.Addr // parsed, not applied yet
 	DNSSearch  []string     // search domains from the DNS line, not applied yet
 	Identities []Identity
@@ -311,6 +317,9 @@ func (p *parser) interfaceKey(key, val string) error {
 		n, err := strconv.ParseUint(val, 10, 16)
 		if err != nil {
 			return fmt.Errorf(msg.ConfigInvalidValueFmt, "MTU")
+		}
+		if n != 0 && (n < minMTU || n > maxMTU) {
+			return errors.New(msg.ConfigMTURange)
 		}
 		p.t.MTU = int(n)
 	case "dns":

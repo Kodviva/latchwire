@@ -54,7 +54,6 @@ const (
 )
 
 const (
-	defaultMTU     = 1420
 	resolveTimeout = 10 * time.Second
 
 	// agentGrace is how long a user's tunnels stay up after that user's
@@ -1006,7 +1005,7 @@ func (m *Manager) build(attempt, life context.Context, cfg *config.Tunnel, c can
 
 	mtu := cfg.MTU
 	if mtu == 0 {
-		mtu = defaultMTU
+		mtu = netcfg.AutoMTU(attempt, m.runner, resolvedEndpoints(rt))
 	}
 	tdev, cfgr, err := m.tun(cfg.Name, mtu)
 	if err != nil {
@@ -1035,6 +1034,17 @@ func (m *Manager) build(attempt, life context.Context, cfg *config.Tunnel, c can
 		return fail(err)
 	}
 	return dev, cfgr, nil
+}
+
+// resolvedEndpoints returns the endpoints of a tunnel from resolveTunnel.
+func resolvedEndpoints(rt *config.Tunnel) []netip.AddrPort {
+	var eps []netip.AddrPort
+	for _, p := range rt.Peers {
+		if ap, err := netip.ParseAddrPort(p.Endpoint); err == nil {
+			eps = append(eps, ap)
+		}
+	}
+	return eps
 }
 
 // resolveTunnel returns a copy of cfg whose endpoints are literal IP:port.

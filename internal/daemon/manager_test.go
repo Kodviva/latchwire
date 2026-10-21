@@ -231,6 +231,7 @@ type netFactory struct {
 	mu   sync.Mutex
 	nets []*netstack.Net
 	cfgs []*recCfg
+	mtus []int
 }
 
 func (f *netFactory) make(name string, mtu int) (tun.Device, netcfg.Configurer, error) {
@@ -242,6 +243,7 @@ func (f *netFactory) make(name string, mtu int) (tun.Device, netcfg.Configurer, 
 	f.mu.Lock()
 	f.nets = append(f.nets, tnet)
 	f.cfgs = append(f.cfgs, c)
+	f.mtus = append(f.mtus, mtu)
 	f.mu.Unlock()
 	return tdev, c, nil
 }
@@ -584,6 +586,48 @@ func connected(t *testing.T, o envOpts) (*env, *server) {
 }
 
 // ---- tests from the brief ----
+
+// mtuRunner answers the commands AutoMTU runs, on either platform, with a
+// 1400-byte network.
+type mtuRunner struct{}
+
+func (mtuRunner) Run(_ context.Context, name string, args []string, _ []byte) ([]byte, error) {
+	switch c := strings.Join(append([]string{name}, args...), " "); c {
+	case "route -n get default":
+		return []byte("  interface: en0\n"), nil
+	case "ifconfig en0":
+		return []byte("en0: flags=8863<UP> mtu 1400\n"), nil
+	case "ip route get 127.0.0.1":
+		return []byte("127.0.0.1 dev lo src 127.0.0.1 uid 0 \n    cache \n"), nil
+	case "ip link show lo":
+		return []byte("1: lo: <LOOPBACK,UP> mtu 1400 qdisc noqueue\n"), nil
+	}
+	return nil, errors.New("exit status 1")
+}
+
+// A tunnel without an MTU gets the automatic one; a configured MTU is kept.
+func TestConnectAutoMTU(t *testing.T) {
+	for name, tc := range map[string]struct {
+		mtu  string
+		want int
+	}{"automatic": {"", 1320}, "configured": {"MTU = 1380\n", 1380}} {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t, envOpts{present: []uint32{serialA}, hook: func(m *Manager) { m.runner = mtuRunner{} }})
+			srv := newServer(t, e.b.pub(serialA), "10.0.0.2")
+			cfg := strings.Replace(e.config([]keyref.Ref{refA}, []string{"10.0.0.2"}, srv, ""), "MTU = 1420\n", tc.mtu, 1)
+			e.add(cfg)
+			e.waitCard(serialA, true)
+			if st := e.connect(); st.State != StateConnected {
+				t.Fatalf("connect state %q, want connected", st.State)
+			}
+			e.f.mu.Lock()
+			defer e.f.mu.Unlock()
+			if len(e.f.mtus) != 1 || e.f.mtus[0] != tc.want {
+				t.Fatalf("TUN MTUs %v, want [%d]", e.f.mtus, tc.want)
+			}
+		})
+	}
+}
 
 func TestConnectHTTPOverTunnel(t *testing.T) {
 	e, _ := connected(t, envOpts{})

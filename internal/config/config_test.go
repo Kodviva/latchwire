@@ -271,6 +271,26 @@ func TestParseRejectsInvalid(t *testing.T) {
 	}
 }
 
+func TestParseRejectsMTUOutOfRange(t *testing.T) {
+	id := "[Interface]\nKeyRef = piv://1/82\n" + idKey
+	for _, v := range []string{"1000", "1279", "9001", "65535"} {
+		if _, err := parse(t, id+"MTU = "+v+"\n"); err == nil {
+			t.Errorf("MTU = %s: accepted", v)
+		}
+	}
+	for v, want := range map[string]int{"0": 0, "1280": 1280, "1420": 1420, "9000": 9000} {
+		tun, err := parse(t, id+"MTU = "+v+"\n")
+		if err != nil {
+			t.Errorf("MTU = %s: %v", v, err)
+		} else if tun.MTU != want {
+			t.Errorf("MTU = %s: got %d", v, tun.MTU)
+		}
+	}
+	if tun := mustParse(t, id); tun.MTU != 0 {
+		t.Errorf("no MTU: got %d, want 0 (automatic)", tun.MTU)
+	}
+}
+
 func TestUAPINeverContainsPrivateKey(t *testing.T) {
 	tun := mustParse(t, `
 [Interface]

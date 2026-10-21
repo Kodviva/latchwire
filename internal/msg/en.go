@@ -26,6 +26,7 @@ const (
 	ConfigDuplicateSectionFmt    = "[%s] section appears more than once"
 	ConfigDuplicatePeer          = "the same PublicKey is used by more than one [Peer]"
 	ConfigMixedIdentities        = "KeyRef and Address belong in [Interface] or in [Identity] sections, not both"
+	ConfigMTURange               = "MTU must be 0 (automatic) or between 1280 and 9000"
 	ConfigPublicKeyWithoutKeyRef = "PublicKey in [Interface] is the public key of the KeyRef there; with [Identity] sections put each PublicKey in its section"
 
 	// YubiKey PIV backend. None of these formats take a PIN, PUK or key.
