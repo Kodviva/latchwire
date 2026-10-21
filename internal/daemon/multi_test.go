@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -255,23 +257,133 @@ func TestDNSOwnership(t *testing.T) {
 	if st := e2.statusOf("full"); st.DNS != "primary" {
 		t.Errorf("full: %q, want primary", st.DNS)
 	}
-	if st := e2.statusOf("split"); st.DNS != "ignored" {
+	if st := e2.statusOf("split"); st.DNS != "ignored" || st.Warning != msg.DaemonWarnDNSIgnored {
 		t.Errorf("split beside full: %q, want ignored", st.DNS)
 	}
 
-	// A full tunnel connecting after a split owner still asks for it (and
-	// netcfg reports it busy).
-	e3 := multiEnv(t, false)
-	e3.addTunnel("split", "10.1.0.0/16", "DNS = 10.1.0.53\n")
-	e3.addTunnel("full", "0.0.0.0/0", "DNS = 10.9.0.53\n")
-	e3.mustConnect("split")
-	e3.mustConnect("full")
-	c := e3.f.cfgFor("full")
-	c.mu.Lock()
-	role := c.dnsRole
-	c.mu.Unlock()
-	if role != netcfg.DNSPrimary {
-		t.Errorf("full after split: role %v, want primary", role)
+	// P18: a full tunnel connecting after a split owner demotes it before
+	// its own Apply: scoped with search domains, else ignored.
+	for _, tc := range []struct {
+		line, status string
+		role         netcfg.DNSRole
+	}{
+		{"DNS = 10.1.0.53\n", "ignored", netcfg.DNSNone},
+		{"DNS = 10.1.0.53, corp.example\n", "scoped", netcfg.DNSScoped},
+	} {
+		e3 := multiEnv(t, false)
+		e3.addTunnel("split", "10.1.0.0/16", tc.line)
+		e3.addTunnel("full", "0.0.0.0/0", "DNS = 10.9.0.53\n")
+		e3.mustConnect("split")
+		e3.mustConnect("full")
+		sc, fc := e3.f.cfgFor("split"), e3.f.cfgFor("full")
+		sc.mu.Lock()
+		sets, srole := slices.Clone(sc.roleSets), sc.dnsRole
+		sc.mu.Unlock()
+		fc.mu.Lock()
+		frole := fc.dnsRole
+		fc.mu.Unlock()
+		if !slices.Equal(sets, []netcfg.DNSRole{tc.role}) || srole != tc.role {
+			t.Errorf("%q: split SetDNSRole %v (role %v), want [%v]", tc.line, sets, srole, tc.role)
+		}
+		if frole != netcfg.DNSPrimary {
+			t.Errorf("%q: full role %v, want primary", tc.line, frole)
+		}
+		if st := e3.statusOf("full"); st.DNS != "primary" || st.Warning != "" {
+			t.Errorf("%q: full status %+v", tc.line, st)
+		}
+		if st := e3.statusOf("split"); st.DNS != tc.status {
+			t.Errorf("%q: split status %q, want %q", tc.line, st.DNS, tc.status)
+		}
+		e3.stop()
+	}
+}
+
+// P18: when the split tunnel's DNS cannot be demoted, the full tunnel is
+// refused before anything of it is built, and its reservation undone.
+func TestFullTunnelRefusedWhenDemotionFails(t *testing.T) {
+	e := multiEnv(t, false)
+	e.addTunnel("split", "10.1.0.0/16", "DNS = 10.1.0.53\n")
+	e.addTunnel("full", "0.0.0.0/0", "DNS = 10.9.0.53\n")
+	e.mustConnect("split")
+	sc := e.f.cfgFor("split")
+	sc.mu.Lock()
+	sc.roleErr = errors.New("resolvectl revert wg0: exit status 1")
+	sc.mu.Unlock()
+	devices, sets := e.f.count(), len(e.fw.all())
+
+	_, err := e.connectTunnel("full")
+	var ie *ipc.Error
+	want := fmt.Sprintf(msg.DaemonDemoteFailedFmt, "split", "resolvectl revert wg0: exit status 1")
+	if !errors.As(err, &ie) || ie.Code != ipc.CodeInternal || ie.Message != want {
+		t.Fatalf("connect error %v, want %s %q", err, ipc.CodeInternal, want)
+	}
+	if n := e.f.count(); n != devices {
+		t.Errorf("%d device(s) made for the refused tunnel", n-devices)
+	}
+	if n := len(e.fw.all()); n != sets {
+		t.Errorf("the kill switch was set: %+v", e.fw.all()[sets:])
+	}
+	if st := e.statusOf("full"); st.State != StateDisconnected || st.Identity != "" || st.KillSwitch != "off" {
+		t.Errorf("refused full tunnel: %+v", st)
+	}
+	if st := e.statusOf("split"); st.State != StateConnected || st.DNS != "primary" {
+		t.Errorf("split after the failed demotion: %+v", st)
+	}
+	// It works once the split tunnel's DNS can be changed.
+	sc.mu.Lock()
+	sc.roleErr = nil
+	sc.mu.Unlock()
+	e.mustConnect("full")
+	if st := e.statusOf("split"); st.DNS != "ignored" || st.Warning != msg.DaemonWarnDNSIgnored {
+		t.Errorf("split after the demotion: %+v", st)
+	}
+}
+
+// A split tunnel that is still connecting (its Apply not run yet) is
+// demoted by changing the role its build reads; one that is going down
+// is left alone.
+func TestDemoteBeforeApplyAndAfterTeardown(t *testing.T) {
+	m := NewManager(Options{})
+	cfg := tunnelWith([]string{"10.1.0.0/16"})
+	cfg.DNS, cfg.DNSSearch = []netip.Addr{netip.MustParseAddr("10.1.0.53")}, []string{"corp.example"}
+	o := newTunnel("split", cfg, defaultPolicy())
+	o.state, o.dnsRole = StateConnecting, netcfg.DNSPrimary
+	m.tunnels["split"] = o
+	if err := m.demote(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	if o.dnsRole != netcfg.DNSScoped {
+		t.Errorf("connecting split: role %v, want scoped", o.dnsRole)
+	}
+	o.state, o.dnsRole = StateDisconnected, netcfg.DNSPrimary
+	if err := m.demote(context.Background(), o); err != nil || o.dnsRole != netcfg.DNSPrimary {
+		t.Errorf("down split: %v, role %v", err, o.dnsRole)
+	}
+}
+
+// A tunnel whose device is still being closed (state already
+// disconnected) keeps its routes, port and DNS until then: it still
+// counts for conflicts and the DNS role.
+func TestTeardownWindowStillActive(t *testing.T) {
+	m := NewManager(Options{})
+	old := newTunnel("old", tunnelWith([]string{"10.1.0.0/16"}), defaultPolicy())
+	old.cfg.Name = "old"
+	old.cfg.DNS = []netip.Addr{netip.MustParseAddr("10.1.0.53")}
+	old.state, old.dev, old.dnsRole = StateDisconnected, &device.Device{}, netcfg.DNSPrimary
+	m.tunnels["old"] = old
+	next := newTunnel("next", tunnelWith([]string{"10.1.2.0/24"}), defaultPolicy())
+	m.tunnels["next"] = next
+	m.mu.Lock()
+	err := m.conflictLocked(next)
+	next.cfg.Peers[0].AllowedIPs = []netip.Prefix{netip.MustParsePrefix("10.2.0.0/16")}
+	next.cfg.DNS = []netip.Addr{netip.MustParseAddr("10.2.0.53")}
+	role := m.dnsRoleLocked(next)
+	m.mu.Unlock()
+	if err == nil {
+		t.Error("no conflict with a tunnel whose device is still open")
+	}
+	if role != netcfg.DNSNone {
+		t.Errorf("role %v next to a primary still closing, want none", role)
 	}
 }
 
@@ -334,17 +446,18 @@ func TestDNSStatusMapping(t *testing.T) {
 		warn    string
 	}{
 		{netcfg.DNSNone, false, netcfg.DNSOutcomeNone, "none", ""},
-		{netcfg.DNSNone, true, netcfg.DNSOutcomeNone, "ignored", ""},
+		{netcfg.DNSNone, true, netcfg.DNSOutcomeNone, "ignored", msg.DaemonWarnDNSIgnored},
 		{netcfg.DNSPrimary, true, netcfg.DNSOutcomeResolved, "primary", ""},
 		{netcfg.DNSPrimary, true, netcfg.DNSOutcomeResolvconf, "primary", ""},
 		{netcfg.DNSPrimary, true, netcfg.DNSOutcomeScutilPrimary, "primary", ""},
-		{netcfg.DNSPrimary, true, "", "primary", ""},
+		{netcfg.DNSPrimary, true, "", "ignored", msg.DaemonWarnDNSNotApplied},
+		{netcfg.DNSScoped, true, "", "ignored", msg.DaemonWarnDNSNotApplied},
 		{netcfg.DNSPrimary, true, netcfg.DNSOutcomeResolvconfShared, "shared", msg.DaemonWarnDNSShared},
 		{netcfg.DNSPrimary, true, netcfg.DNSOutcomeScutilPrimaryOverridden, "overridden", msg.DaemonWarnDNSOverridden},
 		{netcfg.DNSPrimary, true, netcfg.DNSOutcomePrimaryBusy, "busy", msg.DaemonWarnDNSBusy},
 		{netcfg.DNSScoped, true, netcfg.DNSOutcomeResolved, "scoped", ""},
 		{netcfg.DNSScoped, true, netcfg.DNSOutcomeScutilScoped, "scoped", ""},
-		{netcfg.DNSScoped, true, netcfg.DNSOutcomeScopedUnsupported, "ignored", ""},
+		{netcfg.DNSScoped, true, netcfg.DNSOutcomeScopedUnsupported, "ignored", msg.DaemonWarnDNSScopedUnsupported},
 	} {
 		got, warn := dnsStatus(tc.role, tc.servers, tc.outcome)
 		if got != tc.want || warn != tc.warn {

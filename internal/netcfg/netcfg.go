@@ -84,11 +84,14 @@ type Applied struct {
 // Remove undoes what Apply did; it is a no-op when nothing is applied.
 // Refresh re-reads the system state the applied configuration depends on
 // (the default gateway, the automatic MTU) and changes the configuration
-// only when that state changed. The three are serialized.
+// only when that state changed. SetDNSRole changes the role of the applied
+// DNS servers in place (P18: a full tunnel demotes a split tunnel that
+// answers every name) and returns the new Applied.DNS. All are serialized.
 type Configurer interface {
 	Apply(ctx context.Context, p Plan) (Applied, error)
 	Refresh(ctx context.Context) error
 	Remove(ctx context.Context) error
+	SetDNSRole(ctx context.Context, role DNSRole) (string, error)
 }
 
 // step is one command and the command that undoes it (nil: nothing to undo).
@@ -133,6 +136,10 @@ type configurer struct {
 	carried []Step
 	dn      darwinFollow     // macOS: what Refresh follows
 	now     func() time.Time // nil: time.Now
+	// dnsPlan is the applied Plan's DNS part (Iface, DNS, DNSSearch,
+	// DNSRole) and dnsHow its Applied.DNS, for SetDNSRole.
+	dnsPlan Plan
+	dnsHow  string
 }
 
 func newConfigurer(r Runner, j *Journal, p planner, full fullPlanner) *configurer {
@@ -197,7 +204,118 @@ func (c *configurer) Apply(ctx context.Context, p Plan) (Applied, error) {
 			res.RPFilter = true
 		}
 	}
+	c.dnsPlan = Plan{Iface: p.Iface, DNS: p.DNS, DNSSearch: p.DNSSearch, DNSRole: p.DNSRole}
+	c.dnsHow = res.DNS
 	return res, nil
+}
+
+// SetDNSRole gives the applied DNS servers role (P18) and returns the new
+// Applied.DNS. The same role changes nothing. Otherwise the new role's
+// steps are planned first (its system reads, so an unsupported system
+// changes nothing), then the applied DNS steps are undone, newest first,
+// and the journal updated; a DNSPrimary ownership is released only once
+// that undo ran (P13). Then the new steps are journaled and applied. A new
+// DNSPrimary role whose ownership is held elsewhere gets primary-busy and
+// no DNS.
+//
+// On an error the returned outcome is what is in effect: the old one when
+// the old DNS could not be undone (it stays applied and journaled), none
+// when the new one failed (what of it was applied is undone again).
+func (c *configurer) SetDNSRole(ctx context.Context, role DNSRole) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.applied) == 0 {
+		return "", errors.New(msg.NetNotApplied)
+	}
+	old := c.dnsPlan.DNSRole
+	if c.dns == nil || role == old {
+		return c.dnsHow, nil
+	}
+	p := c.dnsPlan
+	p.DNSRole = role
+	busy, claimed := false, false
+	if role == DNSPrimary && len(p.DNS) > 0 {
+		primaryDNS.mu.Lock()
+		claimed = primaryDNS.owner != c
+		primaryDNS.mu.Unlock()
+		if holder, ok := c.claimPrimaryDNS(p.Iface); !ok {
+			log.Printf(msg.NetDNSPrimaryBusyFmt, p.Iface, holder)
+			busy, claimed = true, false
+		}
+	}
+	unclaim := func() {
+		if claimed {
+			c.releasePrimaryDNS()
+		}
+	}
+	// What Refresh follows belongs to the old role until it is undone.
+	follow := c.dn.dnsFollow
+	c.dn.dnsFollow = dnsFollow{}
+	var (
+		steps []step
+		how   = DNSOutcomePrimaryBusy
+		err   error
+	)
+	if !busy {
+		if steps, how, err = c.dns(ctx, c.run, p); err != nil {
+			c.dn.dnsFollow = follow
+			unclaim()
+			return c.dnsHow, err
+		}
+	}
+	newFollow := c.dn.dnsFollow
+	c.dn.dnsFollow = follow
+	if err := c.undoDNSLocked(ctx); err != nil {
+		unclaim()
+		return c.dnsHow, err
+	}
+	c.dn.dnsFollow = newFollow
+	if old == DNSPrimary {
+		// The old DNS undo ran: the ownership is free (P13).
+		releasePrimaryDNSUnless(c.owner, c.carried)
+	}
+	c.dnsPlan.DNSRole, c.dnsHow = DNSNone, DNSOutcomeNone
+	if err := c.recordLocked(); err != nil {
+		unclaim()
+		return DNSOutcomeNone, err
+	}
+	for _, s := range steps {
+		if _, err := c.applyStepLocked(ctx, s); err != nil {
+			uctx := context.WithoutCancel(ctx)
+			if uerr := c.undoDNSLocked(uctx); uerr != nil {
+				err = errors.Join(err, uerr)
+			}
+			c.dn.dnsFollow = dnsFollow{}
+			if jerr := c.recordLocked(); jerr != nil {
+				err = errors.Join(err, jerr)
+			}
+			if role == DNSPrimary {
+				releasePrimaryDNSUnless(c.owner, c.undoListLocked())
+			}
+			return DNSOutcomeNone, err
+		}
+	}
+	c.dnsPlan.DNSRole, c.dnsHow = role, how
+	return how, nil
+}
+
+// undoDNSLocked undoes the applied DNS steps, newest first, and drops them
+// from the applied ones; it stops at the first undo that fails, leaving
+// that step (and the older ones) applied. The caller updates the journal.
+func (c *configurer) undoDNSLocked(ctx context.Context) error {
+	for i := len(c.applied) - 1; i >= 0; i-- {
+		s := c.applied[i]
+		if !isDNSUndo(s.do) {
+			continue
+		}
+		if s.undo != nil {
+			if err := runUndo(ctx, c.run, *s.undo); err != nil {
+				return err
+			}
+		}
+		c.applied = slices.Delete(c.applied, i, i+1)
+	}
+	return nil
 }
 
 // undoListLocked is what the journal holds for the owner: the carried steps,

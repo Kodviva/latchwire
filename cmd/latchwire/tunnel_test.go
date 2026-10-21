@@ -345,3 +345,22 @@ func TestHelp(t *testing.T) {
 		t.Errorf("stdout: %s", te.out)
 	}
 }
+
+// up prints the daemon's warning after the state line.
+func TestUpPrintsWarning(t *testing.T) {
+	te := newTestEnv(nil)
+	rpc := &fakeRPC{replies: map[string]func(any, any) error{
+		ipc.MethodTunnelConnect: func(_, r any) error {
+			setResult(t, r, ipc.TunnelStatus{Name: "office", State: "connected", Warning: msg.DaemonWarnDNSIgnored})
+			return nil
+		},
+	}}
+	withRPC(te, rpc)
+	if code := run(context.Background(), te.env, []string{"up", "office"}); code != 0 {
+		t.Fatalf("exit %d: %s", code, te.errOut)
+	}
+	want := fmt.Sprintf(msg.UpDoneFmt+"\n"+msg.StatusWarningFmt+"\n", "office", "connected", "office", msg.DaemonWarnDNSIgnored)
+	if got := te.out.String(); got != want {
+		t.Errorf("stdout %q, want %q", got, want)
+	}
+}

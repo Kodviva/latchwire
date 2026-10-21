@@ -107,6 +107,7 @@ const (
 	// NetDNSPrimaryBusyFmt takes the interface name and the interface of
 	// the tunnel whose DNS is in use.
 	NetDNSPrimaryBusyFmt = "the DNS servers of %s are not applied: the tunnel on %s already answers every name, and only one tunnel at a time can; disconnect it first to use these"
+	NetNotApplied        = "the tunnel's network configuration is not applied"
 	// NetDNSManualFmt takes the interface name.
 	NetDNSManualFmt = "DNS servers set by hand for the active network (System Settings) take precedence over those of %s, so names may still be sent outside the tunnel; remove them in System Settings, or turn the kill switch on"
 )
@@ -143,11 +144,17 @@ const (
 	// DaemonConflictListenPortFmt takes the port and the other tunnel's
 	// name.
 	DaemonConflictListenPortFmt = "not connecting: ListenPort %d is in use by tunnel %s; disconnect it first or change the ListenPort"
+	// DaemonDemoteFailedFmt takes the name of the split tunnel whose DNS
+	// answers every name and the error.
+	DaemonDemoteFailedFmt = "not connecting: the DNS servers of tunnel %s answer every name and could not be limited to its search domains, so this full tunnel cannot take over name resolution: %v"
 	// Status warnings (ipc.TunnelStatus.Warning).
-	DaemonWarnDNSShared     = "DNS is not exclusive: the classic resolvconf keeps the other interfaces' DNS servers next to this tunnel's, so names may be sent outside the tunnel; install openresolv or systemd-resolved, or turn the kill switch on"
-	DaemonWarnDNSOverridden = "DNS servers set by hand for the active network (System Settings) take precedence over this tunnel's, so names may be sent outside the tunnel; remove them, or turn the kill switch on"
-	DaemonWarnDNSBusy       = "this tunnel's DNS servers are not applied: those of another tunnel already answer every name, and only one tunnel's can; disconnect that tunnel, then reconnect this one"
-	DaemonWarnNoRPFilter    = "this full tunnel runs without its reverse-path filter because nft is not installed; install nftables to enable it"
+	DaemonWarnDNSShared            = "DNS is not exclusive: the classic resolvconf keeps the other interfaces' DNS servers next to this tunnel's, so names may be sent outside the tunnel; install openresolv or systemd-resolved, or turn the kill switch on"
+	DaemonWarnDNSOverridden        = "DNS servers set by hand for the active network (System Settings) take precedence over this tunnel's, so names may be sent outside the tunnel; remove them, or turn the kill switch on"
+	DaemonWarnDNSBusy              = "this tunnel's DNS servers are not applied: those of another tunnel already answer every name, and only one tunnel's can; disconnect that tunnel, then reconnect this one"
+	DaemonWarnDNSIgnored           = "this tunnel's DNS servers are not used: another tunnel's answer every name, and this tunnel has no search domains to send to its own; add search domains to its DNS line to use them for those"
+	DaemonWarnDNSScopedUnsupported = "this tunnel's DNS servers are not used: another tunnel's answer every name, and resolvconf cannot send only this tunnel's search domains to its own; use systemd-resolved to enable them"
+	DaemonWarnDNSNotApplied        = "this tunnel's DNS servers are not applied on this system"
+	DaemonWarnNoRPFilter           = "this full tunnel runs without its reverse-path filter because nft is not installed; install nftables to enable it"
 )
 
 // Command line. None of these formats take a PIN, PUK or key; the ones that

@@ -216,6 +216,10 @@ type recCfg struct {
 	// with a table but without its reverse-path filter (no nft).
 	outcome    string
 	noRPFilter bool
+	// roleSets are the SetDNSRole calls; roleErr fails them (nothing
+	// changes).
+	roleSets []netcfg.DNSRole
+	roleErr  error
 
 	refreshes  int
 	refreshErr error
@@ -236,11 +240,25 @@ func (c *recCfg) Apply(_ context.Context, p netcfg.Plan) (netcfg.Applied, error)
 	return res, nil
 }
 
+func (c *recCfg) SetDNSRole(_ context.Context, role netcfg.DNSRole) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.roleSets = append(c.roleSets, role)
+	if c.roleErr != nil {
+		return cmp.Or(c.outcome, netcfg.DNSOutcomeResolved), c.roleErr
+	}
+	c.dnsRole = role
+	if role == netcfg.DNSNone {
+		return netcfg.DNSOutcomeNone, nil
+	}
+	return cmp.Or(c.outcome, netcfg.DNSOutcomeResolved), nil
+}
+
 // calls is how often the Configurer was called in any way.
 func (c *recCfg) calls() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.applies + c.removed + c.refreshes
+	return c.applies + c.removed + c.refreshes + len(c.roleSets)
 }
 
 func (c *recCfg) Refresh(context.Context) error {

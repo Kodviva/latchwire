@@ -88,6 +88,9 @@ func cmdUp(ctx context.Context, e *env, args []string) error {
 			return err
 		}
 		fmt.Fprintf(e.stdout, msg.UpDoneFmt+"\n", name, st.State)
+		if st.Warning != "" {
+			fmt.Fprintf(e.stdout, msg.StatusWarningFmt+"\n", name, st.Warning)
+		}
 		return nil
 	})
 }
