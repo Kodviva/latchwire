@@ -42,6 +42,7 @@ import (
 	"github.com/Kodviva/latchwire/internal/keyref"
 	"github.com/Kodviva/latchwire/internal/msg"
 	"github.com/Kodviva/latchwire/internal/netcfg"
+	"github.com/Kodviva/latchwire/internal/netmon"
 )
 
 // Tunnel states reported by tunnel.status.
@@ -55,6 +56,9 @@ const (
 
 const (
 	resolveTimeout = 10 * time.Second
+	// netDebounce is how long the network must be quiet before its
+	// changes are acted on.
+	netDebounce = 500 * time.Millisecond
 
 	// agentGrace is how long a user's tunnels stay up after that user's
 	// agent connection closes. An agent restarted within it keeps them; after
@@ -127,11 +131,15 @@ type Manager struct {
 	// (SO_MARK, Linux) so they leave outside a full tunnel.
 	resolve func(ctx context.Context, host string, mark uint32) ([]netip.Addr, error)
 	// fullTunnel says whether this platform routes 0.0.0.0/0 and ::/0
-	// (Linux; macOS from Task 5). pickTable chooses a full tunnel's routing
-	// table, which is also its fwmark.
+	// (Linux, macOS). pickTable chooses a full tunnel's routing table,
+	// which is also its fwmark (Linux; nil: no table and no mark).
 	fullTunnel bool
 	pickTable  func(ctx context.Context) (uint32, error)
-	ops        devOps
+	// netSource opens the network change notifications; netDebounce is
+	// the netDebounce constant (tests shorten it).
+	netSource   func() (netmon.Source, error)
+	netDebounce time.Duration
+	ops         devOps
 	// agentGrace is the agentGrace constant; tests shorten it.
 	agentGrace time.Duration
 
@@ -172,6 +180,7 @@ type tunnel struct {
 	cancel context.CancelFunc // ends the attempt and the device's key calls
 	dev    *device.Device
 	cfgr   netcfg.Configurer
+	iface  string // the device's interface (utunN on macOS)
 	devGen uint64
 	// abort is cancelled by every teardown: a connect still proving an
 	// agent (and maybe waiting for a PIN) then gives up.
@@ -188,22 +197,26 @@ func newTunnel(name string, cfg *config.Tunnel) *tunnel {
 // NewManager returns a manager; it does nothing until Serve.
 func NewManager(o Options) *Manager {
 	m := &Manager{
-		socket:     o.Socket,
-		store:      &store{dir: o.StoreDir},
-		tun:        o.TUN,
-		runner:     o.Runner,
-		jpath:      o.JournalPath,
-		bind:       o.Bind,
-		isAdmin:    o.IsAdmin,
-		ops:        defaultOps,
-		agentGrace: agentGrace,
-		ctx:        context.Background(),
-		tunnels:    map[string]*tunnel{},
-		agents:     map[*ipc.Conn]*agentState{},
-		resolve:    lookupHost,
-		fullTunnel: runtime.GOOS == "linux",
+		socket:      o.Socket,
+		store:       &store{dir: o.StoreDir},
+		tun:         o.TUN,
+		runner:      o.Runner,
+		jpath:       o.JournalPath,
+		bind:        o.Bind,
+		isAdmin:     o.IsAdmin,
+		ops:         defaultOps,
+		agentGrace:  agentGrace,
+		ctx:         context.Background(),
+		tunnels:     map[string]*tunnel{},
+		agents:      map[*ipc.Conn]*agentState{},
+		resolve:     lookupHost,
+		fullTunnel:  runtime.GOOS == "linux" || runtime.GOOS == "darwin",
+		netSource:   netmon.NewSource,
+		netDebounce: netDebounce,
 	}
-	m.pickTable = func(ctx context.Context) (uint32, error) { return netcfg.LinuxTable(ctx, m.runner) }
+	if runtime.GOOS == "linux" {
+		m.pickTable = func(ctx context.Context) (uint32, error) { return netcfg.LinuxTable(ctx, m.runner) }
+	}
 	if m.socket == "" {
 		m.socket = DefaultSocket
 	}
@@ -265,6 +278,13 @@ func (m *Manager) Serve(ctx context.Context) error {
 	}
 	stop := context.AfterFunc(ctx, func() { l.Close() })
 	defer stop()
+	wctx, stopWatch := context.WithCancel(ctx)
+	defer stopWatch()
+	watched := make(chan struct{})
+	go func() {
+		defer close(watched)
+		m.watchNetwork(wctx)
+	}()
 
 	var wg sync.WaitGroup
 	var acceptErr error
@@ -292,11 +312,68 @@ func (m *Manager) Serve(ctx context.Context) error {
 	}
 	l.Close()
 	wg.Wait()
+	stopWatch()
+	<-watched
 	m.shutdown()
 	if acceptErr != nil {
 		return acceptErr
 	}
 	return ctx.Err()
+}
+
+// watchNetwork refreshes the connected tunnels' network configuration (the
+// endpoint routes that follow the gateway, the automatic MTU) after every
+// network change, until ctx ends. Notifications about the tunnels' own
+// interfaces are not changes of the network.
+func (m *Manager) watchNetwork(ctx context.Context) {
+	src, err := m.netSource()
+	if err != nil {
+		log.Printf("daemon: not watching network changes: %v", err)
+		return
+	}
+	for range netmon.Watch(ctx, src, m.netDebounce, m.ownIface) {
+		m.refreshAll(ctx)
+	}
+}
+
+// ownIface reports whether name is the interface of one of the tunnels.
+func (m *Manager) ownIface(name string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, t := range m.tunnels {
+		if t.iface != "" && t.iface == name {
+			return true
+		}
+	}
+	return false
+}
+
+// refreshAll calls Refresh for each connected tunnel in turn. Manager.mu is
+// not held while Refresh runs its commands; a Configurer serializes Refresh
+// with its own Remove, and a removed one refreshes nothing. A failed
+// Refresh leaves the tunnel up: the next change retries it.
+func (m *Manager) refreshAll(ctx context.Context) {
+	type target struct {
+		name string
+		cfgr netcfg.Configurer
+	}
+	m.mu.Lock()
+	var ts []target
+	for _, t := range m.tunnels {
+		if t.state == StateConnected && t.cfgr != nil {
+			ts = append(ts, target{t.name, t.cfgr})
+		}
+	}
+	m.mu.Unlock()
+	slices.SortFunc(ts, func(a, b target) int { return cmp.Compare(a.name, b.name) })
+	for _, t := range ts {
+		if ctx.Err() != nil {
+			return
+		}
+		if err := t.cfgr.Refresh(ctx); err != nil {
+			debugf("daemon: tunnel %s: refreshing the network configuration: %v", t.name, err)
+		}
+	}
 }
 
 func (m *Manager) shutdown() {
@@ -885,13 +962,13 @@ func (m *Manager) connect(caller context.Context, name string, uid uint32, admin
 	defer t.op.Unlock()
 	m.reap(t)
 
-	dev, cfgr, err := m.build(attempt, life, cfg, c)
+	dev, cfgr, iface, err := m.build(attempt, life, cfg, c)
 	m.mu.Lock()
 	if t.gen != gen {
 		err = errAborted // disconnected, removed or card removed meanwhile
 	}
 	if err == nil {
-		t.dev, t.cfgr, t.devGen = dev, cfgr, gen
+		t.dev, t.cfgr, t.iface, t.devGen = dev, cfgr, iface, gen
 		t.state = StateConnected
 		m.mu.Unlock()
 		log.Printf("daemon: tunnel %s connected with %s (uid %d)", name, c.id.Ref, c.uid)
@@ -991,11 +1068,11 @@ func (m *Manager) proveOne(ctx context.Context, c candidate) error {
 // IpcSet, addresses and routes, Up. life bounds the key's calls for the
 // device's whole lifetime; attempt only this connect.
 //
-// A full tunnel (a default route in some peer's AllowedIPs) gets a routing
-// table T first: its endpoint lookups and its WireGuard socket carry the
+// A full tunnel (a default route in some peer's AllowedIPs) on Linux gets a
+// routing table T first: its endpoint lookups and its WireGuard socket carry the
 // mark T (fwmark=T leads the UAPI text, a device key that must precede the
 // first peer), and its routes go through table T.
-func (m *Manager) build(attempt, life context.Context, cfg *config.Tunnel, c candidate) (*device.Device, netcfg.Configurer, error) {
+func (m *Manager) build(attempt, life context.Context, cfg *config.Tunnel, c candidate) (*device.Device, netcfg.Configurer, string, error) {
 	id := c.id
 	var routes []netip.Prefix
 	for _, peer := range cfg.Peers {
@@ -1004,20 +1081,22 @@ func (m *Manager) build(attempt, life context.Context, cfg *config.Tunnel, c can
 	var mark uint32
 	if slices.ContainsFunc(routes, func(r netip.Prefix) bool { return r.Bits() == 0 }) {
 		if !m.fullTunnel {
-			return nil, nil, netcfg.ErrFullTunnelUnsupported
+			return nil, nil, "", netcfg.ErrFullTunnelUnsupported
 		}
-		t, err := m.pickTable(attempt)
-		if err != nil {
-			return nil, nil, err
+		if m.pickTable != nil {
+			t, err := m.pickTable(attempt)
+			if err != nil {
+				return nil, nil, "", err
+			}
+			mark = t
 		}
-		mark = t
 	}
 	rt, err := m.resolveTunnel(attempt, cfg, mark)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	if err := attempt.Err(); err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	key := &remoteKey{ref: id.Ref, pub: id.PublicKey, uid: c.uid, find: m.agentFor, life: life}
 
@@ -1027,17 +1106,17 @@ func (m *Manager) build(attempt, life context.Context, cfg *config.Tunnel, c can
 	}
 	tdev, cfgr, err := m.tun(cfg.Name, mtu)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	iface, err := tdev.Name()
 	if err != nil {
 		tdev.Close()
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	dev := device.NewDevice(tdev, m.bind(), device.NewLogger(device.LogLevelError, fmt.Sprintf("latchwire(%s): ", cfg.Name)))
-	fail := func(err error) (*device.Device, netcfg.Configurer, error) {
+	fail := func(err error) (*device.Device, netcfg.Configurer, string, error) {
 		m.closeDevice(dev, cfgr)
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	if err := m.ops.setStaticKey(dev, wgadapter.New(key, wgadapter.DefaultLimits)); err != nil {
 		return fail(err)
@@ -1050,14 +1129,14 @@ func (m *Manager) build(attempt, life context.Context, cfg *config.Tunnel, c can
 		return fail(err)
 	}
 	plan := netcfg.Plan{Iface: iface, Addresses: id.Addresses, Routes: routes, MTU: mtu,
-		Endpoints: resolvedEndpoints(rt), FwMark: mark}
+		MTUAuto: cfg.MTU == 0, Endpoints: resolvedEndpoints(rt), FwMark: mark}
 	if _, err := cfgr.Apply(attempt, plan); err != nil {
 		return fail(err)
 	}
 	if err := m.ops.up(dev); err != nil {
 		return fail(err)
 	}
-	return dev, cfgr, nil
+	return dev, cfgr, iface, nil
 }
 
 // resolvedEndpoints returns the endpoints of a tunnel from resolveTunnel.
@@ -1142,7 +1221,7 @@ func (m *Manager) reap(t *tunnel) {
 		return
 	}
 	dev, cfgr := t.dev, t.cfgr
-	t.dev, t.cfgr = nil, nil
+	t.dev, t.cfgr, t.iface = nil, nil, ""
 	m.mu.Unlock()
 	m.closeDevice(dev, cfgr)
 }

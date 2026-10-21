@@ -22,7 +22,8 @@ type recorder struct {
 	cmds    []string
 	failOn  string
 	missing string
-	failErr error // returned by failOn; default "exit status 1"
+	failErr error            // returned by failOn; default "exit status 1"
+	fail    map[string]error // exact command line → its error
 	out     map[string]string
 	stdin   map[string]string
 	onRun   func(cmd string)
@@ -42,6 +43,9 @@ func (r *recorder) Run(_ context.Context, name string, args []string, in []byte)
 	}
 	if r.missing != "" && strings.HasPrefix(c, r.missing) {
 		return nil, fmt.Errorf("%s: %w", name, exec.ErrNotFound)
+	}
+	if err, ok := r.fail[c]; ok {
+		return nil, err
 	}
 	if r.failOn != "" && strings.HasPrefix(c, r.failOn) {
 		if r.failErr != nil {
@@ -162,18 +166,18 @@ func TestLinuxSkipsConnectedRoute(t *testing.T) {
 	}
 }
 
-// macOS still refuses a full tunnel (until Task 5); Linux supports it (see
-// TestFullTunnelNoLongerRejected).
+// A platform without a full-tunnel planner refuses a default route before
+// any command runs. (macOS and Linux both have one now.)
 func TestFullTunnelRejected(t *testing.T) {
 	for _, full := range []string{"0.0.0.0/0", "::/0"} {
 		r := &recorder{}
 		j, _ := newJournal(t)
-		_, err := newDarwin(r, j).Apply(ctx, plan("X", pfx("10.0.0.2/32"), pfx("10.0.0.0/24", full)))
+		_, err := newConfigurer(r, j, planDarwin, nil).Apply(ctx, plan("X", pfx("10.0.0.2/32"), pfx("10.0.0.0/24", full)))
 		if !errors.Is(err, ErrFullTunnelUnsupported) {
-			t.Errorf("darwin %s: err = %v, want ErrFullTunnelUnsupported", full, err)
+			t.Errorf("%s: err = %v, want ErrFullTunnelUnsupported", full, err)
 		}
 		if len(r.cmds) != 0 || len(j.Entries()) != 0 {
-			t.Errorf("darwin %s: commands ran %q or journal written %v", full, r.cmds, j.Entries())
+			t.Errorf("%s: commands ran %q or journal written %v", full, r.cmds, j.Entries())
 		}
 	}
 }

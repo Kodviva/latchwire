@@ -240,10 +240,17 @@ func rpScript(iface, name, mark string, addrs []netip.Prefix) []byte {
 }
 
 // alreadyUndone reports whether err from undo step s only says that what s
-// removes is already gone: "ip rule del" of a rule that does not exist
-// (ENOENT; the runner's environment fixes the C locale). Such an undo
-// succeeded. (The nft undo is idempotent by itself.)
+// removes is already gone (the runner's environment fixes the C locale):
+// "ip rule del" of a rule that does not exist (ENOENT), or macOS "route
+// delete" of a route that does not exist ("not in table", ESRCH). Such an
+// undo succeeded. (The nft undo is idempotent by itself.)
 func alreadyUndone(s Step, err error) bool {
-	return s.Name == "ip" && slices.Contains(s.Args, "rule") && slices.Contains(s.Args, "del") &&
-		strings.Contains(err.Error(), "No such file or directory")
+	switch s.Name {
+	case "ip":
+		return slices.Contains(s.Args, "rule") && slices.Contains(s.Args, "del") &&
+			strings.Contains(err.Error(), "No such file or directory")
+	case "route":
+		return slices.Contains(s.Args, "delete") && notInTable(err)
+	}
+	return false
 }

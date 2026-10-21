@@ -11,7 +11,8 @@ func undoOf(name string, args ...string) *Step {
 }
 
 // planDarwin: addresses are point-to-point on utun, routes point at the
-// interface. Setting the first address marks the interface up.
+// interface. Setting the first address marks the interface up. Default
+// routes (0.0.0.0/0, ::/0) are left to the full-tunnel plan.
 func planDarwin(p Plan) []step {
 	iface := p.Iface
 	var out []step
@@ -31,6 +32,9 @@ func planDarwin(p Plan) []step {
 	}
 	for _, r := range p.Routes {
 		r = r.Masked()
+		if r.Bits() == 0 {
+			continue
+		}
 		out = append(out, step{
 			do:   command("route", "-q", "-n", "add", family(r), r.String(), "-interface", iface),
 			undo: undoOf("route", "-q", "-n", "delete", family(r), r.String(), "-interface", iface),

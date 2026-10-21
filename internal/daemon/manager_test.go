@@ -35,6 +35,7 @@ import (
 	"github.com/Kodviva/latchwire/internal/keyprovider/softkey"
 	"github.com/Kodviva/latchwire/internal/keyref"
 	"github.com/Kodviva/latchwire/internal/netcfg"
+	"github.com/Kodviva/latchwire/internal/netmon"
 )
 
 const (
@@ -201,19 +202,33 @@ type recCfg struct {
 	addrs    []netip.Prefix
 	routes   []netip.Prefix
 	fwmark   uint32
+	mtuAuto  bool
 	applied  bool
 	removed  int
 	onRemove func()
+
+	refreshes  int
+	refreshErr error
+	onRefresh  func() // runs without c.mu
 }
 
 func (c *recCfg) Apply(_ context.Context, p netcfg.Plan) (netcfg.Applied, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.iface, c.addrs, c.routes, c.fwmark, c.applied = p.Iface, p.Addresses, p.Routes, p.FwMark, true
+	c.iface, c.addrs, c.routes, c.fwmark, c.mtuAuto, c.applied = p.Iface, p.Addresses, p.Routes, p.FwMark, p.MTUAuto, true
 	return netcfg.Applied{MTU: p.MTU, FullTunnel: p.FwMark != 0, Table: p.FwMark, RPFilter: p.FwMark != 0}, nil
 }
 
-func (c *recCfg) Refresh(context.Context) error { return nil }
+func (c *recCfg) Refresh(context.Context) error {
+	c.mu.Lock()
+	c.refreshes++
+	err, hook := c.refreshErr, c.onRefresh
+	c.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	return err
+}
 
 func (c *recCfg) Remove(context.Context) error {
 	c.mu.Lock()
@@ -412,6 +427,9 @@ func newEnv(t *testing.T, o envOpts) *env {
 		JournalPath: filepath.Join(dir, "journal.json"),
 		IsAdmin:     func(uid uint32) (bool, error) { return e.admin(uid), nil },
 	})
+	// No host network notifications: tests that need them inject theirs.
+	e.m.netSource = func() (netmon.Source, error) { return make(chanSource), nil }
+	e.m.netDebounce = 10 * time.Millisecond
 	if o.hook != nil {
 		o.hook(e.m)
 	}
@@ -620,6 +638,14 @@ func TestConnectAutoMTU(t *testing.T) {
 			e.waitCard(serialA, true)
 			if st := e.connect(); st.State != StateConnected {
 				t.Fatalf("connect state %q, want connected", st.State)
+			}
+			_, c := e.f.last()
+			c.mu.Lock()
+			auto := c.mtuAuto
+			c.mu.Unlock()
+			// Only an automatic MTU follows the network (Refresh).
+			if want := tc.mtu == ""; auto != want {
+				t.Errorf("Plan.MTUAuto = %v, want %v", auto, want)
 			}
 			e.f.mu.Lock()
 			defer e.f.mu.Unlock()
@@ -1790,10 +1816,25 @@ type fullTunnelEnv struct {
 
 func newFullTunnelEnv(t *testing.T, supported bool) *fullTunnelEnv {
 	t.Helper()
+	return newFullTunnelEnvWith(t, supported, true)
+}
+
+// newFullTunnelEnvTable is a supported full-tunnel environment; table says
+// whether the platform picks a routing table (Linux) or not (macOS).
+func newFullTunnelEnvTable(t *testing.T, table bool) *fullTunnelEnv {
+	t.Helper()
+	return newFullTunnelEnvWith(t, true, table)
+}
+
+func newFullTunnelEnvWith(t *testing.T, supported, table bool) *fullTunnelEnv {
+	t.Helper()
 	fe := &fullTunnelEnv{}
 	hook := func(m *Manager) {
 		m.fullTunnel = supported
-		m.pickTable = func(context.Context) (uint32, error) { return 51820, nil }
+		m.pickTable = nil
+		if table {
+			m.pickTable = func(context.Context) (uint32, error) { return 51820, nil }
+		}
 		m.resolve = func(_ context.Context, host string, mark uint32) ([]netip.Addr, error) {
 			fe.mu.Lock()
 			defer fe.mu.Unlock()
@@ -1878,8 +1919,8 @@ func TestSplitTunnelHasNoFwmark(t *testing.T) {
 	}
 }
 
-// Where full tunnels are not supported yet (macOS until Task 5) the connect
-// is refused before any device or lookup.
+// Where full tunnels are not supported the connect is refused before any
+// device or lookup.
 func TestFullTunnelRejectedWhereUnsupported(t *testing.T) {
 	fe := newFullTunnelEnv(t, false)
 	err := fe.call(ipc.MethodTunnelConnect, ipc.TunnelName{Name: tunName}, nil)

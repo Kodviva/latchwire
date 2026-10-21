@@ -1,7 +1,8 @@
 // Package netcfg configures a tunnel interface's addresses and routes by
 // running the platform's network commands (ifconfig/route on macOS, ip on
 // Linux). Linux routes full tunnels (0.0.0.0/0, ::/0) with fwmark policy
-// routing; macOS supports only split-tunnel routes for now. DNS comes later.
+// routing; macOS with /1 routes and endpoint host routes that follow the
+// default gateway (Refresh). DNS comes later.
 //
 // Every change to the system is written to a Journal before it is made, so
 // that a crash leaves the commands that undo it; Cleanup runs them at start.
@@ -22,7 +23,7 @@ import (
 
 // ErrFullTunnelUnsupported is returned, before any command runs, when a route
 // is a default route (0.0.0.0/0 or ::/0) on a platform without full-tunnel
-// support yet (macOS).
+// support.
 var ErrFullTunnelUnsupported = errors.New(msg.NetFullTunnelUnsupported)
 
 // Runner runs one system command and returns its standard output. stdin may
@@ -42,12 +43,14 @@ const (
 
 // Plan is what to configure for one tunnel interface. FwMark, for a full
 // tunnel on Linux, is the routing table (and mark) to use; 0 = Apply picks
-// one.
+// one. MTUAuto says that MTU came from AutoMTU, so Refresh may change it
+// when the network changes (macOS).
 type Plan struct {
 	Iface     string
 	Addresses []netip.Prefix
 	Routes    []netip.Prefix
 	MTU       int
+	MTUAuto   bool
 	DNS       []netip.Addr
 	DNSSearch []string
 	DNSRole   DNSRole
@@ -67,7 +70,9 @@ type Applied struct {
 
 // Configurer sets up and removes one interface's network configuration.
 // Remove undoes what Apply did; it is a no-op when nothing is applied.
-// Refresh re-reads the system state the applied configuration depends on.
+// Refresh re-reads the system state the applied configuration depends on
+// (the default gateway, the automatic MTU) and changes the configuration
+// only when that state changed. The three are serialized.
 type Configurer interface {
 	Apply(ctx context.Context, p Plan) (Applied, error)
 	Refresh(ctx context.Context) error
@@ -76,11 +81,14 @@ type Configurer interface {
 
 // step is one command and the command that undoes it (nil: nothing to undo).
 // missing, when set, makes a command that is not installed (exec.ErrNotFound)
-// no failure: the message is logged and the step skipped.
+// no failure: the message is logged and the step skipped. hostRoute marks a
+// macOS endpoint host route: Refresh moves it, and a route to the endpoint
+// that exists already is left alone (the step is skipped).
 type step struct {
-	do      Step
-	undo    *Step
-	missing string
+	do        Step
+	undo      *Step
+	missing   string
+	hostRoute bool
 }
 
 // planner turns a Plan into the commands for one platform.
@@ -91,10 +99,11 @@ type planner func(p Plan) []step
 type fullPlanner func(ctx context.Context, r Runner, p Plan) ([]step, uint32, error)
 
 type configurer struct {
-	run  Runner
-	j    *Journal // nil: nothing is journaled
-	plan planner
-	full fullPlanner // nil: full tunnels are not supported
+	run     Runner
+	j       *Journal // nil: nothing is journaled
+	plan    planner
+	full    fullPlanner                     // nil: full tunnels are not supported
+	refresh func(ctx context.Context) error // nil: Refresh does nothing; called with mu held
 
 	mu      sync.Mutex
 	owner   string
@@ -102,6 +111,7 @@ type configurer struct {
 	// carried are persistent undo steps an earlier configurer of the same
 	// owner could not run; they stay journaled ahead of this one's.
 	carried []Step
+	dn      darwinFollow // macOS: what Refresh follows
 }
 
 func newConfigurer(r Runner, j *Journal, p planner, full fullPlanner) *configurer {
@@ -123,6 +133,7 @@ func (c *configurer) Apply(ctx context.Context, p Plan) (Applied, error) {
 	if err := c.retryLocked(ctx); err != nil {
 		return Applied{}, err
 	}
+	c.dn = darwinFollow{iface: p.Iface, mtu: p.MTU, mtuAuto: p.MTUAuto}
 	res := Applied{MTU: p.MTU, FullTunnel: full}
 	steps := c.plan(p)
 	if full {
@@ -133,37 +144,67 @@ func (c *configurer) Apply(ctx context.Context, p Plan) (Applied, error) {
 		steps = append(steps, fs...)
 		res.Table = table
 	}
-	undo := slices.Clone(c.carried)
 	for _, s := range steps {
-		// The undo step reaches the journal before the change it undoes.
-		if s.undo != nil && c.j != nil {
-			undo = append(undo, *s.undo)
-			if err := c.j.Record(c.owner, undo); err != nil {
-				c.rollbackLocked(ctx)
-				return Applied{}, err
-			}
-		}
-		if err := c.exec(ctx, s.do); err != nil {
-			if s.missing != "" && errors.Is(err, exec.ErrNotFound) {
-				log.Print(s.missing)
-				if s.undo != nil && c.j != nil {
-					undo = undo[:len(undo)-1]
-					if err := c.j.Record(c.owner, undo); err != nil {
-						c.rollbackLocked(ctx)
-						return Applied{}, err
-					}
-				}
-				continue
-			}
+		ran, err := c.applyStepLocked(ctx, s)
+		if err != nil {
 			c.rollbackLocked(ctx)
 			return Applied{}, err
 		}
-		c.applied = append(c.applied, s)
-		if s.do.Name == "nft" && full {
+		if ran && s.do.Name == "nft" && full {
 			res.RPFilter = true
 		}
 	}
 	return res, nil
+}
+
+// undoListLocked is what the journal holds for the owner: the carried steps,
+// then the undo steps of what is applied (apply order).
+func (c *configurer) undoListLocked() []Step {
+	undo := slices.Clone(c.carried)
+	for _, s := range c.applied {
+		if s.undo != nil {
+			undo = append(undo, *s.undo)
+		}
+	}
+	return undo
+}
+
+// recordLocked journals undoListLocked.
+func (c *configurer) recordLocked() error {
+	if c.j == nil {
+		return nil
+	}
+	return c.j.Record(c.owner, c.undoListLocked())
+}
+
+// applyStepLocked journals s's undo, then runs s and adds it to the applied
+// steps. A step skipped as allowed (a missing optional command, an existing
+// host route) reports ran false and leaves its undo out of the journal. On
+// failure the journal may still hold s's undo; the caller rolls back or
+// re-records.
+func (c *configurer) applyStepLocked(ctx context.Context, s step) (ran bool, err error) {
+	// The undo step reaches the journal before the change it undoes.
+	if s.undo != nil && c.j != nil {
+		if err := c.j.Record(c.owner, append(c.undoListLocked(), *s.undo)); err != nil {
+			return false, err
+		}
+	}
+	if err := c.exec(ctx, s.do); err != nil {
+		switch {
+		case s.missing != "" && errors.Is(err, exec.ErrNotFound):
+			log.Print(s.missing)
+		case s.hostRoute && routeExists(err):
+			logExistingRoute(s.do)
+		default:
+			return false, err
+		}
+		if s.undo != nil {
+			return false, c.recordLocked()
+		}
+		return false, nil
+	}
+	c.applied = append(c.applied, s)
+	return true, nil
 }
 
 // retryLocked runs, in reverse, the undo steps the journal still holds for
@@ -181,7 +222,7 @@ func (c *configurer) retryLocked(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := c.exec(ctx, old[i]); err != nil && old[i].Persistent && ctx.Err() == nil && !alreadyUndone(old[i], err) {
+		if err := runUndo(ctx, c.run, old[i]); err != nil && old[i].Persistent && ctx.Err() == nil {
 			c.carried = append(c.carried, old[i])
 		}
 	}
@@ -189,8 +230,21 @@ func (c *configurer) retryLocked(ctx context.Context) error {
 	return ctx.Err()
 }
 
-// Refresh does nothing yet: split tunnels depend on no system state.
-func (c *configurer) Refresh(ctx context.Context) error { return nil }
+// Refresh re-reads the network state the applied configuration follows and
+// updates it; see the platform's refresh. Linux has none: its full tunnel
+// does not depend on the gateway, and its automatic MTU, read from the
+// endpoint's route, would see the tunnel's own table once it is up.
+func (c *configurer) Refresh(ctx context.Context) error {
+	if c.refresh == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.applied) == 0 {
+		return nil
+	}
+	return c.refresh(ctx)
+}
 
 // Remove undoes the applied steps. Callers close the tunnel device first,
 // which takes the interface, its addresses and its routes with it, so those
@@ -220,20 +274,15 @@ func (c *configurer) rollbackLocked(ctx context.Context) {
 // failed, or nothing. When ctx ends it stops and leaves the journal as it
 // is: the failures of a cancelled run say nothing about the system.
 func (c *configurer) undoLocked(ctx context.Context) error {
-	all := slices.Clone(c.carried)
-	for _, s := range c.applied {
-		if s.undo != nil {
-			all = append(all, *s.undo)
-		}
-	}
-	c.applied, c.carried = nil, nil
+	all := c.undoListLocked()
+	c.applied, c.carried, c.dn = nil, nil, darwinFollow{}
 	var first error
 	var keep []Step
 	for i := len(all) - 1; i >= 0; i-- {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := c.exec(ctx, all[i]); err != nil && !alreadyUndone(all[i], err) {
+		if err := runUndo(ctx, c.run, all[i]); err != nil {
 			if first == nil {
 				first = err
 			}
@@ -276,7 +325,10 @@ func family(p netip.Prefix) string {
 }
 
 func newDarwin(r Runner, j *Journal) Configurer {
-	return newConfigurer(r, j, planDarwin, nil)
+	c := newConfigurer(r, j, planDarwin, nil)
+	c.full = c.darwinFullTunnel
+	c.refresh = c.refreshDarwin
+	return c
 }
 
 func newLinux(r Runner, j *Journal) Configurer {
