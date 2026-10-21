@@ -274,7 +274,13 @@ func (c *configurer) retryLocked(ctx context.Context) error {
 		}
 	}
 	slices.Reverse(c.carried)
-	return ctx.Err()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// A DNS undo left behind by this owner's earlier Remove ran: the
+	// ownership it kept is free (P13).
+	releasePrimaryDNSUnless(c.owner, c.carried)
+	return nil
 }
 
 // Refresh re-reads the network state the applied configuration follows and
@@ -304,7 +310,13 @@ func (c *configurer) Remove(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if len(c.applied) == 0 {
-		c.releasePrimaryDNS()
+		// A DNS undo a cancelled or failed Remove left in the journal
+		// keeps the ownership (P13).
+		var left []Step
+		if c.j != nil {
+			left = c.j.Entries()[c.owner]
+		}
+		releasePrimaryDNSUnless(c.owner, left)
 		return nil
 	}
 	return c.undoLocked(ctx)
@@ -324,11 +336,13 @@ func (c *configurer) rollbackLocked(ctx context.Context) {
 func (c *configurer) undoLocked(ctx context.Context) error {
 	all := c.undoListLocked()
 	c.applied, c.carried, c.dn = nil, nil, darwinFollow{}
-	c.releasePrimaryDNS()
 	var first error
 	var keep []Step
 	for i := len(all) - 1; i >= 0; i-- {
 		if err := ctx.Err(); err != nil {
+			// The journal still holds every step: a DNS undo among
+			// them keeps the ownership (P13).
+			releasePrimaryDNSUnless(c.owner, all)
 			return err
 		}
 		if err := runUndo(ctx, c.run, all[i]); err != nil {
@@ -341,8 +355,13 @@ func (c *configurer) undoLocked(ctx context.Context) error {
 		}
 	}
 	if err := ctx.Err(); err != nil {
+		releasePrimaryDNSUnless(c.owner, all)
 		return err
 	}
+	// The DNS undo ran (or found nothing of Latchwire's to restore), or
+	// it failed and stays journaled for a retry: only then is the
+	// primary DNS free for another tunnel (P13).
+	releasePrimaryDNSUnless(c.owner, keep)
 	if c.j == nil {
 		return first
 	}
@@ -359,9 +378,14 @@ func (c *configurer) undoLocked(ctx context.Context) error {
 	return first
 }
 
-// primaryDNS is the configurer whose DNS answers every name (DNSPrimary):
-// at most one per process (P12), from its Apply until its Remove or
-// rollback.
+// primaryDNS is the tunnel whose DNS answers every name (DNSPrimary): at
+// most one per process (P12). The configurer claims it in Apply; it stays
+// claimed, under its interface name, until that tunnel's DNS undo has run
+// (or found nothing of Latchwire's left) (P13). A DNS undo that fails, or
+// a Remove cut short by its context, leaves the undo journaled and the
+// ownership held, so no other tunnel writes the DNS while the original is
+// not back; the retry of that journaled undo (the owner's next Apply, or
+// Cleanup) releases it.
 var primaryDNS struct {
 	mu    sync.Mutex
 	owner *configurer
@@ -369,7 +393,7 @@ var primaryDNS struct {
 }
 
 // claimPrimaryDNS makes c the DNSPrimary owner, or reports the interface
-// of the configurer that is.
+// of the tunnel that is.
 func (c *configurer) claimPrimaryDNS(iface string) (holder string, ok bool) {
 	primaryDNS.mu.Lock()
 	defer primaryDNS.mu.Unlock()
@@ -380,13 +404,37 @@ func (c *configurer) claimPrimaryDNS(iface string) (holder string, ok bool) {
 	return "", true
 }
 
-// releasePrimaryDNS gives up the DNSPrimary ownership if c holds it.
+// releasePrimaryDNS gives up the DNSPrimary ownership if c holds it; for
+// an Apply that failed before any DNS change.
 func (c *configurer) releasePrimaryDNS() {
 	primaryDNS.mu.Lock()
 	defer primaryDNS.mu.Unlock()
 	if primaryDNS.owner == c {
 		primaryDNS.owner, primaryDNS.iface = nil, ""
 	}
+}
+
+// releasePrimaryDNSUnless frees the DNSPrimary ownership held for the
+// interface owner unless left, the undo steps still journaled for it,
+// holds a DNS undo.
+func releasePrimaryDNSUnless(owner string, left []Step) {
+	if slices.ContainsFunc(left, isDNSUndo) {
+		return
+	}
+	primaryDNS.mu.Lock()
+	defer primaryDNS.mu.Unlock()
+	if primaryDNS.owner != nil && primaryDNS.iface == owner {
+		primaryDNS.owner, primaryDNS.iface = nil, ""
+	}
+}
+
+// isDNSUndo reports whether s undoes a DNS change.
+func isDNSUndo(s Step) bool {
+	switch s.Name {
+	case scutilCmd, "resolvectl", "resolvconf":
+		return true
+	}
+	return false
 }
 
 func (c *configurer) exec(ctx context.Context, s Step) error {

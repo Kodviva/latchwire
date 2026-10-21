@@ -260,14 +260,20 @@ func Cleanup(ctx context.Context, r Runner, j *Journal, keep func(owner string) 
 			continue
 		}
 		steps := entries[o]
+		var failed []Step
 		for i := len(steps) - 1; i >= 0 && ctx.Err() == nil; i-- {
 			if err := runUndo(ctx, r, steps[i]); err != nil {
 				errs = append(errs, fmt.Errorf("cleanup %s: %w", o, err))
+				failed = append(failed, steps[i])
 			}
 		}
 		if err := ctx.Err(); err != nil {
 			return errors.Join(append(errs, err)...)
 		}
+		// A DNSPrimary ownership kept for o (its DNS undo failed in
+		// this process, P13) ends when the undo ran. (Cleanup runs at
+		// service start, before any tunnel: there is normally none.)
+		releasePrimaryDNSUnless(o, failed)
 		if err := j.Forget(o); err != nil {
 			errs = append(errs, err)
 		}

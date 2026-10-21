@@ -33,6 +33,8 @@ type fakeStore struct {
 	rec     recorder
 	// setErr, when set, is printed by every "set" instead of storing.
 	setErr string
+	// onScript, when set, sees each scutil script before it runs.
+	onScript func(script string)
 }
 
 // newFakeStore also frees the process-wide DNSPrimary ownership (P12), now
@@ -62,6 +64,9 @@ func (f *fakeStore) Run(c2 context.Context, name string, args []string, in []byt
 		return nil, fmt.Errorf("scutil with arguments %q", args)
 	}
 	f.scripts = append(f.scripts, string(in))
+	if f.onScript != nil {
+		f.onScript(string(in))
+	}
 	var out strings.Builder
 	var cur fdict
 	for line := range strings.Lines(string(in)) {
@@ -832,4 +837,149 @@ func captureLog(t *testing.T) *strings.Builder {
 	log.SetOutput(&b)
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 	return &b
+}
+
+// otherPrimary is a second DNSPrimary tunnel's plan (P12/P13 tests).
+func otherPrimary() Plan {
+	p := darwinDNSPlan(DNSPrimary)
+	p.Iface, p.Addresses = "utun8", pfx("10.9.0.2/32")
+	p.DNS = []netip.Addr{netip.MustParseAddr("10.9.0.1")}
+	return p
+}
+
+// P13: while the owner's Remove is still restoring the original, another
+// tunnel cannot take the primary DNS.
+func TestDarwinDNSOwnershipHeldDuringUndo(t *testing.T) {
+	f := newFakeStore(t)
+	f.setPrimary(svc1)
+	orig := fdict{"ServerAddresses": arr("192.168.1.1")}
+	f.keys[dnsKey(svc1)] = maps2(orig)
+	j, _ := newJournal(t)
+	a, b := newDarwin(f, j), newDarwin(f, j)
+	if _, err := a.Apply(ctx, darwinDNSPlan(DNSPrimary)); err != nil {
+		t.Fatal(err)
+	}
+	var mid Applied
+	var midErr error
+	ran := false
+	f.onScript = func(script string) {
+		if ran || !strings.HasPrefix(script, "# expect") {
+			return
+		}
+		ran = true
+		f.onScript = nil
+		mid, midErr = b.Apply(ctx, otherPrimary())
+	}
+	if err := a.Remove(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !ran {
+		t.Fatal("the DNS undo never ran")
+	}
+	if midErr != nil || mid.DNS != DNSOutcomePrimaryBusy {
+		t.Fatalf("Apply during the owner's undo: %+v %v, want primary-busy", mid, midErr)
+	}
+	if !reflect.DeepEqual(f.keys[dnsKey(svc1)], orig) {
+		t.Errorf("restored %v, want %v", f.keys[dnsKey(svc1)], orig)
+	}
+	// Restored: released.
+	if err := b.Remove(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := b.Apply(ctx, otherPrimary()); err != nil || res.DNS != DNSOutcomeScutilPrimary {
+		t.Fatalf("after the undo: %+v %v", res, err)
+	}
+}
+
+// P13: a DNS undo that fails stays journaled and keeps the ownership,
+// until its retry succeeds: at the owner's next Apply, or in Cleanup.
+func TestDarwinDNSOwnershipHeldUntilRetry(t *testing.T) {
+	for _, retry := range []string{"apply", "cleanup"} {
+		t.Run(retry, func(t *testing.T) {
+			f := newFakeStore(t)
+			f.setPrimary(svc1)
+			orig := fdict{"ServerAddresses": arr("192.168.1.1")}
+			f.keys[dnsKey(svc1)] = maps2(orig)
+			j, _ := newJournal(t)
+			a, b := newDarwin(f, j), newDarwin(f, j)
+			if _, err := a.Apply(ctx, darwinDNSPlan(DNSPrimary)); err != nil {
+				t.Fatal(err)
+			}
+			f.setErr = "  set: Permission denied"
+			if err := a.Remove(ctx); err == nil {
+				t.Fatal("failing undo: no error")
+			}
+			if len(scutilUndos(j, "utun7")) != 1 {
+				t.Fatalf("DNS undo not kept: %v", j.Entries())
+			}
+			f.setErr = ""
+			if res, err := b.Apply(ctx, otherPrimary()); err != nil || res.DNS != DNSOutcomePrimaryBusy {
+				t.Fatalf("while the undo is pending: %+v %v", res, err)
+			}
+			if err := b.Remove(ctx); err != nil {
+				t.Fatal(err)
+			}
+			switch retry {
+			case "apply":
+				// The owner's next Apply retries the journaled undo
+				// (here without DNS of its own).
+				a2 := newDarwin(f, j)
+				if _, err := a2.Apply(ctx, plan("utun7", pfx("10.0.0.2/32"), nil)); err != nil {
+					t.Fatal(err)
+				}
+			case "cleanup":
+				if err := Cleanup(ctx, f, j, func(o string) bool { return o != "utun7" }); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if !reflect.DeepEqual(f.keys[dnsKey(svc1)], orig) {
+				t.Errorf("restored %v, want %v", f.keys[dnsKey(svc1)], orig)
+			}
+			if res, err := b.Apply(ctx, otherPrimary()); err != nil || res.DNS != DNSOutcomeScutilPrimary {
+				t.Fatalf("after the retry: %+v %v", res, err)
+			}
+		})
+	}
+}
+
+// P13: Remove on a cancelled context runs no undo; the ownership stays.
+func TestDarwinDNSOwnershipHeldOnCancelledRemove(t *testing.T) {
+	f := newFakeStore(t)
+	f.setPrimary(svc1)
+	j, _ := newJournal(t)
+	a, b := newDarwin(f, j), newDarwin(f, j)
+	if _, err := a.Apply(ctx, darwinDNSPlan(DNSPrimary)); err != nil {
+		t.Fatal(err)
+	}
+	cctx, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := a.Remove(cctx); err == nil {
+		t.Fatal("cancelled Remove: no error")
+	}
+	if res, err := b.Apply(ctx, otherPrimary()); err != nil || res.DNS != DNSOutcomePrimaryBusy {
+		t.Fatalf("after a cancelled Remove: %+v %v", res, err)
+	}
+	// A second Remove has nothing applied, but the undo is still
+	// journaled: still held.
+	if err := a.Remove(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Remove(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := b.Apply(ctx, otherPrimary()); err != nil || res.DNS != DNSOutcomePrimaryBusy {
+		t.Fatalf("after a no-op Remove: %+v %v", res, err)
+	}
+	if err := b.Remove(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newDarwin(f, j).Apply(ctx, plan("utun7", pfx("10.0.0.2/32"), nil)); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := f.keys[dnsKey(svc1)]; ok {
+		t.Error("the retried undo did not remove the key")
+	}
+	if res, err := b.Apply(ctx, otherPrimary()); err != nil || res.DNS != DNSOutcomeScutilPrimary {
+		t.Fatalf("after the retry: %+v %v", res, err)
+	}
 }
