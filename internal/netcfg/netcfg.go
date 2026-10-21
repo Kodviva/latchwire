@@ -2,7 +2,7 @@
 // running the platform's network commands (ifconfig/route on macOS, ip on
 // Linux). Linux routes full tunnels (0.0.0.0/0, ::/0) with fwmark policy
 // routing; macOS with /1 routes and endpoint host routes that follow the
-// default gateway (Refresh). DNS comes later.
+// default gateway (Refresh). DNS goes through systemd-resolved or resolvconf (Linux).
 //
 // Every change to the system is written to a Journal before it is made, so
 // that a crash leaves the commands that undo it; Cleanup runs them at start.
@@ -61,12 +61,15 @@ type Plan struct {
 
 // Applied reports what Apply put in place. Table is a full tunnel's routing
 // table (Linux). RPFilter reports whether a full tunnel got its reverse-path
-// filter (false when nft is not installed).
+// filter (false when nft is not installed). DNS says how the tunnel's DNS
+// servers were applied (Linux: a DNSOutcome value; "" where Apply does not
+// handle DNS).
 type Applied struct {
 	MTU        int
 	FullTunnel bool
 	Table      uint32
 	RPFilter   bool
+	DNS        string
 }
 
 // Configurer sets up and removes one interface's network configuration.
@@ -95,6 +98,11 @@ type step struct {
 // planner turns a Plan into the commands for one platform.
 type planner func(p Plan) []step
 
+// dnsPlanner returns the steps that apply p's DNS and how (Applied.DNS). It
+// may read system state through r, changes none, and fails with
+// ErrDNSUnsupported when the DNS cannot be applied.
+type dnsPlanner func(ctx context.Context, r Runner, p Plan) ([]step, string, error)
+
 // fullPlanner returns the extra steps of a full tunnel and its table. It may
 // read system state through r.
 type fullPlanner func(ctx context.Context, r Runner, p Plan) ([]step, uint32, error)
@@ -105,6 +113,7 @@ type configurer struct {
 	plan    planner
 	full    fullPlanner                     // nil: full tunnels are not supported
 	refresh func(ctx context.Context) error // nil: Refresh does nothing; called with mu held
+	dns     dnsPlanner                      // nil: DNS is not applied
 
 	mu      sync.Mutex
 	owner   string
@@ -145,6 +154,17 @@ func (c *configurer) Apply(ctx context.Context, p Plan) (Applied, error) {
 		}
 		steps = append(steps, fs...)
 		res.Table = table
+	}
+	// DNS goes last: its commands need the interface to exist and be up.
+	// Its system reads happen before the first change, so an unsupported
+	// system fails Apply with nothing to undo.
+	if c.dns != nil {
+		ds, how, err := c.dns(ctx, c.run, p)
+		if err != nil {
+			return Applied{}, err
+		}
+		steps = append(steps, ds...)
+		res.DNS = how
 	}
 	for _, s := range steps {
 		ran, err := c.applyStepLocked(ctx, s)
@@ -345,5 +365,9 @@ func newDarwin(r Runner, j *Journal) Configurer {
 }
 
 func newLinux(r Runner, j *Journal) Configurer {
-	return newConfigurer(r, j, planLinux, linuxFullTunnel)
+	c := newConfigurer(r, j, planLinux, linuxFullTunnel)
+	c.dns = func(ctx context.Context, r Runner, p Plan) ([]step, string, error) {
+		return linuxDNS(ctx, r, resolvConfPath, p)
+	}
+	return c
 }

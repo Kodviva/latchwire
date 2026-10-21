@@ -203,6 +203,9 @@ type recCfg struct {
 	routes   []netip.Prefix
 	fwmark   uint32
 	mtuAuto  bool
+	dns      []netip.Addr
+	dnsSrch  []string
+	dnsRole  netcfg.DNSRole
 	applied  bool
 	removed  int
 	onRemove func()
@@ -216,6 +219,7 @@ func (c *recCfg) Apply(_ context.Context, p netcfg.Plan) (netcfg.Applied, error)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.iface, c.addrs, c.routes, c.fwmark, c.mtuAuto, c.applied = p.Iface, p.Addresses, p.Routes, p.FwMark, p.MTUAuto, true
+	c.dns, c.dnsSrch, c.dnsRole = p.DNS, p.DNSSearch, p.DNSRole
 	return netcfg.Applied{MTU: p.MTU, FullTunnel: p.FwMark != 0, Table: p.FwMark, RPFilter: p.FwMark != 0}, nil
 }
 
@@ -1932,5 +1936,40 @@ func TestFullTunnelRejectedWhereUnsupported(t *testing.T) {
 	defer fe.mu.Unlock()
 	if len(fe.marks) != 0 {
 		t.Errorf("endpoint resolved %d times, want 0", len(fe.marks))
+	}
+}
+
+// The tunnel's DNS servers and search domains reach the Configurer, as the
+// primary resolver; a tunnel without a DNS line sets none.
+func TestDaemonPassesDNSToConfigurer(t *testing.T) {
+	for _, tc := range []struct {
+		line string
+		want netcfg.DNSRole
+	}{
+		{"DNS = 10.0.0.1, corp.example\n", netcfg.DNSPrimary},
+		{"", netcfg.DNSNone},
+	} {
+		e := newEnv(t, envOpts{present: []uint32{serialA}})
+		srv := newServer(t, e.b.pub(serialA), "10.0.0.2")
+		cfg := e.config([]keyref.Ref{refA}, []string{"10.0.0.2"}, srv, "")
+		cfg = strings.Replace(cfg, "MTU = 1420\n", "MTU = 1420\n"+tc.line, 1)
+		e.add(cfg)
+		e.waitCard(serialA, true)
+		if st := e.connect(); st.State != StateConnected {
+			t.Fatalf("%q: connect state %q", tc.line, st.State)
+		}
+		_, rc := e.f.last()
+		rc.mu.Lock()
+		dns, srch, role := rc.dns, rc.dnsSrch, rc.dnsRole
+		rc.mu.Unlock()
+		if role != tc.want {
+			t.Errorf("%q: role %v, want %v", tc.line, role, tc.want)
+		}
+		if tc.line != "" && (len(dns) != 1 || dns[0].String() != "10.0.0.1" || !slices.Equal(srch, []string{"corp.example"})) {
+			t.Errorf("DNS %v search %v", dns, srch)
+		}
+		if tc.line == "" && len(dns) != 0 {
+			t.Errorf("DNS %v without a DNS line", dns)
+		}
 	}
 }

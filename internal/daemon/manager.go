@@ -1132,7 +1132,8 @@ func (m *Manager) build(attempt, life context.Context, cfg *config.Tunnel, c can
 		return fail(err)
 	}
 	plan := netcfg.Plan{Iface: iface, Addresses: id.Addresses, Routes: routes, MTU: mtu,
-		MTUAuto: cfg.MTU == 0, Endpoints: resolvedEndpoints(rt), FwMark: mark}
+		MTUAuto: cfg.MTU == 0, Endpoints: resolvedEndpoints(rt), FwMark: mark,
+		DNS: cfg.DNS, DNSSearch: cfg.DNSSearch, DNSRole: dnsRole(cfg)}
 	if _, err := cfgr.Apply(attempt, plan); err != nil {
 		return fail(err)
 	}
@@ -1140,6 +1141,15 @@ func (m *Manager) build(attempt, life context.Context, cfg *config.Tunnel, c can
 		return fail(err)
 	}
 	return dev, cfgr, iface, nil
+}
+
+// dnsRole is how cfg's DNS servers take part in name resolution. Until
+// split DNS arrives they answer every name.
+func dnsRole(cfg *config.Tunnel) netcfg.DNSRole {
+	if len(cfg.DNS) == 0 {
+		return netcfg.DNSNone
+	}
+	return netcfg.DNSPrimary
 }
 
 // resolvedEndpoints returns the endpoints of a tunnel from resolveTunnel.
@@ -1255,7 +1265,7 @@ func userErr(err error) error {
 	switch {
 	case errors.As(err, &ie):
 		return ie
-	case errors.Is(err, netcfg.ErrFullTunnelUnsupported):
+	case errors.Is(err, netcfg.ErrFullTunnelUnsupported), errors.Is(err, netcfg.ErrDNSUnsupported):
 		return &ipc.Error{Code: ipc.CodeBadRequest, Message: err.Error()}
 	case errors.Is(err, context.Canceled):
 		return errAborted

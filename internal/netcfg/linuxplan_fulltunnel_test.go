@@ -226,7 +226,7 @@ func TestFullTunnelNoLongerRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := (Applied{FullTunnel: true, Table: 51821, RPFilter: true}); a != want {
+	if want := (Applied{FullTunnel: true, Table: 51821, RPFilter: true, DNS: DNSOutcomeNone}); a != want {
 		t.Errorf("Applied = %+v, want %+v", a, want)
 	}
 	want := []string{

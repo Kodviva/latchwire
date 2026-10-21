@@ -249,6 +249,8 @@ func alreadyUndone(s Step, err error) bool {
 	case "ip":
 		return slices.Contains(s.Args, "rule") && slices.Contains(s.Args, "del") &&
 			strings.Contains(err.Error(), "No such file or directory")
+	case "resolvectl", "resolvconf":
+		return dnsUndoneAlready(s, err)
 	case "route":
 		return slices.Contains(s.Args, "delete") && notInTable(err)
 	}

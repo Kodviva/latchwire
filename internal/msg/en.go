@@ -80,7 +80,12 @@ const (
 	// interface.
 	NetEndpointRouteLoopFmt = "a route to the endpoint %s already leads into the tunnel interface %s, so the tunnel could not reach its peer; remove the route or keep the endpoint address out of AllowedIPs"
 	// NetNoRPFilterFmt takes the interface name.
-	NetNoRPFilterFmt = "nft is not installed: the full tunnel on %s runs without its reverse-path filter (packets addressed to the tunnel that arrive on other interfaces are not dropped); install nftables to enable it"
+	NetNoRPFilterFmt  = "nft is not installed: the full tunnel on %s runs without its reverse-path filter (packets addressed to the tunnel that arrive on other interfaces are not dropped); install nftables to enable it"
+	NetDNSUnsupported = "the tunnel sets DNS servers, but this system has neither systemd-resolved nor resolvconf to apply them; install one, or remove the DNS line from the tunnel configuration"
+	// NetDNSScopedUnsupportedFmt takes the interface name.
+	NetDNSScopedUnsupportedFmt = "DNS for %s is limited to its search domains, which resolvconf cannot do: the tunnel's DNS servers are not applied; use systemd-resolved to enable them"
+	// NetBadSearchDomainFmt takes the search domain.
+	NetBadSearchDomainFmt = "invalid DNS search domain %q"
 )
 
 // Tunnel daemon. None of these formats take key material or a PIN.
