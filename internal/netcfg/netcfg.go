@@ -2,14 +2,16 @@
 // running the platform's network commands (ifconfig/route on macOS, ip on
 // Linux). Only split-tunnel routes are supported for now; DNS and full-tunnel
 // routing come later.
+//
+// Every change to the system is written to a Journal before it is made, so
+// that a crash leaves the commands that undo it; Cleanup runs them at start.
 package netcfg
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/netip"
-	"strconv"
-	"strings"
 	"sync"
 
 	"github.com/Kodviva/latchwire/internal/msg"
@@ -19,66 +21,137 @@ import (
 // is a default route (0.0.0.0/0 or ::/0).
 var ErrFullTunnelUnsupported = errors.New(msg.NetFullTunnelUnsupported)
 
+// Runner runs one system command and returns its standard output. stdin may
+// be nil. Arguments must never carry secrets; stdin may.
+type Runner interface {
+	Run(ctx context.Context, name string, args []string, stdin []byte) ([]byte, error)
+}
+
+// DNSRole says how a tunnel's DNS servers take part in name resolution.
+type DNSRole int
+
+const (
+	DNSNone    DNSRole = iota // the tunnel sets no DNS
+	DNSPrimary                // its servers answer every name
+	DNSScoped                 // its servers answer only DNSSearch domains
+)
+
+// Plan is what to configure for one tunnel interface.
+type Plan struct {
+	Iface     string
+	Addresses []netip.Prefix
+	Routes    []netip.Prefix
+	MTU       int
+	DNS       []netip.Addr
+	DNSSearch []string
+	DNSRole   DNSRole
+	Endpoints []netip.AddrPort
+	FwMark    uint32
+}
+
+// Applied reports what Apply put in place.
+type Applied struct {
+	MTU        int
+	FullTunnel bool
+	Table      uint32
+}
+
 // Configurer sets up and removes one interface's network configuration.
 // Remove undoes what Apply did; it is a no-op when nothing is applied.
+// Refresh re-reads the system state the applied configuration depends on.
 type Configurer interface {
-	Apply(iface string, addrs, routes []netip.Prefix) error
-	Remove() error
+	Apply(ctx context.Context, p Plan) (Applied, error)
+	Refresh(ctx context.Context) error
+	Remove(ctx context.Context) error
 }
 
 // step is one command and the command that undoes it (nil: nothing to undo).
 type step struct {
-	do, undo []string
+	do   Step
+	undo *Step
 }
 
-// planner turns a configuration into the commands for one platform.
-type planner func(iface string, addrs, routes []netip.Prefix) []step
+// planner turns a Plan into the commands for one platform.
+type planner func(p Plan) []step
 
 type configurer struct {
-	run  func(name string, args ...string) error
+	run  Runner
+	j    *Journal // nil: nothing is journaled
 	plan planner
 
 	mu      sync.Mutex
+	owner   string
 	applied []step // undo order is reverse
 }
 
-func newConfigurer(run func(string, ...string) error, p planner) *configurer {
-	return &configurer{run: run, plan: p}
+func newConfigurer(r Runner, j *Journal, p planner) *configurer {
+	return &configurer{run: r, j: j, plan: p}
 }
 
-func (c *configurer) Apply(iface string, addrs, routes []netip.Prefix) error {
-	for _, r := range routes {
+func (c *configurer) Apply(ctx context.Context, p Plan) (Applied, error) {
+	for _, r := range p.Routes {
 		if r.Bits() == 0 {
-			return ErrFullTunnelUnsupported
+			return Applied{}, ErrFullTunnelUnsupported
 		}
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if len(c.applied) > 0 {
-		return errors.New(msg.NetAlreadyApplied)
+		return Applied{}, errors.New(msg.NetAlreadyApplied)
 	}
-	for _, s := range c.plan(iface, addrs, routes) {
-		if err := c.exec(s.do); err != nil {
-			c.removeLocked()
-			return err
+	c.owner = p.Iface
+	var undo []Step
+	for _, s := range c.plan(p) {
+		// The undo step reaches the journal before the change it undoes.
+		if s.undo != nil && c.j != nil {
+			undo = append(undo, *s.undo)
+			if err := c.j.Record(c.owner, undo); err != nil {
+				c.rollbackLocked(ctx)
+				return Applied{}, err
+			}
+		}
+		if err := c.exec(ctx, s.do); err != nil {
+			c.rollbackLocked(ctx)
+			return Applied{}, err
 		}
 		c.applied = append(c.applied, s)
 	}
-	return nil
+	return Applied{MTU: p.MTU}, nil
 }
 
-func (c *configurer) Remove() error {
+// Refresh does nothing yet: split tunnels depend on no system state.
+func (c *configurer) Refresh(ctx context.Context) error { return nil }
+
+func (c *configurer) Remove(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.removeLocked()
+	if len(c.applied) == 0 {
+		return nil
+	}
+	err := c.undoLocked(ctx)
+	if err == nil && c.j != nil {
+		err = c.j.Forget(c.owner)
+	}
+	return err
 }
 
-// removeLocked undoes every applied step, reporting the first failure.
-func (c *configurer) removeLocked() error {
+// rollbackLocked undoes a failed Apply. It must finish even when ctx is
+// cancelled (the usual reason an Apply fails late), so it does not use ctx's
+// cancellation. The owner's record goes either way: the commands that
+// remain are not worth a retry at the next start.
+func (c *configurer) rollbackLocked(ctx context.Context) {
+	c.undoLocked(context.WithoutCancel(ctx))
+	if c.j != nil {
+		c.j.Forget(c.owner)
+	}
+}
+
+// undoLocked undoes every applied step, reporting the first failure.
+func (c *configurer) undoLocked(ctx context.Context) error {
 	var first error
 	for i := len(c.applied) - 1; i >= 0; i-- {
 		if u := c.applied[i].undo; u != nil {
-			if err := c.exec(u); err != nil && first == nil {
+			if err := c.exec(ctx, *u); err != nil && first == nil {
 				first = err
 			}
 		}
@@ -87,9 +160,9 @@ func (c *configurer) removeLocked() error {
 	return first
 }
 
-func (c *configurer) exec(cmd []string) error {
-	if err := c.run(cmd[0], cmd[1:]...); err != nil {
-		return fmt.Errorf("%s: %w", strings.Join(cmd, " "), err)
+func (c *configurer) exec(ctx context.Context, s Step) error {
+	if _, err := c.run.Run(ctx, s.Name, s.Args, s.Stdin); err != nil {
+		return fmt.Errorf("%s: %w", s, err)
 	}
 	return nil
 }
@@ -101,66 +174,10 @@ func family(p netip.Prefix) string {
 	return "-inet6"
 }
 
-// planDarwin: addresses are point-to-point on utun, routes point at the
-// interface. Setting the first address marks the interface up.
-func planDarwin(iface string, addrs, routes []netip.Prefix) []step {
-	var out []step
-	for _, a := range addrs {
-		ip := a.Addr().String()
-		if a.Addr().Is4() {
-			out = append(out, step{
-				do:   []string{"ifconfig", iface, "inet", ip, ip, "alias"},
-				undo: []string{"ifconfig", iface, "inet", ip, "-alias"},
-			})
-		} else {
-			out = append(out, step{
-				do:   []string{"ifconfig", iface, "inet6", ip, "prefixlen", strconv.Itoa(a.Bits()), "alias"},
-				undo: []string{"ifconfig", iface, "inet6", ip, "-alias"},
-			})
-		}
-	}
-	for _, r := range routes {
-		r = r.Masked()
-		out = append(out, step{
-			do:   []string{"route", "-q", "-n", "add", family(r), r.String(), "-interface", iface},
-			undo: []string{"route", "-q", "-n", "delete", family(r), r.String(), "-interface", iface},
-		})
-	}
-	return out
+func newDarwin(r Runner, j *Journal) Configurer {
+	return newConfigurer(r, j, planDarwin)
 }
 
-// planLinux: an address with a prefix shorter than the host length already
-// installs its connected route, so that route is not added again.
-func planLinux(iface string, addrs, routes []netip.Prefix) []step {
-	var out []step
-	connected := map[netip.Prefix]bool{}
-	for _, a := range addrs {
-		out = append(out, step{
-			do:   []string{"ip", "address", "add", a.String(), "dev", iface},
-			undo: []string{"ip", "address", "del", a.String(), "dev", iface},
-		})
-		if a.Bits() < a.Addr().BitLen() {
-			connected[a.Masked()] = true
-		}
-	}
-	out = append(out, step{do: []string{"ip", "link", "set", iface, "up"}})
-	for _, r := range routes {
-		r = r.Masked()
-		if connected[r] {
-			continue
-		}
-		out = append(out, step{
-			do:   []string{"ip", "route", "add", r.String(), "dev", iface},
-			undo: []string{"ip", "route", "del", r.String(), "dev", iface},
-		})
-	}
-	return out
-}
-
-func newDarwin(run func(string, ...string) error) Configurer {
-	return newConfigurer(run, planDarwin)
-}
-
-func newLinux(run func(string, ...string) error) Configurer {
-	return newConfigurer(run, planLinux)
+func newLinux(r Runner, j *Journal) Configurer {
+	return newConfigurer(r, j, planLinux)
 }

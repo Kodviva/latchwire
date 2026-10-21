@@ -205,14 +205,16 @@ type recCfg struct {
 	onRemove func()
 }
 
-func (c *recCfg) Apply(iface string, addrs, routes []netip.Prefix) error {
+func (c *recCfg) Apply(_ context.Context, p netcfg.Plan) (netcfg.Applied, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.iface, c.addrs, c.routes, c.applied = iface, addrs, routes, true
-	return nil
+	c.iface, c.addrs, c.routes, c.applied = p.Iface, p.Addresses, p.Routes, true
+	return netcfg.Applied{MTU: p.MTU}, nil
 }
 
-func (c *recCfg) Remove() error {
+func (c *recCfg) Refresh(context.Context) error { return nil }
+
+func (c *recCfg) Remove(context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.removed++
@@ -403,7 +405,9 @@ func newEnv(t *testing.T, o envOpts) *env {
 		Socket:   e.socket,
 		StoreDir: e.store,
 		TUN:      e.f.make,
-		IsAdmin:  func(uid uint32) (bool, error) { return e.admin(uid), nil },
+		// Never the host's journal.
+		JournalPath: filepath.Join(dir, "journal.json"),
+		IsAdmin:     func(uid uint32) (bool, error) { return e.admin(uid), nil },
 	})
 	if o.hook != nil {
 		o.hook(e.m)
@@ -1618,5 +1622,70 @@ func TestAdminTriesOwnAgentsAcrossAllIdentitiesFirst(t *testing.T) {
 	}
 	if fb.x25519s.Load() < 1 {
 		t.Fatal("B's agent did not get the proof")
+	}
+}
+
+// cmdRunner records the commands the daemon's startup cleanup runs.
+type cmdRunner struct {
+	mu   sync.Mutex
+	cmds []string
+}
+
+func (r *cmdRunner) Run(_ context.Context, name string, args []string, _ []byte) ([]byte, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.cmds = append(r.cmds, strings.Join(append([]string{name}, args...), " "))
+	return nil, nil
+}
+
+// Journal entries left by a crashed daemon are undone before Serve listens,
+// and are gone from the journal afterwards.
+func TestServeCleansJournalAtStart(t *testing.T) {
+	dir := t.TempDir()
+	jpath := filepath.Join(dir, "run", "journal.json")
+	j, err := netcfg.OpenJournal(jpath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := j.Record("office", []netcfg.Step{
+		{Name: "ip", Args: []string{"address", "del", "10.0.0.2/32", "dev", "office"}},
+		{Name: "ip", Args: []string{"route", "del", "10.0.0.0/24", "dev", "office"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r := &cmdRunner{}
+	sock := filepath.Join(dir, "s")
+	m := NewManager(Options{Socket: sock, StoreDir: filepath.Join(dir, "tunnels"), JournalPath: jpath, Runner: r,
+		TUN: (&netFactory{}).make})
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() { served <- m.Serve(ctx) }()
+	t.Cleanup(func() { cancel(); <-served })
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c, err := ipc.Dial(sock)
+		if err == nil {
+			c.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("daemon socket: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	r.mu.Lock()
+	got := slices.Clone(r.cmds)
+	r.mu.Unlock()
+	want := []string{"ip route del 10.0.0.0/24 dev office", "ip address del 10.0.0.2/32 dev office"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("startup cleanup ran %q, want %q", got, want)
+	}
+	j2, err := netcfg.OpenJournal(jpath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e := j2.Entries(); len(e) != 0 {
+		t.Fatalf("journal after startup: %v, want empty", e)
 	}
 }

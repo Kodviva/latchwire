@@ -75,20 +75,29 @@ type Options struct {
 	TUN      TUNFactory // DefaultTUN
 	Bind     func() conn.Bind
 	IsAdmin  func(uid uint32) (bool, error) // nil = ipc.IsAdmin
+	// JournalPath is the file that records system changes for cleanup after
+	// a crash; empty = netcfg.DefaultJournalPath.
+	JournalPath string
+	// Runner runs the system commands of the default TUN factory and of
+	// the startup cleanup; nil = netcfg.ExecRunner().
+	Runner netcfg.Runner
 }
 
-// DefaultTUN creates a kernel TUN device (utunN on macOS, the tunnel's name
-// on Linux) configured with the platform's network commands.
-func DefaultTUN(name string, mtu int) (tun.Device, netcfg.Configurer, error) {
-	ifname := name
-	if runtime.GOOS == "darwin" {
-		ifname = "utun"
+// DefaultTUN returns the factory that creates kernel TUN devices (utunN on
+// macOS, the tunnel's name on Linux) configured with the platform's network
+// commands, run by r and journaled in j.
+func DefaultTUN(r netcfg.Runner, j *netcfg.Journal) TUNFactory {
+	return func(name string, mtu int) (tun.Device, netcfg.Configurer, error) {
+		ifname := name
+		if runtime.GOOS == "darwin" {
+			ifname = "utun"
+		}
+		d, err := tun.CreateTUN(ifname, mtu)
+		if err != nil {
+			return nil, nil, err
+		}
+		return d, netcfg.New(r, j), nil
 	}
-	d, err := tun.CreateTUN(ifname, mtu)
-	if err != nil {
-		return nil, nil, err
-	}
-	return d, netcfg.New(netcfg.Exec), nil
 }
 
 // devOps are the device calls whose order matters (R7); tests wrap them.
@@ -110,7 +119,9 @@ var defaultOps = devOps{
 type Manager struct {
 	socket  string
 	store   *store
-	tun     TUNFactory
+	tun     TUNFactory // nil until Serve: the default needs the journal
+	runner  netcfg.Runner
+	jpath   string
 	bind    func() conn.Bind
 	isAdmin func(uint32) (bool, error)
 	resolve func(ctx context.Context, host string) ([]netip.Addr, error)
@@ -174,6 +185,8 @@ func NewManager(o Options) *Manager {
 		socket:     o.Socket,
 		store:      &store{dir: o.StoreDir},
 		tun:        o.TUN,
+		runner:     o.Runner,
+		jpath:      o.JournalPath,
 		bind:       o.Bind,
 		isAdmin:    o.IsAdmin,
 		ops:        defaultOps,
@@ -191,8 +204,11 @@ func NewManager(o Options) *Manager {
 	if m.store.dir == "" {
 		m.store.dir = DefaultStoreDir()
 	}
-	if m.tun == nil {
-		m.tun = DefaultTUN
+	if m.runner == nil {
+		m.runner = netcfg.ExecRunner()
+	}
+	if m.jpath == "" {
+		m.jpath = netcfg.DefaultJournalPath
 	}
 	if m.bind == nil {
 		m.bind = conn.NewDefaultBind
@@ -223,6 +239,17 @@ func (m *Manager) Serve(ctx context.Context) error {
 	m.mu.Lock()
 	m.ctx = ctx
 	m.mu.Unlock()
+	// Undo what a crashed run left in the system before anything is loaded.
+	j, err := netcfg.OpenJournal(m.jpath)
+	if err != nil {
+		return err
+	}
+	if err := netcfg.Cleanup(ctx, m.runner, j, nil); err != nil {
+		log.Printf("daemon: cleaning up after the previous run: %v", err)
+	}
+	if m.tun == nil {
+		m.tun = DefaultTUN(m.runner, j)
+	}
 	if err := m.load(); err != nil {
 		return err
 	}
@@ -1001,7 +1028,7 @@ func (m *Manager) build(attempt, life context.Context, cfg *config.Tunnel, c can
 	if err := m.ops.ipcSet(dev, rt.UAPI()); err != nil {
 		return fail(err)
 	}
-	if err := cfgr.Apply(iface, id.Addresses, routes); err != nil {
+	if _, err := cfgr.Apply(attempt, netcfg.Plan{Iface: iface, Addresses: id.Addresses, Routes: routes, MTU: mtu}); err != nil {
 		return fail(err)
 	}
 	if err := m.ops.up(dev); err != nil {
@@ -1091,7 +1118,7 @@ func (m *Manager) reap(t *tunnel) {
 // and only logged in debug mode.
 func (m *Manager) closeDevice(dev *device.Device, cfgr netcfg.Configurer) {
 	m.ops.close(dev)
-	if err := cfgr.Remove(); err != nil {
+	if err := cfgr.Remove(context.Background()); err != nil {
 		debugf("daemon: removing routes after close: %v", err)
 	}
 }

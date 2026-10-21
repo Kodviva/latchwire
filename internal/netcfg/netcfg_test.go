@@ -1,27 +1,35 @@
 package netcfg
 
 import (
+	"context"
 	"errors"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 )
 
 // recorder records commands instead of running them. failOn makes the
-// command whose rendering starts with it fail.
+// command whose rendering starts with it fail. onRun, if set, sees every
+// command before it is recorded.
 type recorder struct {
 	cmds   []string
 	failOn string
+	onRun  func(cmd string)
 }
 
-func (r *recorder) run(name string, args ...string) error {
+func (r *recorder) Run(_ context.Context, name string, args []string, _ []byte) ([]byte, error) {
 	c := strings.Join(append([]string{name}, args...), " ")
+	if r.onRun != nil {
+		r.onRun(c)
+	}
 	r.cmds = append(r.cmds, c)
 	if r.failOn != "" && strings.HasPrefix(c, r.failOn) {
-		return errors.New("exit status 1")
+		return nil, errors.New("exit status 1")
 	}
-	return nil
+	return nil, nil
 }
 
 func pfx(s ...string) []netip.Prefix {
@@ -32,10 +40,30 @@ func pfx(s ...string) []netip.Prefix {
 	return out
 }
 
+func plan(iface string, addrs, routes []netip.Prefix) Plan {
+	return Plan{Iface: iface, Addresses: addrs, Routes: routes}
+}
+
+func newJournal(t *testing.T) (*Journal, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "run", "journal.json")
+	j, err := OpenJournal(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return j, path
+}
+
+type factory func(Runner, *Journal) Configurer
+
+var platforms = map[string]factory{"darwin": newDarwin, "linux": newLinux}
+
+var ctx = context.Background()
+
 func TestDarwinApplyCommands(t *testing.T) {
 	r := &recorder{}
-	c := newDarwin(r.run)
-	if err := c.Apply("utun7", pfx("10.0.0.2/32"), pfx("10.0.0.0/24")); err != nil {
+	c := newDarwin(r, nil)
+	if _, err := c.Apply(ctx, plan("utun7", pfx("10.0.0.2/32"), pfx("10.0.0.0/24"))); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
@@ -49,12 +77,12 @@ func TestDarwinApplyCommands(t *testing.T) {
 
 func TestDarwinApplyIPv6AndRemove(t *testing.T) {
 	r := &recorder{}
-	c := newDarwin(r.run)
-	if err := c.Apply("utun3", pfx("fd00::2/128"), pfx("fd00::/64", "10.0.0.1/32")); err != nil {
+	c := newDarwin(r, nil)
+	if _, err := c.Apply(ctx, plan("utun3", pfx("fd00::2/128"), pfx("fd00::/64", "10.0.0.1/32"))); err != nil {
 		t.Fatal(err)
 	}
 	r.cmds = nil
-	if err := c.Remove(); err != nil {
+	if err := c.Remove(ctx); err != nil {
 		t.Fatal(err)
 	}
 	// Everything Apply did is undone in reverse order.
@@ -67,15 +95,15 @@ func TestDarwinApplyIPv6AndRemove(t *testing.T) {
 		t.Fatalf("remove commands:\n%q\nwant:\n%q", r.cmds, want)
 	}
 	r.cmds = nil
-	if err := c.Remove(); err != nil || len(r.cmds) != 0 {
+	if err := c.Remove(ctx); err != nil || len(r.cmds) != 0 {
 		t.Fatalf("second Remove: err=%v cmds=%q, want no-op", err, r.cmds)
 	}
 }
 
 func TestLinuxApplyCommands(t *testing.T) {
 	r := &recorder{}
-	c := newLinux(r.run)
-	if err := c.Apply("X", pfx("10.0.0.2/32"), pfx("10.0.0.0/24")); err != nil {
+	c := newLinux(r, nil)
+	if _, err := c.Apply(ctx, plan("X", pfx("10.0.0.2/32"), pfx("10.0.0.0/24"))); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
@@ -87,7 +115,7 @@ func TestLinuxApplyCommands(t *testing.T) {
 		t.Fatalf("commands:\n%q\nwant:\n%q", r.cmds, want)
 	}
 	r.cmds = nil
-	if err := c.Remove(); err != nil {
+	if err := c.Remove(ctx); err != nil {
 		t.Fatal(err)
 	}
 	want = []string{"ip route del 10.0.0.0/24 dev X", "ip address del 10.0.0.2/32 dev X"}
@@ -100,8 +128,8 @@ func TestLinuxApplyCommands(t *testing.T) {
 // it again would fail with "File exists".
 func TestLinuxSkipsConnectedRoute(t *testing.T) {
 	r := &recorder{}
-	c := newLinux(r.run)
-	if err := c.Apply("X", pfx("10.0.0.2/24"), pfx("10.0.0.0/24", "10.1.0.0/16")); err != nil {
+	c := newLinux(r, nil)
+	if _, err := c.Apply(ctx, plan("X", pfx("10.0.0.2/24"), pfx("10.0.0.0/24", "10.1.0.0/16"))); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
@@ -116,16 +144,15 @@ func TestLinuxSkipsConnectedRoute(t *testing.T) {
 
 func TestFullTunnelRejected(t *testing.T) {
 	for _, full := range []string{"0.0.0.0/0", "::/0"} {
-		for name, c := range map[string]func(func(string, ...string) error) Configurer{
-			"darwin": newDarwin, "linux": newLinux,
-		} {
+		for name, f := range platforms {
 			r := &recorder{}
-			err := c(r.run).Apply("X", pfx("10.0.0.2/32"), pfx("10.0.0.0/24", full))
+			j, _ := newJournal(t)
+			_, err := f(r, j).Apply(ctx, plan("X", pfx("10.0.0.2/32"), pfx("10.0.0.0/24", full)))
 			if !errors.Is(err, ErrFullTunnelUnsupported) {
 				t.Errorf("%s %s: err = %v, want ErrFullTunnelUnsupported", name, full, err)
 			}
-			if len(r.cmds) != 0 {
-				t.Errorf("%s %s: commands ran: %q", name, full, r.cmds)
+			if len(r.cmds) != 0 || len(j.Entries()) != 0 {
+				t.Errorf("%s %s: commands ran %q or journal written %v", name, full, r.cmds, j.Entries())
 			}
 		}
 	}
@@ -134,8 +161,8 @@ func TestFullTunnelRejected(t *testing.T) {
 // A failing command rolls back what was already applied and is reported.
 func TestApplyFailureRollsBack(t *testing.T) {
 	r := &recorder{failOn: "ip route add 10.1.0.0/16"}
-	c := newLinux(r.run)
-	err := c.Apply("X", pfx("10.0.0.2/32"), pfx("10.0.0.0/24", "10.1.0.0/16"))
+	c := newLinux(r, nil)
+	_, err := c.Apply(ctx, plan("X", pfx("10.0.0.2/32"), pfx("10.0.0.0/24", "10.1.0.0/16")))
 	if err == nil {
 		t.Fatal("Apply succeeded, want error")
 	}
@@ -156,7 +183,307 @@ func TestApplyFailureRollsBack(t *testing.T) {
 }
 
 func TestNewPicksPlatform(t *testing.T) {
-	if New((&recorder{}).run) == nil {
+	if New(&recorder{}, nil) == nil {
 		t.Fatal("New returned nil")
+	}
+}
+
+// Apply must reach the journal before the first command runs, so a crash in
+// the middle leaves the undo steps behind.
+func TestApplyRecordsUndoBeforeRunning(t *testing.T) {
+	for name, f := range platforms {
+		j, path := newJournal(t)
+		var atFirst map[string][]Step
+		first := true
+		r := &recorder{onRun: func(string) {
+			if first {
+				first = false
+				// A fresh Journal from disk: what a crash would leave.
+				j2, err := OpenJournal(path)
+				if err != nil {
+					t.Errorf("%s: reopening journal: %v", name, err)
+					return
+				}
+				atFirst = j2.Entries()
+			}
+		}}
+		if _, err := f(r, j).Apply(ctx, plan("X", pfx("10.0.0.2/32"), pfx("10.0.0.0/24"))); err != nil {
+			t.Fatal(err)
+		}
+		if len(atFirst["X"]) == 0 {
+			t.Errorf("%s: journal empty when the first command ran: %v", name, atFirst)
+		}
+		// After the whole Apply the journal holds every undo step, in
+		// apply order.
+		var got []string
+		for _, s := range j.Entries()["X"] {
+			got = append(got, s.String())
+		}
+		var want []string
+		if name == "darwin" {
+			want = []string{
+				"ifconfig X inet 10.0.0.2 -alias",
+				"route -q -n delete -inet 10.0.0.0/24 -interface X",
+			}
+		} else {
+			want = []string{
+				"ip address del 10.0.0.2/32 dev X",
+				"ip route del 10.0.0.0/24 dev X",
+			}
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: journal steps:\n%q\nwant:\n%q", name, got, want)
+		}
+	}
+}
+
+func TestApplyRollsBackOnFailureAndForgets(t *testing.T) {
+	j, _ := newJournal(t)
+	r := &recorder{failOn: "ip route add"}
+	c := newLinux(r, j)
+	if _, err := c.Apply(ctx, plan("X", pfx("10.0.0.2/32"), pfx("10.0.0.0/24"))); err == nil {
+		t.Fatal("Apply succeeded, want error")
+	}
+	// The third command (route add) failed; the first (address add) is
+	// undone, the second (link up) has nothing to undo.
+	want := []string{
+		"ip address add 10.0.0.2/32 dev X",
+		"ip link set X up",
+		"ip route add 10.0.0.0/24 dev X",
+		"ip address del 10.0.0.2/32 dev X",
+	}
+	if !reflect.DeepEqual(r.cmds, want) {
+		t.Fatalf("commands:\n%q\nwant:\n%q", r.cmds, want)
+	}
+	if e := j.Entries(); len(e) != 0 {
+		t.Fatalf("journal after rollback: %v, want empty", e)
+	}
+}
+
+func TestRemoveForgetsOwner(t *testing.T) {
+	j, _ := newJournal(t)
+	c := newLinux(&recorder{}, j)
+	if _, err := c.Apply(ctx, plan("X", pfx("10.0.0.2/32"), pfx("10.0.0.0/24"))); err != nil {
+		t.Fatal(err)
+	}
+	if len(j.Entries()["X"]) == 0 {
+		t.Fatal("journal empty after Apply")
+	}
+	if err := c.Remove(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if e := j.Entries(); len(e) != 0 {
+		t.Fatalf("journal after Remove: %v, want empty", e)
+	}
+}
+
+// A cancelled context must not stop the rollback of a failed Apply.
+func TestRollbackSurvivesCancelledContext(t *testing.T) {
+	c, cancel := context.WithCancel(ctx)
+	r := &ctxRecorder{}
+	r.failOn = "ip route add"
+	r.onRun = func(string) { cancel() }
+	if _, err := newLinux(r, nil).Apply(c, plan("X", pfx("10.0.0.2/32"), pfx("10.0.0.0/24"))); err == nil {
+		t.Fatal("Apply succeeded, want error")
+	}
+	if r.undoCtxErr != nil {
+		t.Fatalf("rollback ran with a cancelled context: %v", r.undoCtxErr)
+	}
+	if len(r.cmds) == 0 || r.cmds[len(r.cmds)-1] != "ip address del 10.0.0.2/32 dev X" {
+		t.Fatalf("rollback did not run: %q", r.cmds)
+	}
+}
+
+type ctxRecorder struct {
+	recorder
+	undoCtxErr error
+}
+
+func (r *ctxRecorder) Run(c context.Context, name string, args []string, stdin []byte) ([]byte, error) {
+	if name == "ip" && len(args) > 1 && args[1] == "del" && c.Err() != nil {
+		r.undoCtxErr = c.Err()
+	}
+	return r.recorder.Run(c, name, args, stdin)
+}
+
+func TestCleanupRemovesOrphans(t *testing.T) {
+	j, path := newJournal(t)
+	if err := j.Record("office", []Step{
+		{Name: "ip", Args: []string{"address", "del", "10.0.0.2/32", "dev", "office"}},
+		{Name: "ip", Args: []string{"route", "del", "10.0.0.0/24", "dev", "office"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// A new process: open the journal from disk.
+	j2, err := OpenJournal(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &recorder{}
+	if err := Cleanup(ctx, r, j2, func(string) bool { return false }); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"ip route del 10.0.0.0/24 dev office",
+		"ip address del 10.0.0.2/32 dev office",
+	}
+	if !reflect.DeepEqual(r.cmds, want) {
+		t.Fatalf("commands:\n%q\nwant:\n%q", r.cmds, want)
+	}
+	if e := j2.Entries(); len(e) != 0 {
+		t.Fatalf("journal after Cleanup: %v", e)
+	}
+	j3, err := OpenJournal(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e := j3.Entries(); len(e) != 0 {
+		t.Fatalf("journal file after Cleanup: %v", e)
+	}
+}
+
+// keep nil claims nothing, and one failing step does not stop the rest nor
+// keep the record.
+func TestCleanupNilKeepAndFailingStep(t *testing.T) {
+	j, _ := newJournal(t)
+	j.Record("a", []Step{{Name: "ip", Args: []string{"one"}}, {Name: "ip", Args: []string{"two"}}})
+	r := &recorder{failOn: "ip two"}
+	err := Cleanup(ctx, r, j, nil)
+	if err == nil {
+		t.Fatal("Cleanup error = nil, want the failing step reported")
+	}
+	if want := []string{"ip two", "ip one"}; !reflect.DeepEqual(r.cmds, want) {
+		t.Fatalf("commands %q, want %q", r.cmds, want)
+	}
+	if e := j.Entries(); len(e) != 0 {
+		t.Fatalf("journal after Cleanup: %v", e)
+	}
+}
+
+func TestCleanupKeepsWhenAsked(t *testing.T) {
+	j, path := newJournal(t)
+	steps := []Step{{Name: "ip", Args: []string{"link", "del", "office"}}}
+	j.Record("office", steps)
+	j.Record("home", []Step{{Name: "ip", Args: []string{"link", "del", "home"}}})
+	r := &recorder{}
+	if err := Cleanup(ctx, r, j, func(o string) bool { return o == "office" }); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"ip link del home"}; !reflect.DeepEqual(r.cmds, want) {
+		t.Fatalf("commands %q, want %q", r.cmds, want)
+	}
+	j2, err := OpenJournal(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := j2.Entries()
+	if len(e) != 1 || !reflect.DeepEqual(e["office"], steps) {
+		t.Fatalf("journal = %v, want only office untouched", e)
+	}
+}
+
+func TestJournalFileMode(t *testing.T) {
+	j, path := newJournal(t)
+	if err := j.Record("a", []Step{{Name: "ip", Args: []string{"x"}, Stdin: []byte("in")}}); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Errorf("journal mode %v, want 0600", fi.Mode().Perm())
+	}
+	di, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if di.Mode().Perm() != 0o700 {
+		t.Errorf("journal dir mode %v, want 0700", di.Mode().Perm())
+	}
+	// Atomic write: the temporary file was renamed away, nothing is left.
+	ents, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ents) != 1 || ents[0].Name() != "journal.json" {
+		t.Errorf("journal dir entries %v, want only journal.json", ents)
+	}
+	// Rewrites keep the mode and round-trip stdin.
+	if err := j.Record("b", nil); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
+		t.Errorf("rewritten journal mode %v, want 0600", fi.Mode().Perm())
+	}
+	j2, err := OpenJournal(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := j2.Entries()["a"]; len(got) != 1 || string(got[0].Stdin) != "in" {
+		t.Errorf("reloaded steps %v", got)
+	}
+}
+
+func TestOpenJournalCorrupt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "journal.json")
+	os.WriteFile(path, []byte("{nope"), 0o600)
+	if _, err := OpenJournal(path); err == nil {
+		t.Fatal("OpenJournal accepted a corrupt journal")
+	}
+}
+
+func TestPlanDarwinAndLinuxUnchanged(t *testing.T) {
+	p := plan("utun9", pfx("10.0.0.2/24", "fd00::2/128"), pfx("10.0.0.0/24", "10.1.0.5/16", "fd00::/64"))
+	render := func(ss []step) (do, undo []string) {
+		for _, s := range ss {
+			do = append(do, s.do.String())
+			if s.undo != nil {
+				undo = append(undo, s.undo.String())
+			}
+		}
+		return
+	}
+	do, undo := render(planDarwin(p))
+	wantDo := []string{
+		"ifconfig utun9 inet 10.0.0.2 10.0.0.2 alias",
+		"ifconfig utun9 inet6 fd00::2 prefixlen 128 alias",
+		"route -q -n add -inet 10.0.0.0/24 -interface utun9",
+		"route -q -n add -inet 10.1.0.0/16 -interface utun9",
+		"route -q -n add -inet6 fd00::/64 -interface utun9",
+	}
+	wantUndo := []string{
+		"ifconfig utun9 inet 10.0.0.2 -alias",
+		"ifconfig utun9 inet6 fd00::2 -alias",
+		"route -q -n delete -inet 10.0.0.0/24 -interface utun9",
+		"route -q -n delete -inet 10.1.0.0/16 -interface utun9",
+		"route -q -n delete -inet6 fd00::/64 -interface utun9",
+	}
+	if !reflect.DeepEqual(do, wantDo) || !reflect.DeepEqual(undo, wantUndo) {
+		t.Errorf("darwin:\ndo   %q\nundo %q", do, undo)
+	}
+	do, undo = render(planLinux(p))
+	wantDo = []string{
+		"ip address add 10.0.0.2/24 dev utun9",
+		"ip address add fd00::2/128 dev utun9",
+		"ip link set utun9 up",
+		"ip route add 10.1.0.0/16 dev utun9",
+		"ip route add fd00::/64 dev utun9",
+	}
+	wantUndo = []string{
+		"ip address del 10.0.0.2/24 dev utun9",
+		"ip address del fd00::2/128 dev utun9",
+		"ip route del 10.1.0.0/16 dev utun9",
+		"ip route del fd00::/64 dev utun9",
+	}
+	if !reflect.DeepEqual(do, wantDo) || !reflect.DeepEqual(undo, wantUndo) {
+		t.Errorf("linux:\ndo   %q\nundo %q", do, undo)
+	}
+}
+
+func TestRefreshIsNoOp(t *testing.T) {
+	r := &recorder{}
+	if err := newLinux(r, nil).Refresh(ctx); err != nil || len(r.cmds) != 0 {
+		t.Fatalf("Refresh: err=%v cmds=%q", err, r.cmds)
 	}
 }
