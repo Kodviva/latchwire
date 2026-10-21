@@ -1,0 +1,25 @@
+# Latchwire tunnel daemon (root): TUN devices, routes, rules, nftables,
+# DNS, kill switch.
+# Install: /etc/systemd/system/latchwire-daemon.service, then:
+#   systemctl enable --now latchwire-daemon.service
+# See docs/manual-install.md.
+#
+# No sandboxing options on purpose: the daemon needs /dev/net/tun, netlink,
+# nft, ip, sysctl writes under /proc/sys/net and writes to resolv.conf /
+# resolvconf / systemd-resolved, and options such as ProtectSystem=,
+# ProtectKernelTunables=, CapabilityBoundingSet= or NoNewPrivileges= (which
+# blocks SELinux domain transitions of the helpers it runs) can break those.
+# Hardening is left to Plan 5, with a real-system test.
+[Unit]
+Description=Latchwire WireGuard tunnel daemon
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/latchwire daemon
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

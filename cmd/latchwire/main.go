@@ -89,7 +89,7 @@ func defaultEnv() *env {
 		dial:    dialDaemon,
 		geteuid: os.Geteuid,
 		runAgent: func(ctx context.Context) error {
-			return agent.New(daemon.DefaultSocket, piv.Backend{}, agent.NewTTYPrompter(), agentPoll).Run(ctx)
+			return agent.New(daemon.DefaultSocket, piv.Backend{}, agent.NewPrompter(), agentPoll).Run(ctx)
 		},
 		runDaemon: func(ctx context.Context) error {
 			return daemon.NewManager(daemon.Options{}).Serve(ctx)

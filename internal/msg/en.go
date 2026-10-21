@@ -67,6 +67,16 @@ const (
 	AgentBadRequest      = "malformed request"
 	AgentLowOrderPeer    = "the peer public key is a low-order point"
 	AgentNoTTY           = "no terminal is available to ask for the PIN"
+	// PIN dialog shown when the agent has no terminal (osascript on macOS,
+	// pinentry on Linux). AgentPINDialogFmt takes the serial, the slot and
+	// the retries left.
+	AgentPINDialogFmt    = "Enter the PIN for YubiKey %d slot %02x (%d attempts left)."
+	AgentPINDialogTitle  = "Latchwire"
+	AgentPINDialogPrompt = "PIN"
+	AgentPINDialogOK     = "OK"
+	AgentPINDialogCancel = "Cancel"
+	AgentNoPinentry      = "no terminal is available to ask for the PIN and no pinentry program (pinentry, pinentry-gnome3, pinentry-qt or pinentry-curses in /usr/bin, /bin or /usr/local/bin) was found"
+	AgentNoPINDialog     = "no terminal is available to ask for the PIN and this system has no supported PIN dialog"
 	AgentRequestExpired  = "the request expired before the YubiKey could be used"
 	// AgentUntrustedDaemonFmt takes the uid of the socket's owner process.
 	AgentUntrustedDaemonFmt = "refusing the service socket: it is served by uid %d, not by root or this user"

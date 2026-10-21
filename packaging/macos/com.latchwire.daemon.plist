@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Latchwire tunnel daemon (root): TUN devices, routes, DNS, kill switch.
+  Install: /Library/LaunchDaemons/com.latchwire.daemon.plist (root:wheel 0644).
+  See docs/manual-install.md.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.latchwire.daemon</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/bin/latchwire</string>
+		<string>daemon</string>
+	</array>
+	<key>UserName</key>
+	<string>root</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/var/log/latchwire-daemon.log</string>
+	<key>StandardOutPath</key>
+	<string>/var/log/latchwire-daemon.log</string>
+</dict>
+</plist>

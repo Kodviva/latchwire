@@ -1,0 +1,15 @@
+# Latchwire user agent: holds the YubiKey and asks for its PIN (pinentry).
+# Install: /usr/lib/systemd/user/latchwire-agent.service, then as the user:
+#   systemctl --user enable --now latchwire-agent.service
+# See docs/manual-install.md.
+[Unit]
+Description=Latchwire user agent (YubiKey PIN prompts)
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/latchwire agent
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
