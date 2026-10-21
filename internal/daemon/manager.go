@@ -189,6 +189,12 @@ type Manager struct {
 	// was attempted and no release has succeeded since. Endpoint lookups
 	// behind them may fail in any way, so any failure may use the cache.
 	ksBlocking atomic.Bool
+	// ksNoEffect, when set, says why the blocking rules are in place (or
+	// wanted) but cannot take effect, which setting them again does not change
+	// (Verify or Set failed with ErrUnsupported: a macOS main ruleset
+	// without the com.apple anchor point). It is logged once when it
+	// starts and once when it ends, and status warns about it.
+	ksNoEffect atomic.Pointer[string]
 
 	// polMu serializes the writers of policy files (add, remove,
 	// tunnel.policy.set), so a change is never lost to a concurrent one.
@@ -900,6 +906,13 @@ func (m *Manager) status(t *tunnel) ipc.TunnelStatus {
 			warns = append(warns, msg.DaemonWarnNoRPFilter)
 		}
 		st.Warning = strings.Join(warns, "; ")
+	}
+	if why := m.ksNoEffect.Load(); why != nil && st.KillSwitch != ipc.KillSwitchStatusOff {
+		w := fmt.Sprintf(msg.DaemonWarnKillSwitchNoEffectFmt, *why)
+		if st.Warning != "" {
+			w += "; " + st.Warning
+		}
+		st.Warning = w
 	}
 	m.mu.Unlock()
 	if dev != nil {
@@ -2361,18 +2374,41 @@ func (m *Manager) setKillSwitchLocked(force bool) error {
 	defer cancel()
 	if err := fw.Set(ctx, s); err != nil {
 		m.ksLast = nil
-		log.Printf("daemon: kill switch (block %v): %v", s.Block, err)
+		if s.Block && errors.Is(err, killswitch.ErrUnsupported) {
+			m.noEffect(err)
+		} else {
+			log.Printf("daemon: kill switch (block %v): %v", s.Block, err)
+		}
 		return err
 	}
 	m.ksLast = &s
-	if !s.Block {
+	if s.Block {
+		m.inEffect() // Set checked that its rules are evaluated
+	} else {
 		m.released()
 	}
 	return nil
 }
 
+// noEffect notes that the kill switch cannot take effect (err, an
+// ErrUnsupported): logged when that starts, shown by status. m.ksMu is held.
+func (m *Manager) noEffect(err error) {
+	why := err.Error()
+	if m.ksNoEffect.Swap(&why) == nil {
+		log.Printf("daemon: WARNING: the kill switch is NOT in effect: %v; traffic is not blocked until this is fixed (checked every %v)", err, m.verifyEvery)
+	}
+}
+
+// inEffect notes that the kill switch takes effect (again). m.ksMu is held.
+func (m *Manager) inEffect() {
+	if m.ksNoEffect.Swap(nil) != nil {
+		log.Printf("daemon: the kill switch is in effect again")
+	}
+}
+
 // released notes that no kill switch is in place; m.ksMu is held.
 func (m *Manager) released() {
+	m.ksNoEffect.Store(nil)
 	m.ksBlocking.Store(false)
 	if err := m.store.removeKillSwitchTunnels(); err != nil {
 		log.Printf("daemon: kill switch: removing the record of its tunnels: %v", err)
@@ -2383,8 +2419,11 @@ func (m *Manager) released() {
 
 // verifyKillSwitch runs at the verification tick (P17). While the kill
 // switch should block, it asks the firewall whether the blocking is still
-// in effect (pf enabled with the anchor's rules, the nft table there) and
-// sets it again when not. A state whose Set failed is retried.
+// in effect (pf enabled with the anchor's rules and the main ruleset
+// evaluating the anchor, the nft table there) and sets it again when not. A
+// state whose Set failed is retried. Rules that are in place but cannot
+// take effect (Verify's ErrUnsupported) are not set again, which would not
+// help: that is logged once and shown by status until it is fixed.
 func (m *Manager) verifyKillSwitch(ctx context.Context) {
 	m.ksMu.Lock()
 	defer m.ksMu.Unlock()
@@ -2404,7 +2443,15 @@ func (m *Manager) verifyKillSwitch(ctx context.Context) {
 	vctx, cancel := context.WithTimeout(ctx, killSwitchTimeout)
 	defer cancel()
 	in, err := v.Verify(vctx)
-	if in || ctx.Err() != nil {
+	if ctx.Err() != nil {
+		return
+	}
+	if in {
+		m.inEffect()
+		return
+	}
+	if errors.Is(err, killswitch.ErrUnsupported) {
+		m.noEffect(err)
 		return
 	}
 	if err != nil {

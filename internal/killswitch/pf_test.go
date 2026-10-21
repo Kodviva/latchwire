@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Kodviva/latchwire/internal/msg"
 	"github.com/Kodviva/latchwire/internal/netcfg"
 )
 
@@ -421,6 +422,24 @@ func TestPfVerify(t *testing.T) {
 		if ok, err := f.Verify(context.Background()); ok != tc.want || err != nil {
 			t.Errorf("Verify(%.20q, %q) = %v, %v; want %v", tc.info, tc.anchor, ok, err, tc.want)
 		}
+	}
+	// A main ruleset that no longer evaluates com.apple/* (pfctl -f with
+	// a custom pf.conf): the anchor's rules are there but never used, and
+	// setting them again cannot help.
+	r.out["pfctl -s info"], r.out["pfctl -a com.apple/250.latchwire -sr"] = info, "block drop in quick all\n"
+	r.out["pfctl -sr"] = "pass all\n"
+	ok, err := f.Verify(context.Background())
+	if ok || !errors.Is(err, ErrUnsupported) || err.Error() != msg.KillSwitchPfNoAnchor {
+		t.Errorf("Verify without the anchor point = %v, %v; want false, ErrUnsupported", ok, err)
+	}
+	r.errs["pfctl -sr"] = errors.New("exit status 1")
+	if ok, err := f.Verify(context.Background()); ok || err == nil || errors.Is(err, ErrUnsupported) {
+		t.Errorf("Verify that cannot read the main ruleset = %v, %v", ok, err)
+	}
+	delete(r.errs, "pfctl -sr")
+	r.out["pfctl -sr"] = appleRuleset
+	if ok, err := f.Verify(context.Background()); !ok || err != nil {
+		t.Errorf("Verify with the anchor point back = %v, %v", ok, err)
 	}
 	r.errs["pfctl -s info"] = errors.New("exit status 1: pfctl: /dev/pf: Permission denied")
 	if ok, err := f.Verify(context.Background()); ok || err == nil {

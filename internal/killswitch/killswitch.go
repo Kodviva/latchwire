@@ -71,6 +71,9 @@ type State struct {
 // set is still in effect: something outside Latchwire may have disabled pf
 // (pfctl -d) or deleted the nft table. ok false asks for the state to be
 // set again; err says why the check itself failed (ok is then false too).
+// An err that is ErrUnsupported (errors.Is) says that the rules are in
+// place but cannot take effect, which setting them again does not change
+// (macOS: the main pf ruleset no longer evaluates the com.apple anchors).
 type Verifier interface {
 	Verify(ctx context.Context) (ok bool, err error)
 }

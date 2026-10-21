@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"net"
 	"net/netip"
 	"os"
@@ -37,13 +39,30 @@ type fakeFirewall struct {
 	err      error
 	lost     bool
 	verifies int
+	// verifyErr, when set, fails every Verify (ok false).
+	verifyErr error
 }
 
 func (f *fakeFirewall) Verify(context.Context) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.verifies++
+	if f.verifyErr != nil {
+		return false, f.verifyErr
+	}
 	return !f.lost, nil
+}
+
+func (f *fakeFirewall) setVerifyErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.verifyErr = err
+}
+
+func (f *fakeFirewall) verifyCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.verifies
 }
 
 func (f *fakeFirewall) lose() {
@@ -733,6 +752,63 @@ func TestVerifyTickReappliesKillSwitch(t *testing.T) {
 		t.Errorf("verified %d times while released", fe.fw.verifies-v)
 	}
 }
+
+// A kill switch whose rules are in place but cannot take effect (macOS: a
+// main pf ruleset without the com.apple anchor point) is not set again at
+// every tick, which would not help: it is logged once, and status warns
+// for every tunnel whose kill switch is on, until Verify sees it in effect
+// again.
+func TestVerifyTickKillSwitchNotInEffect(t *testing.T) {
+	logs := &syncBuffer{}
+	log.SetOutput(logs)
+	defer log.SetOutput(io.Discard)
+	fe := newFullTunnelEnvOpts(t, true, true, envOpts{verifyEvery: 20 * time.Millisecond})
+	fe.connect()
+	fe.fw.waitLast(t, "the tunnel passing", func(s killswitch.State) bool { return s.Block && len(s.Tunnels) == 1 && s.Tunnels[0].Iface != "" })
+	n := len(fe.fw.all())
+	why := errors.New(msg.KillSwitchPfNoAnchor)
+	fe.fw.setVerifyErr(fmt.Errorf("%w", unsupported(why)))
+	v := fe.fw.verifyCount()
+	deadline := time.Now().Add(5 * time.Second)
+	for fe.fw.verifyCount() < v+4 {
+		if time.Now().After(deadline) {
+			t.Fatal("the tick stopped verifying")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := len(fe.fw.all()); got != n {
+		t.Errorf("a kill switch that cannot take effect was set again: %+v", fe.fw.all()[n:])
+	}
+	const warning = "WARNING: the kill switch is NOT in effect"
+	if c := strings.Count(logs.String(), warning); c != 1 {
+		t.Errorf("logged %d times, want once:\n%s", c, logs.String())
+	}
+	wantWarn := fmt.Sprintf(msg.DaemonWarnKillSwitchNoEffectFmt, why)
+	if st := fe.status(); st.KillSwitch != ipc.KillSwitchStatusArmed || st.Warning != wantWarn {
+		t.Errorf("status %+v, want armed with %q", st, wantWarn)
+	}
+
+	// Fixed (pfctl -f /etc/pf.conf): the warning goes, logged once.
+	fe.fw.setVerifyErr(nil)
+	deadline = time.Now().Add(5 * time.Second)
+	for fe.status().Warning != "" {
+		if time.Now().After(deadline) {
+			t.Fatal("the warning stayed after the kill switch took effect again")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !strings.Contains(logs.String(), "the kill switch is in effect again") {
+		t.Errorf("the end is not logged:\n%s", logs.String())
+	}
+}
+
+// unsupported wraps err as killswitch.ErrUnsupported (errors.Is), as the
+// firewalls report what setting the rules again cannot fix.
+func unsupported(err error) error { return unsupportedErr{err} }
+
+type unsupportedErr struct{ error }
+
+func (unsupportedErr) Is(target error) bool { return target == killswitch.ErrUnsupported }
 
 // Without a journaled kill switch the startup neither blocks nor touches
 // the firewall, even for a tunnel whose kill switch would be on.

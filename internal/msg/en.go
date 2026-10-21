@@ -191,6 +191,10 @@ const (
 	DaemonWarnDNSScopedUnsupported = "this tunnel's DNS servers are not used: another tunnel's answer every name, and resolvconf cannot send only this tunnel's search domains to its own; use systemd-resolved to enable them"
 	DaemonWarnDNSNotApplied        = "this tunnel's DNS servers are not applied on this system"
 	DaemonWarnNoRPFilter           = "this full tunnel runs without its reverse-path filter because nft is not installed; install nftables to enable it"
+	// DaemonWarnKillSwitchNoEffectFmt takes why the kill switch's rules
+	// are in place (or wanted) but cannot take effect (macOS: the main pf
+	// ruleset no longer evaluates the com.apple anchors).
+	DaemonWarnKillSwitchNoEffectFmt = "the kill switch is NOT in effect, traffic outside the tunnels is not blocked: %v"
 )
 
 // Command line. None of these formats take a PIN, PUK or key; the ones that

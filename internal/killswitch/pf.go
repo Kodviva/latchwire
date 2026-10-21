@@ -261,8 +261,13 @@ func (f *pfFirewall) Set(ctx context.Context, s State) error {
 	return f.recordLocked()
 }
 
-// Verify checks that pf is enabled (pfctl -s info: "Status: Enabled") and
-// that the anchor still holds rules (pfctl -a <anchor> -sr).
+// Verify checks that pf is enabled (pfctl -s info: "Status: Enabled"),
+// that the anchor still holds rules (pfctl -a <anchor> -sr), and that the
+// main ruleset still evaluates the com.apple anchors (pfctl -sr). A main
+// ruleset replaced by one without that anchor point (pfctl -f with a
+// custom pf.conf) leaves the anchor's rules loaded but never evaluated:
+// that is reported as ok false with an ErrUnsupported error, since setting
+// the rules again cannot fix it.
 func (f *pfFirewall) Verify(ctx context.Context) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -277,7 +282,17 @@ func (f *pfFirewall) Verify(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("killswitch: pfctl -a %s -sr: %w", pfAnchor, err)
 	}
-	return strings.TrimSpace(string(out)) != "", nil
+	if strings.TrimSpace(string(out)) == "" {
+		return false, nil
+	}
+	out, err = f.r.Run(ctx, pfctlCmd, []string{"-sr"}, nil)
+	if err != nil {
+		return false, fmt.Errorf("killswitch: pfctl -sr: %w", err)
+	}
+	if !pfHasAppleAnchor(string(out)) {
+		return false, unsupportedError(msg.KillSwitchPfNoAnchor)
+	}
+	return true, nil
 }
 
 // pfEnabled reads the Status line of pfctl -s info ("Status: Enabled for
