@@ -15,6 +15,8 @@ const (
 	MethodTunnelConnect    = "tunnel.connect"
 	MethodTunnelDisconnect = "tunnel.disconnect"
 	MethodTunnelStatus     = "tunnel.status"
+	MethodTunnelPolicyGet  = "tunnel.policy.get"
+	MethodTunnelPolicySet  = "tunnel.policy.set"
 )
 
 // Error codes carried in Error.Code.
@@ -74,16 +76,48 @@ type KeyX25519Result struct {
 	Shared string `json:"shared"`
 }
 
-// TunnelAdd is the params of tunnel.add.
+// TunnelAdd is the params of tunnel.add. Owner is the user the tunnel is
+// added for (the CLI sends SUDO_UID): the only user besides the
+// administrators who may connect it. 0 leaves it to the administrators.
 type TunnelAdd struct {
 	Name   string `json:"name"`
 	Config string `json:"config"`
+	Owner  uint32 `json:"owner,omitempty"`
 }
 
 // TunnelName is the params of tunnel.remove, tunnel.connect and
 // tunnel.disconnect.
 type TunnelName struct {
 	Name string `json:"name"`
+}
+
+// TunnelPolicy is the result of tunnel.policy.get and tunnel.policy.set: a
+// tunnel's policy. KillSwitch is auto, on or off. AutoConnect connects the
+// tunnel when the agent of an allowed user reports its YubiKey (at login or
+// when the card is inserted). OnDemand and TrustedNetworks (network IDs)
+// drive the automatic connect on untrusted networks. AllowedUsers are the
+// uids that may connect the tunnel besides the administrators.
+type TunnelPolicy struct {
+	Name            string   `json:"name"`
+	KillSwitch      string   `json:"killSwitch"`
+	AutoConnect     bool     `json:"autoConnect,omitempty"`
+	OnDemand        bool     `json:"onDemand,omitempty"`
+	TrustedNetworks []string `json:"trustedNetworks,omitempty"`
+	AllowedUsers    []uint32 `json:"allowedUsers,omitempty"`
+}
+
+// TunnelPolicySet is the params of tunnel.policy.set: the changes to make
+// to a tunnel's policy. Empty or nil fields leave the policy as it is.
+// Trust and Allow are added first, then Untrust and Deny removed.
+type TunnelPolicySet struct {
+	Name        string   `json:"name"`
+	KillSwitch  string   `json:"killSwitch,omitempty"`
+	AutoConnect *bool    `json:"autoConnect,omitempty"`
+	OnDemand    *bool    `json:"onDemand,omitempty"`
+	Trust       []string `json:"trust,omitempty"`
+	Untrust     []string `json:"untrust,omitempty"`
+	Allow       []uint32 `json:"allow,omitempty"`
+	Deny        []uint32 `json:"deny,omitempty"`
 }
 
 // TunnelStatus is one element of the tunnel.status result. The fields after

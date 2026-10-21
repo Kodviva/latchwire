@@ -36,7 +36,10 @@ func cmdAdd(ctx context.Context, e *env, args []string) error {
 		return err
 	}
 	return withDaemon(ctx, e, func(c rpcConn) error {
-		if err := c.Call(ctx, ipc.MethodTunnelAdd, ipc.TunnelAdd{Name: name, Config: text}, nil); err != nil {
+		// The user who ran sudo may connect the tunnel (its only allowed
+		// user); without sudo it is left to the administrators.
+		add := ipc.TunnelAdd{Name: name, Config: text, Owner: sudoUID(e)}
+		if err := c.Call(ctx, ipc.MethodTunnelAdd, add, nil); err != nil {
 			return err
 		}
 		fmt.Fprintf(e.stdout, msg.AddedFmt+"\n", name)

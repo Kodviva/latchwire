@@ -109,7 +109,10 @@ func newTestEnv(card *fakeCard, answers ...string) *testEnv {
 			}
 			return card, nil
 		},
-		geteuid: func() int { return 1000 },
+		geteuid:    func() int { return 1000 },
+		getenv:     func(string) string { return "" },
+		lookupUser: func(name string) (uint32, error) { return 0, errors.New("no users in tests") },
+		userName:   func(uint32) string { return "" },
 	}
 	return te
 }

@@ -65,6 +65,11 @@ type env struct {
 	geteuid     func() int
 	runAgent    func(ctx context.Context) error
 	runDaemon   func(ctx context.Context) error
+	getenv      func(key string) string
+	// lookupUser returns the uid of a user name; userName the name of a
+	// uid ("" when unknown).
+	lookupUser func(name string) (uint32, error)
+	userName   func(uid uint32) string
 }
 
 func defaultEnv() *env {
@@ -89,6 +94,9 @@ func defaultEnv() *env {
 		runDaemon: func(ctx context.Context) error {
 			return daemon.NewManager(daemon.Options{}).Serve(ctx)
 		},
+		getenv:     os.Getenv,
+		lookupUser: lookupUserID,
+		userName:   lookupUserName,
 	}
 }
 
@@ -148,6 +156,7 @@ func commands() map[string]command {
 		"up":      {"up <name>", cmdUp},
 		"down":    {"down <name>", cmdDown},
 		"status":  {"status [name]", cmdStatus},
+		"policy":  {policySynopsis, cmdPolicy},
 	}
 }
 

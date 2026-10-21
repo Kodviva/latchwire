@@ -203,13 +203,11 @@ func TestKillSwitchPolicy(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newEnv(t, envOpts{present: []uint32{serialA}})
 			srv := newServer(t, e.b.pub(serialA), "10.0.0.2")
-			if err := os.MkdirAll(e.store, 0o700); err != nil {
-				t.Fatal(err)
-			}
+			e.add(e.config([]keyref.Ref{refA}, []string{"10.0.0.2"}, srv, ""))
+			// add wrote the default policy; connect reads the file again.
 			if err := os.WriteFile(filepath.Join(e.store, tunName+".policy"), []byte(tc.policy), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			e.add(e.config([]keyref.Ref{refA}, []string{"10.0.0.2"}, srv, ""))
 			e.waitCard(serialA, true)
 			e.connect()
 			s, _ := e.fw.last()
@@ -655,13 +653,10 @@ func TestBlockedLookupUsesCacheOnAnyError(t *testing.T) {
 	}
 	e := newEnv(t, envOpts{present: []uint32{serialA}, hook: hook})
 	srv := newServer(t, e.b.pub(serialA), "10.0.0.2")
-	if err := os.MkdirAll(e.store, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	e.add(e.config([]keyref.Ref{refA}, []string{"10.0.0.2"}, srv, fmt.Sprintf("vpn.example.test:%d", srv.port)))
 	if err := os.WriteFile(filepath.Join(e.store, tunName+".policy"), []byte(`{"kill_switch":"on"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	e.add(e.config([]keyref.Ref{refA}, []string{"10.0.0.2"}, srv, fmt.Sprintf("vpn.example.test:%d", srv.port)))
 	e.waitCard(serialA, true)
 	e.connect()
 

@@ -653,8 +653,13 @@ func connected(t *testing.T, o envOpts) (*env, *server) {
 	cfg := e.config([]keyref.Ref{refA}, []string{"10.0.0.2"}, srv, "")
 	if e.admin(uidA) {
 		e.add(cfg)
-	} else if err := e.m.add(tunName, cfg); err != nil {
-		t.Fatal(err)
+	} else {
+		if err := e.m.add(tunName, cfg, uidA); err != nil {
+			t.Fatal(err)
+		}
+		// A explicitly (uidA is 0 when the tests run as root, and owner 0
+		// is nobody), and B too: R19 alone keeps B away from A's tunnel.
+		e.allow(uidA, uidB)
 	}
 	e.waitCard(serialA, true)
 	if st := e.connect(); st.State != StateConnected {
@@ -1644,9 +1649,10 @@ func TestOtherUserCannotTouchTunnel(t *testing.T) {
 func TestNonAdminConnectUsesOnlyOwnAgent(t *testing.T) {
 	e := newEnv(t, envOpts{present: []uint32{}, admin: onlyAdmin})
 	srv := newServer(t, e.b.pub(serialA), "10.0.0.2")
-	if err := e.m.add(tunName, e.config([]keyref.Ref{refA}, []string{"10.0.0.2"}, srv, "")); err != nil {
+	if err := e.m.add(tunName, e.config([]keyref.Ref{refA}, []string{"10.0.0.2"}, srv, ""), uidA); err != nil {
 		t.Fatal(err)
 	}
+	e.allow(uidA, uidB)
 	e.waitAgentRegistered(uidA)
 	// B holds the card (the real key); A's agent sees nothing.
 	fb := newFakeAgent(t, e, uidB, e.b.cards[serialA].key, serialA)
@@ -1739,9 +1745,20 @@ func (e *env) unbound() {
 	}
 }
 
+// addA adds a tunnel on card A that both A and B may connect, so that only
+// R19 and R21 keep B out.
 func (e *env) addA(srv *server) {
 	e.t.Helper()
-	if err := e.m.add(tunName, e.config([]keyref.Ref{refA}, []string{"10.0.0.2"}, srv, "")); err != nil {
+	if err := e.m.add(tunName, e.config([]keyref.Ref{refA}, []string{"10.0.0.2"}, srv, ""), uidA); err != nil {
+		e.t.Fatal(err)
+	}
+	e.allow(uidA, uidB)
+}
+
+// allow adds uids to the tunnel's allowed users.
+func (e *env) allow(uids ...uint32) {
+	e.t.Helper()
+	if _, err := e.m.setPolicy(ipc.TunnelPolicySet{Name: tunName, Allow: uids}); err != nil {
 		e.t.Fatal(err)
 	}
 }
@@ -1877,7 +1894,7 @@ func TestAdminTriesOwnAgentsAcrossAllIdentitiesFirst(t *testing.T) {
 	isA := func(uid uint32) bool { return uid == uidA }
 	e := newEnv(t, envOpts{present: []uint32{serialB}, clientAddr: []string{"10.0.0.3"}, admin: isA})
 	srv := newServer(t, e.b.pub(serialB), "10.0.0.3")
-	if err := e.m.add(tunName, e.config([]keyref.Ref{refA, refB}, []string{"10.0.0.2", "10.0.0.3"}, srv, "")); err != nil {
+	if err := e.m.add(tunName, e.config([]keyref.Ref{refA, refB}, []string{"10.0.0.2", "10.0.0.3"}, srv, ""), uidA); err != nil {
 		t.Fatal(err)
 	}
 	e.waitCard(serialB, true)

@@ -180,6 +180,11 @@ type Manager struct {
 	// behind them may fail in any way, so any failure may use the cache.
 	ksBlocking atomic.Bool
 
+	// polMu serializes the writers of policy files (add, remove,
+	// tunnel.policy.set), so a change is never lost to a concurrent one.
+	// It is taken before mu.
+	polMu sync.Mutex
+
 	mu      sync.Mutex
 	ctx     context.Context // Serve's ctx; tunnel lifetimes derive from it
 	tunnels map[string]*tunnel
@@ -188,11 +193,14 @@ type Manager struct {
 }
 
 // agentState is one agent connection. seq orders registrations (0: not
-// registered yet).
+// registered yet). noAuto names the tunnels taken down by hand (down) while
+// this agent was registered: it does not auto-connect them again, a later
+// agent session does.
 type agentState struct {
 	uid     uint32
 	seq     uint64
 	serials map[uint32]bool
+	noAuto  map[string]bool
 }
 
 // tunnel is one configured tunnel.
@@ -236,6 +244,8 @@ type tunnel struct {
 	// agent (and maybe waiting for a PIN) then gives up.
 	abort       context.Context
 	abortCancel context.CancelFunc
+	// autoPending says that an automatic connect of the tunnel is running.
+	autoPending bool
 }
 
 func newTunnel(name string, cfg *config.Tunnel, pol Policy) *tunnel {
@@ -490,6 +500,7 @@ var (
 	errNoCard     = &ipc.Error{Code: ipc.CodeUnavailable, Message: msg.DaemonNoCard}
 	errAborted    = &ipc.Error{Code: ipc.CodeUnavailable, Message: msg.DaemonConnectAborted}
 	errNotYours   = &ipc.Error{Code: ipc.CodeForbidden, Message: msg.DaemonNotYourTunnel}
+	errPolicyOnly = &ipc.Error{Code: ipc.CodeForbidden, Message: msg.DaemonPolicyAdminOnly}
 )
 
 func decode(params json.RawMessage, v any) error {
@@ -530,28 +541,60 @@ func (m *Manager) agentUser(uid uint32) bool {
 }
 
 // requestConnect is tunnel.connect from uid (R19, R21). A non-administrator
-// only ever uses its own agent and may not take over a tunnel bound to
-// another user; an administrator tries its own agents first, then other
-// users'. Either way an agent is used only after it proved it holds the
-// configured key.
+// must be one of the tunnel's allowed users (its policy), only ever uses its
+// own agent and may not take over a tunnel bound to another user; an
+// administrator tries its own agents first, then other users'. Either way
+// an agent is used only after it proved it holds the configured key.
 func (m *Manager) requestConnect(ctx context.Context, uid uint32, name string) (ipc.TunnelStatus, error) {
 	admin := m.admin(uid)
-	if !admin && !m.agentUser(uid) {
-		return ipc.TunnelStatus{}, errForbidden
+	if !admin {
+		if !m.agentUser(uid) {
+			return ipc.TunnelStatus{}, errForbidden
+		}
+		if err := m.allowed(name, uid); err != nil {
+			return ipc.TunnelStatus{}, err
+		}
 	}
 	return m.connect(ctx, name, uid, admin, "")
 }
 
-// requestDisconnect is tunnel.disconnect from uid. A non-administrator may
-// only disconnect a tunnel bound to its own uid.
-func (m *Manager) requestDisconnect(uid uint32, name string) (ipc.TunnelStatus, error) {
-	if m.admin(uid) {
-		return m.disconnect(name, nil)
+// allowed returns nil when the tunnel name exists and uid is one of its
+// allowed users. The policy file is read, so a change applies at once.
+func (m *Manager) allowed(name string, uid uint32) error {
+	m.mu.Lock()
+	t := m.tunnels[name]
+	m.mu.Unlock()
+	if t == nil {
+		return errNotFound
 	}
-	if !m.agentUser(uid) {
+	if !m.store.policyFor(name).allows(uid) {
+		log.Printf("daemon: tunnel %s: uid %d is not an allowed user", name, uid)
+		return &ipc.Error{Code: ipc.CodeForbidden, Message: fmt.Sprintf(msg.DaemonNotAllowedUserFmt, name)}
+	}
+	return nil
+}
+
+// requestDisconnect is tunnel.disconnect from uid. A non-administrator may
+// only disconnect a tunnel bound to its own uid. The agents registered now
+// do not auto-connect the tunnel again (agentState.noAuto).
+func (m *Manager) requestDisconnect(uid uint32, name string) (ipc.TunnelStatus, error) {
+	admin := m.admin(uid)
+	if !admin && !m.agentUser(uid) {
 		return ipc.TunnelStatus{}, errForbidden
 	}
-	return m.disconnect(name, func(t *tunnel) bool { return t.boundTo(uid) })
+	// Under Manager.mu, in the same step as the teardown: no automatic
+	// connect can slip in between.
+	return m.disconnect(name, func(t *tunnel) bool {
+		if !admin && !t.boundTo(uid) {
+			return false
+		}
+		for _, a := range m.agents {
+			if a.seq != 0 {
+				a.noAuto[name] = true
+			}
+		}
+		return true
+	})
 }
 
 func (m *Manager) handle(c *ipc.Conn) {
@@ -579,7 +622,7 @@ func (m *Manager) handle(c *ipc.Conn) {
 		if err := decode(params, &p); err != nil {
 			return nil, err
 		}
-		return nil, m.add(p.Name, p.Config)
+		return nil, m.add(p.Name, p.Config, p.Owner)
 	})
 	c.Handle(ipc.MethodTunnelRemove, func(_ context.Context, uid uint32, params json.RawMessage) (any, error) {
 		if !m.admin(uid) {
@@ -617,9 +660,32 @@ func (m *Manager) handle(c *ipc.Conn) {
 		}
 		return m.statuses(p.Name)
 	})
+	c.Handle(ipc.MethodTunnelPolicyGet, func(_ context.Context, uid uint32, params json.RawMessage) (any, error) {
+		if !m.user(uid) {
+			return nil, errForbidden
+		}
+		var p ipc.TunnelName
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		return m.getPolicy(p.Name)
+	})
+	c.Handle(ipc.MethodTunnelPolicySet, func(_ context.Context, uid uint32, params json.RawMessage) (any, error) {
+		if !m.admin(uid) {
+			return nil, errPolicyOnly
+		}
+		var p ipc.TunnelPolicySet
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		return m.setPolicy(p)
+	})
 }
 
-func (m *Manager) add(name, text string) error {
+// add stores a new tunnel and its policy: the default one, with owner (the
+// user it is added for; 0: none) as the only allowed user. A policy file
+// left by an earlier tunnel of that name is replaced.
+func (m *Manager) add(name, text string, owner uint32) error {
 	if !validName(name) {
 		return &ipc.Error{Code: ipc.CodeBadRequest, Message: msg.DaemonInvalidName}
 	}
@@ -628,17 +694,35 @@ func (m *Manager) add(name, text string) error {
 		// config errors are msg texts and never echo key values
 		return &ipc.Error{Code: ipc.CodeBadRequest, Message: err.Error()}
 	}
+	pol := defaultPolicy()
+	if owner != 0 {
+		pol.AllowedUsers = []uint32{owner}
+	}
+	m.polMu.Lock()
+	defer m.polMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.tunnels[name] != nil {
 		return &ipc.Error{Code: ipc.CodeBadRequest, Message: msg.DaemonTunnelExists}
 	}
+	// The policy first: a configuration is never stored without its own.
+	if err := m.store.savePolicy(name, pol); err != nil {
+		log.Printf("daemon: store %s policy: %v", name, err)
+		return &ipc.Error{Code: ipc.CodeInternal, Message: fmt.Sprintf(msg.DaemonPolicyStoreFailedFmt, err)}
+	}
 	if err := m.store.save(name, text); err != nil {
 		log.Printf("daemon: store %s: %v", name, err)
+		if err := m.store.removePolicy(name); err != nil {
+			log.Printf("daemon: store remove %s policy: %v", name, err)
+		}
 		return &ipc.Error{Code: ipc.CodeInternal, Message: fmt.Sprintf(msg.DaemonStoreFailedFmt, err)}
 	}
-	m.tunnels[name] = newTunnel(name, cfg, m.store.policyFor(name))
-	log.Printf("daemon: tunnel %s added", name)
+	m.tunnels[name] = newTunnel(name, cfg, pol)
+	// A down of an earlier tunnel of that name says nothing about this one.
+	for _, a := range m.agents {
+		delete(a.noAuto, name)
+	}
+	log.Printf("daemon: tunnel %s added (allowed users: %v)", name, pol.AllowedUsers)
 	return nil
 }
 
@@ -654,15 +738,89 @@ func (m *Manager) remove(name string) error {
 	if err := m.store.removeEndpoints(name); err != nil {
 		log.Printf("daemon: store remove %s endpoint cache: %v", name, err)
 	}
+	m.polMu.Lock()
 	if err := m.store.removePolicy(name); err != nil {
 		log.Printf("daemon: store remove %s policy: %v", name, err)
 	}
+	m.polMu.Unlock()
 	if err := m.store.remove(name); err != nil {
 		log.Printf("daemon: store remove %s: %v", name, err)
 		return &ipc.Error{Code: ipc.CodeInternal, Message: fmt.Sprintf(msg.DaemonStoreFailedFmt, err)}
 	}
 	log.Printf("daemon: tunnel %s removed", name)
 	return nil
+}
+
+// getPolicy is tunnel.policy.get: the policy in effect for the tunnel (the
+// fail-closed one when its file is unusable).
+func (m *Manager) getPolicy(name string) (ipc.TunnelPolicy, error) {
+	m.mu.Lock()
+	t := m.tunnels[name]
+	m.mu.Unlock()
+	if t == nil {
+		return ipc.TunnelPolicy{}, errNotFound
+	}
+	return policyStatus(name, m.store.policyFor(name)), nil
+}
+
+// setPolicy is tunnel.policy.set (administrators only): it applies req to
+// the tunnel's policy file and returns the new policy. A file that cannot
+// be used is replaced, starting from the fail-closed policy. The allowed
+// users, AutoConnect and the trusted networks count from the next connect
+// or agent report; the kill switch from the tunnel's next connect.
+func (m *Manager) setPolicy(req ipc.TunnelPolicySet) (ipc.TunnelPolicy, error) {
+	m.polMu.Lock()
+	defer m.polMu.Unlock()
+	m.mu.Lock()
+	t := m.tunnels[req.Name]
+	m.mu.Unlock()
+	if t == nil {
+		return ipc.TunnelPolicy{}, errNotFound
+	}
+	pol, err := m.store.loadPolicy(req.Name)
+	if err != nil {
+		log.Printf("daemon: tunnel %s: replacing the unusable policy (%v), starting from the fail-closed one", req.Name, err)
+		pol = failClosedPolicy()
+	}
+	if req.KillSwitch != "" {
+		pol.KillSwitch = req.KillSwitch
+	}
+	if req.AutoConnect != nil {
+		pol.AutoConnect = *req.AutoConnect
+	}
+	if req.OnDemand != nil {
+		pol.OnDemand = *req.OnDemand
+	}
+	pol.TrustedNetworks = editList(pol.TrustedNetworks, req.Trust, req.Untrust)
+	pol.AllowedUsers = editList(pol.AllowedUsers, req.Allow, req.Deny)
+	if err := pol.validate(); err != nil {
+		return ipc.TunnelPolicy{}, &ipc.Error{Code: ipc.CodeBadRequest, Message: fmt.Sprintf(msg.DaemonBadPolicyFmt, err)}
+	}
+	if err := m.store.savePolicy(req.Name, pol); err != nil {
+		log.Printf("daemon: store %s policy: %v", req.Name, err)
+		return ipc.TunnelPolicy{}, &ipc.Error{Code: ipc.CodeInternal, Message: fmt.Sprintf(msg.DaemonPolicyStoreFailedFmt, err)}
+	}
+	log.Printf("daemon: tunnel %s: policy set: %+v", req.Name, pol)
+	return policyStatus(req.Name, pol), nil
+}
+
+// editList returns list with add added and then remove removed, sorted and
+// without duplicates (nil when empty).
+func editList[T cmp.Ordered](list, add, remove []T) []T {
+	out := append(slices.Clone(list), add...)
+	out = slices.DeleteFunc(out, func(v T) bool { return slices.Contains(remove, v) })
+	slices.Sort(out)
+	out = slices.Compact(out)
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// policyStatus is p as tunnel.policy.get and tunnel.policy.set report it.
+func policyStatus(name string, p Policy) ipc.TunnelPolicy {
+	return ipc.TunnelPolicy{Name: name, KillSwitch: p.KillSwitch, AutoConnect: p.AutoConnect, OnDemand: p.OnDemand,
+		TrustedNetworks: slices.Clone(p.TrustedNetworks), AllowedUsers: slices.Clone(p.AllowedUsers)}
 }
 
 // disconnect takes the tunnel down if cond (checked under Manager.mu, nil:
@@ -763,7 +921,7 @@ func (m *Manager) agentRegister(c *ipc.Conn, uid uint32, serials []uint32) {
 	m.mu.Lock()
 	a := m.agents[c]
 	if a == nil {
-		a = &agentState{uid: uid}
+		a = &agentState{uid: uid, noAuto: map[string]bool{}}
 		m.agents[c] = a
 	}
 	if a.seq == 0 {
@@ -789,6 +947,7 @@ func (m *Manager) agentRegister(c *ipc.Conn, uid uint32, serials []uint32) {
 	for _, s := range inserted {
 		m.cardInserted(s, uid)
 	}
+	m.autoConnect(c, uid, inserted)
 }
 
 // agentEvent handles card changes. pin_ready may arrive out of order with
@@ -802,9 +961,13 @@ func (m *Manager) agentEvent(c *ipc.Conn, uid uint32, ev ipc.AgentEvent) {
 	}
 	switch ev.Type {
 	case ipc.EventCardInserted:
+		fresh := !a.serials[ev.Serial]
 		a.serials[ev.Serial] = true
 		m.mu.Unlock()
 		m.cardInserted(ev.Serial, uid)
+		if fresh {
+			m.autoConnect(c, uid, []uint32{ev.Serial})
+		}
 	case ipc.EventCardRemoved:
 		delete(a.serials, ev.Serial)
 		m.mu.Unlock()
@@ -882,6 +1045,75 @@ func (m *Manager) cardInserted(serial, uid uint32) {
 		go func() {
 			if _, err := m.connect(context.Background(), t.name, uid, false, StateCardRemoved); err != nil {
 				log.Printf("daemon: tunnel %s: reconnect: %v", t.name, err)
+			}
+		}()
+	}
+}
+
+// autoConnect connects, with the card of agent c (of uid), the tunnels whose
+// policy has AutoConnect on, that are disconnected and have an identity on
+// one of serials, the cards c has just reported (agent.register at login,
+// card_inserted). uid must be one of a tunnel's allowed users or an
+// administrator; only uid's own agent is used (as for a non-administrator's
+// connect), and it asks for the PIN.
+//
+// Each report starts at most one attempt per tunnel, and none while one is
+// running: a failed attempt (a cancelled PIN) is not retried until the card
+// is reported again. A tunnel taken down by hand while c was registered is
+// left alone (agentState.noAuto).
+func (m *Manager) autoConnect(c *ipc.Conn, uid uint32, serials []uint32) {
+	if len(serials) == 0 {
+		return
+	}
+	m.mu.Lock()
+	a := m.agents[c]
+	if a == nil || a.seq == 0 {
+		m.mu.Unlock()
+		return
+	}
+	var names []string
+	for name, t := range m.tunnels {
+		if t.state != StateDisconnected || t.autoPending || a.noAuto[name] {
+			continue
+		}
+		if slices.ContainsFunc(t.cfg.Identities, func(id config.Identity) bool { return slices.Contains(serials, id.Ref.Serial) }) {
+			names = append(names, name)
+		}
+	}
+	m.mu.Unlock()
+	slices.Sort(names)
+	var admin, adminKnown bool
+	for _, name := range names {
+		pol := m.store.policyFor(name)
+		if !pol.AutoConnect {
+			continue
+		}
+		if !pol.allows(uid) {
+			if !adminKnown {
+				admin, adminKnown = m.admin(uid), true
+			}
+			if !admin {
+				log.Printf("daemon: tunnel %s: not connecting automatically for uid %d: not an allowed user", name, uid)
+				continue
+			}
+		}
+		m.mu.Lock()
+		t := m.tunnels[name]
+		if t == nil || t.state != StateDisconnected || t.autoPending || a.noAuto[name] {
+			m.mu.Unlock()
+			continue
+		}
+		t.autoPending = true
+		m.mu.Unlock()
+		log.Printf("daemon: tunnel %s: connecting automatically with the YubiKey of uid %d", name, uid)
+		go func() {
+			defer func() {
+				m.mu.Lock()
+				t.autoPending = false
+				m.mu.Unlock()
+			}()
+			if _, err := m.connect(context.Background(), name, uid, false, StateDisconnected); err != nil {
+				log.Printf("daemon: tunnel %s: automatic connect: %v", name, err)
 			}
 		}()
 	}

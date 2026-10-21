@@ -82,6 +82,14 @@ const (
 	KillSwitchPfMissing = "the kill switch is not available: pfctl was not found in /sbin or /usr/sbin; turn the kill switch off in the tunnel's policy"
 )
 
+// Tunnel policy.
+const (
+	// PolicyUntrustableNetworkFmt and PolicyBadNetworkIDFmt take the
+	// network ID.
+	PolicyUntrustableNetworkFmt = "network %q cannot be trusted: it stands for no network or a network whose gateway could not be identified"
+	PolicyBadNetworkIDFmt       = "invalid network ID %q: a network ID is 16 lowercase hexadecimal digits"
+)
+
 // Network configuration.
 const (
 	NetFullTunnelUnsupported = "routing all traffic through the tunnel (AllowedIPs 0.0.0.0/0 or ::/0) is not supported yet; list the networks to reach instead"
@@ -125,6 +133,9 @@ const (
 	DaemonBadAgentReply  = "the agent sent a malformed reply"
 	DaemonConnectAborted = "connecting was interrupted: the tunnel was disconnected or its YubiKey was removed"
 	DaemonNotYourTunnel  = "permission denied: this tunnel is in use with another user's YubiKey"
+	// DaemonNotAllowedUserFmt takes the tunnel name.
+	DaemonNotAllowedUserFmt = "permission denied: you are not one of the allowed users of tunnel %[1]s; an administrator can allow you with: sudo latchwire policy %[1]s --allow-user <your user name>"
+	DaemonPolicyAdminOnly   = "permission denied: only an administrator can change a tunnel's policy"
 	// DaemonKeyMismatchFmt and DaemonProofFailedFmt take the KeyRef.
 	DaemonKeyMismatchFmt = "the YubiKey answering for %s does not hold the PublicKey configured for this tunnel; refusing to connect"
 	DaemonProofFailedFmt = "the agent answering for %s could not prove that it holds the private key of the configured PublicKey; refusing to connect"
@@ -133,6 +144,10 @@ const (
 	// DaemonConnectFailedFmt and DaemonStoreFailedFmt take an error.
 	DaemonConnectFailedFmt = "could not bring the tunnel up: %v"
 	DaemonStoreFailedFmt   = "could not save the tunnel configuration: %v"
+	// DaemonPolicyStoreFailedFmt takes an error.
+	DaemonPolicyStoreFailedFmt = "could not save the tunnel's policy: %v"
+	// DaemonBadPolicyFmt takes what is wrong with the requested policy.
+	DaemonBadPolicyFmt = "invalid policy: %v"
 	// DaemonKillSwitchRefusedFmt takes the error that kept the kill switch
 	// from blocking.
 	DaemonKillSwitchRefusedFmt = "not connecting: this tunnel's kill switch is on and could not block traffic outside the tunnel: %v"
@@ -173,7 +188,12 @@ commands:
   remove <name>                 remove a tunnel (administrator)
   up <name>                     connect a tunnel
   down <name>                   disconnect a tunnel
-  status [name]                 show tunnels`
+  status [name]                 show tunnels
+  policy <name> [--kill-switch auto|on|off] [--auto-connect=true|false]
+         [--on-demand=true|false] [--trust-network ID] [--untrust-network ID]
+         [--allow-user NAME] [--deny-user NAME]
+                                show a tunnel's policy, or change it
+                                (administrator)`
 
 	CLIUnknownCommandFmt = "unknown command %q"
 	CLIUsageErrorFmt     = "usage: latchwire %s"
@@ -261,6 +281,25 @@ are never tried automatically.`
 	StatusSplit    = "split" // ROUTES of any other tunnel
 	// StatusWarningFmt takes the tunnel name and the warning.
 	StatusWarningFmt = "warning: %s: %s"
+	// policy
+	PolicyBadKillSwitchFmt = "invalid --kill-switch %q: use auto, on or off"
+	// PolicyUnknownUserFmt takes the user name.
+	PolicyUnknownUserFmt = "no user named %q"
+	// PolicyPrintFmt takes the tunnel name, the kill switch, auto-connect
+	// and on-demand (PolicyOn or PolicyOff), the trusted networks and the
+	// allowed users.
+	PolicyPrintFmt = `tunnel %s
+  kill switch:      %s
+  auto-connect:     %s
+  on-demand:        %s
+  trusted networks: %s
+  allowed users:    %s`
+	PolicyOn         = "on"
+	PolicyOff        = "off"
+	PolicyNone       = "none"
+	PolicyAdminsOnly = "administrators only"
+	// PolicyUserFmt takes a user name and its uid.
+	PolicyUserFmt = "%s (%d)"
 	// CLIUntrustedDaemonFmt takes the uid of the socket's owner process.
 	CLIUntrustedDaemonFmt = "refusing the service socket: it is served by uid %d, not by root or this user"
 )

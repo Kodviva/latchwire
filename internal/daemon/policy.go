@@ -8,8 +8,12 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 
 	"github.com/Kodviva/latchwire/internal/config"
+	"github.com/Kodviva/latchwire/internal/msg"
+	"github.com/Kodviva/latchwire/internal/netmon"
 )
 
 // Kill switch policies (Policy.KillSwitch).
@@ -23,24 +27,75 @@ const (
 )
 
 // Policy is what a tunnel may do beyond its configuration. It is kept in
-// the store as <name>.policy (JSON, 0600); a tunnel without one gets
-// defaultPolicy.
+// the store as <name>.policy (JSON, 0600, written atomically); a tunnel
+// without one gets defaultPolicy.
 type Policy struct {
 	// KillSwitch is auto (also when empty), on or off.
 	KillSwitch string `json:"kill_switch,omitempty"`
+	// AutoConnect connects the tunnel, while it is disconnected, when the
+	// agent of a user who may connect it reports its YubiKey: at login
+	// (agent.register) or when the card is inserted.
+	AutoConnect bool `json:"auto_connect,omitempty"`
+	// OnDemand connects the tunnel on networks not in TrustedNetworks.
+	OnDemand bool `json:"on_demand,omitempty"`
+	// TrustedNetworks are network IDs (netmon.NetworkID); never "unknown"
+	// or "none" (P10).
+	TrustedNetworks []string `json:"trusted_networks,omitempty"`
+	// AllowedUsers are the uids that may connect the tunnel besides the
+	// administrators (R19 still applies to them). Empty: administrators
+	// only.
+	AllowedUsers []uint32 `json:"allowed_users,omitempty"`
 }
 
 const (
 	policyExt = ".policy"
 	// maxPolicyFile bounds what is read from a policy file.
 	maxPolicyFile = 64 << 10
+	// maxPolicyList bounds TrustedNetworks and AllowedUsers (far below what
+	// maxPolicyFile holds).
+	maxPolicyList = 256
 )
 
 func defaultPolicy() Policy { return Policy{KillSwitch: KillSwitchAuto} }
 
 // failClosedPolicy stands in for a policy file that cannot be used: the
-// kill switch is on, so a damaged file never opens a leak.
+// kill switch is on, so a damaged file never opens a leak; nothing happens
+// automatically and only administrators may connect.
 func failClosedPolicy() Policy { return Policy{KillSwitch: KillSwitchOn} }
+
+// allows reports whether uid is one of the allowed users.
+func (p Policy) allows(uid uint32) bool { return slices.Contains(p.AllowedUsers, uid) }
+
+// validate checks the values of p (KillSwitch already normalized).
+func (p Policy) validate() error {
+	switch p.KillSwitch {
+	case KillSwitchAuto, KillSwitchOn, KillSwitchOff:
+	default:
+		return fmt.Errorf("kill_switch must be auto, on or off, not %q", p.KillSwitch)
+	}
+	if len(p.TrustedNetworks) > maxPolicyList || len(p.AllowedUsers) > maxPolicyList {
+		return fmt.Errorf("more than %d trusted networks or allowed users", maxPolicyList)
+	}
+	for _, id := range p.TrustedNetworks {
+		if err := ValidTrustedNetwork(id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ValidTrustedNetwork checks that id can be a trusted network: a network
+// ID as netmon.NetworkID makes it (16 lowercase hex digits). "unknown" and
+// "none" name no particular network and are never trusted (P10).
+func ValidTrustedNetwork(id string) error {
+	if id == netmon.UnknownNetwork || id == netmon.NoNetwork {
+		return fmt.Errorf(msg.PolicyUntrustableNetworkFmt, id)
+	}
+	if len(id) != 16 || strings.Trim(id, "0123456789abcdef") != "" {
+		return fmt.Errorf(msg.PolicyBadNetworkIDFmt, id)
+	}
+	return nil
+}
 
 // armed reports whether p turns the kill switch on for cfg.
 func (p Policy) armed(cfg *config.Tunnel) bool {
@@ -98,14 +153,31 @@ func (s *store) loadPolicy(name string) (Policy, error) {
 	if dec.More() {
 		return Policy{}, fmt.Errorf("%s: trailing data", p)
 	}
-	switch pol.KillSwitch {
-	case "":
+	if pol.KillSwitch == "" {
 		pol.KillSwitch = KillSwitchAuto
-	case KillSwitchAuto, KillSwitchOn, KillSwitchOff:
-	default:
-		return Policy{}, fmt.Errorf("%s: kill_switch must be auto, on or off, not %q", p, pol.KillSwitch)
+	}
+	if err := pol.validate(); err != nil {
+		return Policy{}, fmt.Errorf("%s: %w", p, err)
 	}
 	return pol, nil
+}
+
+// savePolicy replaces name's policy (0600, temporary file, fsync, rename).
+func (s *store) savePolicy(name string, p Policy) error {
+	if !validName(name) {
+		return errors.New("invalid name")
+	}
+	if p.KillSwitch == "" {
+		p.KillSwitch = KillSwitchAuto
+	}
+	if err := p.validate(); err != nil {
+		return err
+	}
+	b, err := json.Marshal(p)
+	if err != nil {
+		return err
+	}
+	return s.writeAtomic(name+policyExt, string(b))
 }
 
 // policyFor reads name's policy; one that cannot be used is logged and
