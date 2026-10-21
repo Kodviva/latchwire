@@ -1,7 +1,8 @@
 # Latchwire threat model
 
 This document says what Latchwire protects, what it does not, and where in the
-code each protection lives. It describes the core CLI (macOS and Linux) at the
+code each protection lives. It describes the core CLI with network parity
+(full tunnel, DNS, kill switch, on-demand; macOS and Linux) at the
 same revision as this file; its git history shows which code each version
 matches. Latchwire is pre-release software and has not
 had an independent security review. If a claim here and the code disagree, the
@@ -53,9 +54,9 @@ Three programs (all in the one `latchwire` binary) cooperate:
 
 | Component | Runs as | Does |
 | --- | --- | --- |
-| `latchwire daemon` | root | Owns the TUN device, the wireguard-go device and the routes. Never touches the card. Asks the agent for every X25519 operation that needs the static key. |
-| `latchwire agent` | the logged-in user | Talks to the card over PC/SC, asks for the PIN on the terminal, answers the daemon's key requests. |
-| `latchwire` CLI | the caller | `keygen`, `devices`, `pubkey` talk to the card directly; `add`, `remove`, `up`, `down`, `status` talk to the daemon. |
+| `latchwire daemon` | root | Owns the TUN device, the wireguard-go device, the routes and policy rules, the tunnel's DNS settings and the kill switch's firewall rules (section 5.7). Never touches the card. Asks the agent for every X25519 operation that needs the static key. |
+| `latchwire agent` | the logged-in user | Talks to the card over PC/SC, asks for the PIN (a dialog when started by launchd or systemd, else the terminal), answers the daemon's key requests. |
+| `latchwire` CLI | the caller | `keygen`, `devices`, `pubkey` talk to the card directly; `add`, `remove`, `up`, `down`, `status`, `policy`, `network` talk to the daemon. |
 
 They talk over one unix socket, `/var/run/latchwire.sock`, mode `0666`. The
 file mode is deliberately open; **who may do what is decided from the peer's
@@ -79,9 +80,11 @@ Where this is enforced: `internal/ipc/peercred_linux.go`,
 | **A key that was not created on the card.** | Latchwire only accepts keys the card reports as generated on the card (not imported), X25519, PIN policy "once", touch policy "never". There is no import path in v1. | `internal/keyprovider/piv/provider.go` (`Card.Provider` checks `Origin`, algorithm and policies); `internal/keyprovider/piv/generate.go` (`Card.Generate`). |
 | **A fake local agent pretending to be your card.** | Each identity in a tunnel configuration carries the expected `PublicKey` (written by the administrator, **never learned from the card**). Before the daemon binds a tunnel to an agent it requires (1) that the agent's `key.public` equals the configured key, and (2) a proof of possession: the agent must compute X25519 against a **fresh random ephemeral point** chosen by the daemon, and the result must equal what the daemon computes from its ephemeral private key and the configured public key. Only a process that can use the real private key on the card can do that. This proves access to the card, **not which user is asking**: another local user who can reach your PIN-verified card passes it too (section 5.2). The ephemeral point is random, not a peer's key, so a fake agent learns nothing that helps it impersonate the server. No device, route or state change exists until this succeeds. | `internal/daemon/manager.go` (`proveOne`, `prove`, `connect`); `internal/config/config.go` (a missing `PublicKey` is a parse error). Tests: `TestFakeAgentWithWrongPublicKeyRefused`, `TestFakeAgentEchoingRightPublicKeyFailsPoP`, `TestProofOfPossessionBeforeDeviceAndWrongPIN` in `internal/daemon/manager_test.go`. |
 | **A fake daemon.** | The agent and the CLI refuse a socket served by any uid other than root or the current user, because configuration text and X25519 results travel over it. | `internal/agent/agent.go` (`session`); `cmd/latchwire/main.go` (`dialDaemon`). |
-| **Other local users reconfiguring your tunnels, or taking over a tunnel bound to you.** | `tunnel.add` and `tunnel.remove` are administrator-only (root, macOS `admin`, Linux `sudo`, `wheel` or `latchwire`). A non-administrator can connect only through **its own** agent, which must pass the proof of possession, and can disconnect only a tunnel bound to its own uid. A tunnel bound to you (`connecting`, `connected`, `card_removed`) cannot be taken over by a non-administrator. An administrator tries its own agents first. A failed or stalled connect by one user cannot bind or block a tunnel. **Limits:** this does not stop a local user who can reach your card through PC/SC from binding your tunnels that are not bound to you, and tunnel status is readable by any local user (section 5.2). | `internal/daemon/manager.go` (`handle`, `requestConnect`, `requestDisconnect`, `candidatesLocked`, `connect`, `boundTo`); `internal/ipc/admin_linux.go`, `internal/ipc/admin_darwin.go`. Tests: `TestNonAdminCannotAddTunnel`, `TestNonAdminConnectUsesOnlyOwnAgent`, `TestNonAdminCannotSquatTunnel`, `TestAdminTriesOwnAgentsAcrossAllIdentitiesFirst`. |
+| **Other local users reconfiguring your tunnels, or taking over a tunnel bound to you.** | `tunnel.add`, `tunnel.remove` and `tunnel.policy.set` are administrator-only (root, macOS `admin`, Linux `sudo`, `wheel` or `latchwire`). A non-administrator can connect only a tunnel whose policy lists it as an **allowed user** (section 5.2), only through **its own** agent, which must pass the proof of possession, and can disconnect only a tunnel bound to its own uid. A tunnel bound to you (`connecting`, `connected`, `card_removed`) cannot be taken over by a non-administrator. An administrator tries its own agents first. A failed or stalled connect by one user cannot bind or block a tunnel. **Limits:** this does not stop a local user who can reach your card through PC/SC from binding your tunnels that are not bound to you, and tunnel status is readable by any local user (section 5.2). | `internal/daemon/manager.go` (`handle`, `requestConnect`, `requestDisconnect`, `candidatesLocked`, `connect`, `boundTo`); `internal/daemon/policy.go` (`allows`, `revoke`); `internal/ipc/admin_linux.go`, `internal/ipc/admin_darwin.go`. Tests: `TestNonAdminCannotAddTunnel`, `TestNonAllowedUserCannotConnect`, `TestDenyRevokesUserBinding`, `TestNonAdminConnectUsesOnlyOwnAgent`, `TestNonAdminCannotSquatTunnel`, `TestAdminTriesOwnAgentsAcrossAllIdentitiesFirst`. |
 | **A card that is swapped or re-seated under a connection.** | The vendored piv-go checks the card serial again after any reconnect, inside the new transaction, and refuses to send anything to a different card. A PIN meant for card A is never sent to card B. | `third_party/piv-go/PATCHES.md` (patch 6); `internal/keyprovider/piv/provider.go` (`mapCardErr`: `ErrCardChanged` becomes "unavailable"). |
 | **Handshake floods used to wear out or block the card.** | See section 8. | `internal/keyprovider/wgadapter/adapter.go`. |
+| **Traffic leaving outside the tunnel** (a removed card, a failed or still connecting tunnel, a crashed daemon). | With the kill switch on (by default for a full tunnel with one peer), only the tunnel interfaces, loopback, the endpoints and link setup pass; it keeps blocking while the tunnel is connecting, waiting for its card or failed, and after a crash of the daemon. Only `latchwire down`, `remove` or an orderly stop of the service lifts it. See section 5.7 for the details and the limits. | `internal/daemon/policy.go:103` (`armed`); `internal/daemon/manager.go:1927` (`killSwitchStatus`), `:382` (startup keeps the kill switch), `:2369` (`startKillSwitch`); `internal/killswitch/nft.go:100`, `internal/killswitch/pf.go:79`. Linux end-to-end: `testKillSwitchCard`, `testCrash` in `test/e2e/linux/e2e_test.go`. |
+| **DNS queries going to the local network's resolver while a full tunnel is up.** | A full tunnel's DNS servers answer every name (macOS: the primary service's DNS; Linux: systemd-resolved with `~.`, or openresolv exclusively). With the kill switch on, DNS can only leave through a tunnel interface. Limits in section 5.7. | `internal/daemon/manager.go:1867` (`dnsRoleLocked`); `internal/netcfg/linuxplan_dns.go:50`, `internal/netcfg/darwinplan_dns.go:521`; `internal/killswitch/nft.go:90` (no DNS exception). Linux end-to-end: `testDNS`, `testFull`. |
 | **The program storing or leaking your PIN.** | The PIN is never stored: no struct field, file or environment variable. It is read from the terminal (no echo), handed straight to the card, and never logged. The buffer read from the terminal is cleared; the Go string passed on to the card cannot be erased (see 5.3). | `internal/agent/prompt_tty.go`, `internal/agent/agent.go` (package comment, `prompt`), `internal/keyprovider/piv/provider.go` (`promptPIN`), `cmd/latchwire/tty.go`. |
 
 ## 5. What Latchwire does NOT protect against
@@ -154,10 +157,37 @@ including in Latchwire:
   local user: the daemon shows it to any user with a registered agent, and
   registering an agent needs no card.
 
-A per-tunnel allowed-user policy (only listed users' agents may bind a
-tunnel) is planned work; whether and how it is added is an open decision of
-the project owner. It would only limit Latchwire's daemon, not the second
-point above: the real fix is the PC/SC access policy.
+**Allowed users.** Each tunnel's policy lists the users who may connect it
+besides the administrators (`AllowedUsers`). `sudo latchwire add` sets it to
+the user who ran `sudo` (`SUDO_UID`); without `sudo` (a root shell) the list
+is empty and only administrators may connect. `sudo latchwire policy <name>
+--allow-user NAME` / `--deny-user NAME` change it. The check is part of every
+non-administrator connect (the user's own `up`, AutoConnect, on-demand and
+the reconnect when the card comes back) and is made again, with the policy
+file read afresh, when the tunnel is reserved, before any device or route
+exists. A refused user gets no PIN prompt. Denying a user who holds a tunnel
+takes it from them at once, unless an administrator made that binding: an
+unarmed tunnel goes down; a tunnel whose kill switch is on stays blocking,
+bound to nobody, until an administrator runs `latchwire down` (a deny removes
+access, it is not a way out of the kill switch). A policy file that cannot be
+read safely counts as "kill switch on, nothing automatic, administrators
+only".
+
+The first point above is narrowed by this list: another user's agent can bind
+your tunnel only if that user is on its allowed users. The list limits only
+Latchwire's daemon, not the second point: the real fix is still the PC/SC
+access policy.
+
+Where this is enforced: `internal/daemon/manager.go:777` (`add`, owner as
+the only allowed user), `:1330` and `:1394` (`connect`: the gate before any
+agent call and again at the reservation with a fresh policy read), `:761`
+(`tunnel.policy.set` administrator-only); `internal/daemon/policy.go:69`
+(`allows`), `:280` (`revoke`; `:293` keeps an armed tunnel blocking,
+unbound), `:66` (`failClosedPolicy`); `cmd/latchwire/policy.go:195`
+(`sudoUID`). Tests: `TestAddRecordsOwnerAsAllowedUser`,
+`TestNonAllowedUserCannotConnect`, `TestDenyRevokesUserBinding`,
+`TestAdminBindingSurvivesDeny` in `internal/daemon/policy_test.go`; Linux
+end-to-end: `testAllowedUsers` in `test/e2e/linux/e2e_test.go`.
 
 Also note: Latchwire's fresh-card hardening stores a random management key on
 the card protected by the PIN, which is what `ykman` calls "stored on the
@@ -255,14 +285,18 @@ compromised root.
   default) limits guessing. A stolen card without the machine gives an
   attacker the key for use only with the PIN, and the key still cannot be
   copied.
-- **Traffic outside the tunnel.** Version 1 supports split tunnels only
-  (default routes `0.0.0.0/0` and `::/0` are refused), has no kill switch, and
-  does not configure DNS. When the tunnel is torn down, for example because the
-  card was removed, traffic follows the normal routes.
+- **Traffic outside the tunnel.** Without the kill switch, traffic follows
+  the normal routes whenever the tunnel is not connected, for example after
+  the card was removed. Full tunnels, DNS and the kill switch, and what they
+  do not cover, are in section 5.7.
 - **Endpoint name resolution.** Endpoint host names are resolved by the system
   resolver at every connect. A hostile resolver can send the tunnel to the
   wrong address, but cannot read or forge traffic, because the server is
-  identified by its public key. It can deny service.
+  identified by its public key. It can deny service. While the kill switch
+  blocks, the resolver reaches no DNS server, so the last address found for
+  that endpoint is used (`internal/daemon/manager.go:1960`,
+  `resolveTunnel`); a Linux full tunnel resolves with its fwmark, outside
+  the tunnel (`internal/daemon/resolver_linux.go:15`).
 - **Preshared keys.** If a configuration uses `PresharedKey`, that key is a
   secret stored on disk (`0600`, root). It is not the identity key, and
   stealing it does not allow a connection without the card, but it is a secret
@@ -279,6 +313,8 @@ compromised root.
   and piv-go (`third_party/*/PATCHES.md` lists every change). Reproducible
   builds and signed releases are goals and do not exist yet.
 - **Windows, other platforms, and GUI.** Not implemented in the core CLI.
+  The Windows build does not compile yet (`ipc.PeerUID` has no Windows
+  implementation); that is the work of the Windows plan.
 
 ### 5.6 Trusted networks (on-demand)
 
@@ -309,6 +345,203 @@ because a root service cannot read it on macOS.
   about two seconds, and then treats the network as untrusted. `unknown` and
   `none` (no network) can never be added to the trusted networks. With no
   network, on-demand does nothing.
+- **On-demand connects only for users who may connect the tunnel.** The
+  key comes from the agent of an allowed user or an administrator (section
+  5.2); a manual `down`
+  keeps on-demand from reconnecting it until the machine is on another
+  identified network.
+
+Where this is enforced: `internal/netmon/identity.go:43` (`NetworkID`;
+`:22` `unknown`, `:18` `none`); `internal/daemon/ondemand.go:106`
+(`currentNetwork`, the second look), `:140` (`evaluateOnDemand`), `:204`
+(a kill switch set to `on` is never taken down on a trusted network);
+`internal/daemon/policy.go:92` (`ValidTrustedNetwork`);
+`internal/msg/en.go:335` (`PolicyTrustWarning`, printed with the policy
+usage). Tests: `internal/daemon/ondemand_test.go`; Linux end-to-end:
+`testOnDemand` in `test/e2e/linux/e2e_test.go` (untrusted network connects,
+`--trust-current-network` takes the tunnel down).
+
+### 5.7 Full tunnel, DNS and the kill switch
+
+This section covers what Latchwire changes in the system's network
+configuration and where that protection ends. "Where" lines name
+`file:line` at this revision. The Linux behaviour is checked end to end in a
+privileged container (`test/e2e/linux`, section 11); the macOS behaviour is
+checked by hand (docs/hardware-checklist.md, sections 8 to 15).
+
+**Journal and cleanup.** Every change to the system (route, policy rule,
+sysctl, nft or pf rules, DNS) is written to the journal
+`/var/run/latchwire/journal.json` (`0600`, root) before it is made, and
+undone from there. At startup the daemon undoes whatever a crashed run left,
+except an active kill switch (below). `/var/run` does not survive a reboot,
+and neither do the routes, rules or firewall state it describes.
+Where: `internal/netcfg/netcfg.go:347` (`applyStepLocked`: the undo reaches
+the journal first), `internal/netcfg/journal.go:18`, `:250` (`Cleanup`),
+`internal/daemon/manager.go:382` (the kill switch is kept). Linux end-to-end:
+`testCrash` (the policy rules and the tunnel DNS left by `kill -9` are gone
+after the restart).
+
+**Full tunnel.** A tunnel is a full tunnel when a peer's `AllowedIPs` holds
+`0.0.0.0/0` or `::/0`. Only one full tunnel can be up at a time, and the
+`AllowedIPs` of two tunnels that are up may not overlap.
+
+- Linux: the default route of each family goes into a routing table of its
+  own (the first free one from 51820; its number is also the fwmark). Two
+  policy rules, tagged `protocol 251`, send every packet without the mark to
+  that table, except where the main table has a more specific route
+  (`suppress_prefixlength 0`). The WireGuard socket and the endpoint
+  resolver carry the mark, so the endpoint stays reachable outside the
+  tunnel. `src_valid_mark` is set, and an nft table drops packets addressed
+  to the tunnel that arrive on other interfaces (reverse-path filter);
+  without `nft` the tunnel still runs without that filter and a warning is
+  logged.
+- macOS: `0.0.0.0/1` and `128.0.0.0/1` (`::/1`, `8000::/1`) on the utun
+  interface, and a host route to each endpoint through the physical
+  gateway, which follows gateway changes. With no gateway the endpoint gets
+  a blackhole route, so its packets never enter the tunnel.
+- **The local subnet stays outside the tunnel** (it has a more specific
+  route on both platforms, as with `wg-quick`). With the kill switch on, it
+  is blocked instead (checked in `testFull`).
+- **A family without a default route in the configuration is not
+  tunnelled.** With only `0.0.0.0/0`, IPv6 leaves through the physical
+  interface unless the kill switch is on. Add `::/0` to keep IPv6 in the
+  tunnel.
+
+Where: `internal/daemon/manager.go:1703` (`routesAll`), `:1818`
+(`conflictLocked`); `internal/netcfg/linuxplan_fulltunnel.go:62`
+(`LinuxTable`), `:152` (`src_valid_mark`), `:171` and `:175` (the rules),
+`:182` (reverse-path filter), `internal/msg/en.go:120` (`NetNoRPFilterFmt`);
+`internal/netcfg/darwinplan_fulltunnel.go:57` (endpoint host routes; `:76`
+blackhole), `:89` (the `/1` routes), `:495` (`refreshDarwin`). Linux
+end-to-end: `testFull`, `testMulti` (a full and a split tunnel together).
+
+**DNS.** A full tunnel's DNS servers answer every name. A split tunnel's do
+so only when no other tunnel holds that role; otherwise they answer the
+tunnel's search domains only, or are not used (status `ignored`). A full
+tunnel takes the role from a split tunnel when it connects. `latchwire
+status` shows the outcome in the DNS column.
+
+- Linux with systemd-resolved: `resolvectl dns`, `domain ~.` and
+  `default-route` on the tunnel link. Programs that bypass resolved (a
+  `resolv.conf` that does not point at its stub, a resolver of their own)
+  are not covered.
+- Linux with openresolv: `resolvconf -x` (exclusive). With the classic
+  Debian `resolvconf` there is no exclusive mode: the tunnel's servers are
+  added to the others, so names can still go to the local network's
+  resolver (status `shared`, with a warning). Scoped DNS (search domains
+  only) cannot be expressed with either `resolvconf` and is not applied
+  (`ignored`, with a warning). With none of them installed, a tunnel with
+  DNS servers is refused.
+- macOS: the tunnel's servers are written to the DNS of the primary network
+  service (`State:` in the configuration store) and follow it when the
+  primary service changes. Scoped DNS uses a resolver for the search
+  domains. **DNS set by hand in System Settings wins** (status
+  `overridden`, with a warning). A DHCP renewal can rewrite the service's
+  DNS without a network event; the daemon checks every 30 seconds and puts
+  the tunnel's servers back, so names can leak for up to that long.
+  Configuration profiles (`NEDNSSettings`, MDM), another VPN's resolvers
+  and a browser's own DNS over HTTPS are outside Latchwire's control.
+- **The kill switch has no DNS exception**: DNS passes only through a
+  tunnel interface. With the kill switch on, none of the leaks above can
+  leave through the physical interface (names then fail to resolve
+  instead).
+
+Where: `internal/daemon/manager.go:1867` (`dnsRoleLocked`), `:1754`
+(`demote`), `:1899` (`dnsStatus`), `:476` and `:479` (network changes and the
+30-second check); `internal/netcfg/netcfg.go:224` (`SetDNSRole`), `:522`
+(one primary owner per daemon); `internal/netcfg/linuxplan_dns.go:50`
+(`linuxDNS`: resolved, then openresolv `:209`, then classic `:74`, else
+refused `:62`); `internal/netcfg/darwinplan_dns.go:521` (`darwinDNS`),
+`:468` (`manualDNS`), `:614` (`moveDNSLocked`). Linux end-to-end: `testDNS`
+(openresolv: only the tunnel's server in `resolv.conf`, a name resolves
+through the tunnel, the original list returns after `down`).
+
+**Kill switch.** The policy value is `auto` (default), `on` or `off`. `auto`
+means on for a tunnel with exactly one peer whose `AllowedIPs` hold
+`0.0.0.0/0` or `::/0`. While any tunnel's kill switch is on, only these pass:
+loopback, the tunnel interfaces, UDP to the endpoints (and from them only to
+the tunnel's own listen port), the Linux full tunnel's marked packets, DHCP
+from root's sockets to the broadcast address or private and link-local
+ranges, and IPv6 neighbour discovery and MLD on the link. Everything else is
+rejected (outbound, so programs fail at once) or dropped (inbound and, on
+Linux, forwarded). A kill switch set to `on` on a split tunnel therefore
+blocks all traffic outside that tunnel's `AllowedIPs`. Linux uses the nft
+table `inet latchwire`, macOS the pf anchor `com.apple/250.latchwire` with an
+enable reference of its own (`pfctl -E`), released when the kill switch
+comes off. A tunnel whose kill switch is on is not connected when the
+firewall cannot be set up (Linux without `nft`; macOS when the main pf
+ruleset lacks the `com.apple/*` anchor point).
+
+Where: `internal/daemon/policy.go:103` (`armed`);
+`internal/daemon/manager.go:2339` (`armKillSwitch`: refused without a
+firewall), `:1927` (`killSwitchStatus`); `internal/killswitch/nft.go:18`,
+`:51` to `:54` (DHCP), `:90` (no DNS rule), `:100` (`nftScript`), `:176`
+(forward chain); `internal/killswitch/pf.go:24`, `:48` and `:50` (DHCP,
+`user root`), `:79` (`pfRules`), `:110`, `:228` (anchor point), `:240`
+(`pfctl -E`). Linux end-to-end: `testFull` (armed: the local subnet is
+blocked), `testKillSwitchCard`.
+
+**Fail-closed.** The kill switch blocks while its tunnel is connecting,
+waiting for its card (`card_removed`) or failed (`error`), not only while
+it is connected. Only `latchwire down`, `latchwire remove` or an orderly
+stop of the daemon lift it.
+
+- **The daemon crashes** (`kill -9`, a panic): the firewall rules stay in
+  place and keep blocking. At the next start the daemon keeps them and
+  restores the tunnels it blocked for as `card_removed`, with their key and
+  user, so the card's return reconnects them and their user can take them
+  down. Everything else (routes, rules, DNS) is undone.
+- **Something removes the rules** (`pfctl -d`, `nft delete table`): the
+  daemon checks every 30 seconds and sets them again.
+- **A deny of the user who holds an armed tunnel** keeps it blocking
+  (section 5.2).
+- **The kill switch does not survive a reboot**, and it does not block
+  before a tunnel with the kill switch has started connecting: until then
+  the machine's traffic is not blocked.
+- **A corrupt journal fails open**: when the journal cannot be read at
+  startup, what it held is unknown, so the daemon removes the well-known
+  kill switch objects and logs a warning, rather than leaving a block that
+  nothing could lift.
+
+Where: `internal/daemon/manager.go:1927` (`killSwitchStatus`), `:382`,
+`:2369` (`startKillSwitch`; `:2371` corrupt journal, `:2379` crash),
+`:2408` (`restoreKillSwitchTunnels`), `:2288` (`verifyKillSwitch`), `:532`
+(`shutdown`); `internal/daemon/store.go:269` (`killswitch.state`, the record
+of the tunnels to restore). Linux end-to-end: `testKillSwitchCard` (card
+removed: blocked; card back: connected; `down`: open), `testCrash` (blocked
+while the daemon is dead and after its restart; the card's return
+reconnects), `testShutdown` (an orderly stop lifts it).
+
+**What the kill switch does not cover.**
+
+- Root and the kernel (section 5.4). On Linux a process with
+  `CAP_NET_ADMIN` can give its packets the full tunnel's fwmark and pass.
+- DHCP servers outside the private and link-local ranges (for example a
+  carrier-grade NAT range, or a public address that a unicast renewal goes
+  to) are not reachable while the kill switch blocks; the lease then runs
+  out.
+- On Linux the forward chain drops routed traffic that does not go into a
+  tunnel: containers and virtual machines behind a bridge or NAT on the host
+  lose their network while the kill switch is on.
+- On macOS, pf states created earlier by the rules of other anchors are not
+  removed and can keep passing. Latchwire's own rules keep state only for
+  the endpoint traffic. On Linux no earlier connection survives (the
+  rules do not accept established traffic in general).
+- On macOS the 30-second check sees pf disabled or the anchor emptied, but
+  not a main ruleset that someone replaced (`pfctl -f`) with one that no
+  longer evaluates `com.apple/*`; the kill switch is then silently not in
+  effect. On Linux it checks that the table exists, not its contents.
+- Trusted networks (on-demand) take down tunnels whose kill switch is `auto`
+  or `off`, on a signal anyone on the local network can fake (section 5.6).
+
+**Known gaps at this revision.** These are tracked for a fix:
+
+- A DNS undo that fails when a tunnel goes down is retried only at the next
+  daemon start; until then other tunnels' DNS stays `busy`.
+- The macOS anchor-evaluation check named above.
+- A deny of the user who holds a tunnel in state `error` with its kill
+  switch on does not unbind that user, who can then lift the kill switch
+  with `latchwire down` after a restart of the daemon.
 
 ## 6. Why the cached `ss` alone cannot build a tunnel
 
@@ -356,14 +589,15 @@ Where this is enforced: `third_party/wireguard-go/PATCHES.md` and
 
 | Request | Who may make it |
 | --- | --- |
-| `tunnel.add`, `tunnel.remove` | Administrators only: root, macOS `admin`, Linux `sudo`, `wheel` or `latchwire`. |
-| `tunnel.connect` | An administrator, or a user whose own agent is registered and passes the proof of possession. Non-administrators use only their own agent and cannot take over a tunnel bound to another user. The proof shows access to the card, not which user owns it: a user who can reach your card through PC/SC can bind your unbound tunnels (section 5.2). |
-| `tunnel.disconnect` | An administrator, or the user the tunnel is bound to. |
-| `tunnel.status` | An administrator or a user with a registered agent. Registering needs no card, so in practice any local user. |
+| `tunnel.add`, `tunnel.remove`, `tunnel.policy.set` | Administrators only: root, macOS `admin`, Linux `sudo`, `wheel` or `latchwire`. |
+| `tunnel.connect` | An administrator, or one of the tunnel's allowed users whose own agent is registered and passes the proof of possession. Non-administrators use only their own agent and cannot take over a tunnel bound to another user. The proof shows access to the card, not which user owns it: an allowed user who can reach your card through PC/SC can bind your unbound tunnels (section 5.2). |
+| `tunnel.disconnect` | An administrator, the user the tunnel is bound to, or an allowed user abandoning an automatic connect (on-demand, AutoConnect) that is pending for that user. A tunnel left blocking by a deny can be taken down only by an administrator. |
+| `tunnel.status`, `tunnel.policy.get`, `network.current` | An administrator or a user with a registered agent. Registering needs no card, so in practice any local user. |
 | `key.public`, `key.x25519` | The daemon, to the agent. The agent refuses a daemon that is neither root nor its own user. |
 
-Where this is enforced: `internal/daemon/manager.go` (`handle`), tests listed
-in section 4.
+Where this is enforced: `internal/daemon/manager.go:688` (`handle`), `:630`
+(`requestDisconnect`), `internal/daemon/ondemand.go:299`
+(`handleNetwork`), tests listed in sections 4 and 5.2.
 
 ## 8. Handshake flood limits
 
@@ -495,10 +729,21 @@ in `internal/daemon/manager_test.go` (`agentGrace` in `manager.go` is the
 ## 11. Verification you can do
 
 - `go test ./...` runs the unit and integration tests, including the
-  security-relevant ones named above, with fake cards.
+  security-relevant ones named above, with fake cards. System commands are
+  checked against recorded command lists, never run.
+- `test/e2e/linux/run.sh` runs the Linux network behaviour for real, in
+  network namespaces inside a throw-away privileged container (the command
+  is in the script's header; it refuses to run outside a container or as
+  non-root): split and full tunnel, DNS through openresolv, the kill switch
+  on card removal and return, `kill -9` and restart of the daemon, an
+  orderly stop, a full and a split tunnel together, allowed users, and
+  on-demand. The production daemon and CLI are used; only the agent (with a
+  software key) and the WireGuard server are test binaries.
 - [docs/hardware-checklist.md](hardware-checklist.md) lists the checks that need
   real YubiKeys, including card removal and re-seating while connected and
-  smart-card login or `sudo` while the tunnel is up.
+  smart-card login or `sudo` while the tunnel is up, and the macOS (and
+  real-distribution Linux) network checks: full tunnel, DNS leaks, kill
+  switch, crashes, several tunnels, on-demand.
 - Run `ykman piv info` before and after `latchwire keygen`: the slots `9a` and
   `9d` must be unchanged and the new key must be in a retired slot.
 

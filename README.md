@@ -2,8 +2,8 @@
 
 Latchwire is an open-source WireGuard-compatible client that keeps the static X25519 private key inside a hardware token (YubiKey PIV): the key is generated on the card and never leaves it, the protocol and the server stay unchanged, and no card means no tunnel. Design: [docs/design.md](docs/design.md). WireGuard is a registered trademark of Jason A. Donenfeld.
 
-**Status: core, macOS and Linux command-line only.** Latchwire is pre-release software: it has not had an independent security review, and there are no signed releases yet.
+**Status: macOS and Linux command line, with network parity: full tunnel, DNS, kill switch, on-demand and allowed users.** The Linux network behaviour is tested end to end in a privileged container (`test/e2e/linux/run.sh`); the macOS network behaviour and everything that needs a real YubiKey are still to be verified with [docs/hardware-checklist.md](docs/hardware-checklist.md). Windows is not implemented yet (the Windows build does not compile). Latchwire is pre-release software: it has not had an independent security review, and there are no signed releases yet.
 
-- Security: [threat model](docs/threat-model.md) (what is and is not protected, including the card-sharing caveat) and [security policy](SECURITY.md) (how to report a vulnerability).
+- Security: [threat model](docs/threat-model.md) (what is and is not protected, including the card-sharing caveat and the limits of the kill switch and DNS handling) and [security policy](SECURITY.md) (how to report a vulnerability).
 - Testing with real hardware: [docs/hardware-checklist.md](docs/hardware-checklist.md).
 - Contributing: [CONTRIBUTING.md](CONTRIBUTING.md).
