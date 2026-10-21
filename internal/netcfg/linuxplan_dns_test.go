@@ -331,6 +331,7 @@ func TestLinuxDNSUndoAlreadyGone(t *testing.T) {
 // Through the Configurer: DNS comes after the link is up, is reported, and
 // the journal holds the revert.
 func TestLinuxApplyDNS(t *testing.T) {
+	freshPrimaryDNS(t)
 	r := &recorder{}
 	c := newLinux(r, nil).(*configurer)
 	c.dns = func(ctx2 context.Context, rr Runner, p Plan) ([]step, string, error) {
@@ -363,6 +364,7 @@ func TestLinuxApplyDNS(t *testing.T) {
 }
 
 func TestLinuxApplyDNSUnsupportedRunsNothing(t *testing.T) {
+	freshPrimaryDNS(t)
 	r := &recorder{failOn: "resolvectl"}
 	r.fail = map[string]error{"resolvconf --version": exec.ErrNotFound}
 	c := newLinux(r, nil).(*configurer)
@@ -378,5 +380,61 @@ func TestLinuxApplyDNSUnsupportedRunsNothing(t *testing.T) {
 		if strings.HasPrefix(cmd, "ip ") {
 			t.Errorf("changed the system before failing: %q", r.cmds)
 		}
+	}
+}
+
+// P12 on Linux: a second DNSPrimary tunnel applies no DNS; the owner's
+// Remove releases it, and so does a failed Apply.
+func TestLinuxDNSPrimaryOneOwner(t *testing.T) {
+	freshPrimaryDNS(t)
+	stub := resolvFile(t, stubResolv)
+	mk := func(r *recorder) *configurer {
+		c := newLinux(r, nil).(*configurer)
+		c.dns = func(ctx2 context.Context, rr Runner, p Plan) ([]step, string, error) {
+			return linuxDNS(ctx2, rr, stub, p)
+		}
+		return c
+	}
+	ra, rb := &recorder{}, &recorder{}
+	a, b := mk(ra), mk(rb)
+	pa := dnsPlan(DNSPrimary)
+	pa.Addresses = pfx("10.0.0.2/32")
+	pb := pa
+	pb.Iface = "wg1"
+	if res, err := a.Apply(ctx, pa); err != nil || res.DNS != DNSOutcomeResolved {
+		t.Fatalf("first: %+v %v", res, err)
+	}
+	res, err := b.Apply(ctx, pb)
+	if err != nil || res.DNS != DNSOutcomePrimaryBusy {
+		t.Fatalf("second: %+v %v", res, err)
+	}
+	for _, c := range rb.cmds {
+		if strings.HasPrefix(c, "resolvectl") {
+			t.Errorf("second tunnel ran %q", c)
+		}
+	}
+	if err := b.Remove(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Remove(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rb.cmds = nil
+	if res, err := b.Apply(ctx, pb); err != nil || res.DNS != DNSOutcomeResolved {
+		t.Fatalf("after release: %+v %v", res, err)
+	}
+	if !slices.Contains(rb.cmds, "resolvectl dns wg1 10.0.0.1 fd00::1") {
+		t.Errorf("ran %q", rb.cmds)
+	}
+	if err := b.Remove(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// A rolled-back Apply releases it.
+	ra.failOn = "resolvectl dns"
+	if _, err := a.Apply(ctx, pa); err == nil {
+		t.Fatal("failing Apply succeeded")
+	}
+	if res, err := b.Apply(ctx, pb); err != nil || res.DNS != DNSOutcomeResolved {
+		t.Fatalf("after rollback: %+v %v", res, err)
 	}
 }

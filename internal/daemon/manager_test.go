@@ -394,6 +394,8 @@ type envOpts struct {
 	pin        string
 	noAgent    bool
 	hook       func(m *Manager) // runs before Serve
+	// verifyEvery is Options.VerifyEvery (0: the 30 s default).
+	verifyEvery time.Duration
 }
 
 func newEnv(t *testing.T, o envOpts) *env {
@@ -430,6 +432,7 @@ func newEnv(t *testing.T, o envOpts) *env {
 		// Never the host's journal.
 		JournalPath: filepath.Join(dir, "journal.json"),
 		IsAdmin:     func(uid uint32) (bool, error) { return e.admin(uid), nil },
+		VerifyEvery: o.verifyEvery,
 	})
 	// No host network notifications: tests that need them inject theirs.
 	e.m.netSource = func() (netmon.Source, error) { return make(chanSource), nil }

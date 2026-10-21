@@ -161,9 +161,20 @@ func (c *configurer) Apply(ctx context.Context, p Plan) (Applied, error) {
 	// DNS goes last: its commands need the interface to exist and be up.
 	// Its system reads happen before the first change, so an unsupported
 	// system fails Apply with nothing to undo.
-	if c.dns != nil {
+	// Only one tunnel at a time answers every name (P12): a second
+	// DNSPrimary tunnel would journal the first one's servers as the
+	// original and leave them behind.
+	busy := false
+	if c.dns != nil && p.DNSRole == DNSPrimary && len(p.DNS) > 0 {
+		if holder, ok := c.claimPrimaryDNS(p.Iface); !ok {
+			log.Printf(msg.NetDNSPrimaryBusyFmt, p.Iface, holder)
+			busy, res.DNS = true, DNSOutcomePrimaryBusy
+		}
+	}
+	if c.dns != nil && !busy {
 		ds, how, err := c.dns(ctx, c.run, p)
 		if err != nil {
+			c.releasePrimaryDNS()
 			return Applied{}, err
 		}
 		steps = append(steps, ds...)
@@ -293,6 +304,7 @@ func (c *configurer) Remove(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if len(c.applied) == 0 {
+		c.releasePrimaryDNS()
 		return nil
 	}
 	return c.undoLocked(ctx)
@@ -312,6 +324,7 @@ func (c *configurer) rollbackLocked(ctx context.Context) {
 func (c *configurer) undoLocked(ctx context.Context) error {
 	all := c.undoListLocked()
 	c.applied, c.carried, c.dn = nil, nil, darwinFollow{}
+	c.releasePrimaryDNS()
 	var first error
 	var keep []Step
 	for i := len(all) - 1; i >= 0; i-- {
@@ -344,6 +357,36 @@ func (c *configurer) undoLocked(ctx context.Context) error {
 		first = jerr
 	}
 	return first
+}
+
+// primaryDNS is the configurer whose DNS answers every name (DNSPrimary):
+// at most one per process (P12), from its Apply until its Remove or
+// rollback.
+var primaryDNS struct {
+	mu    sync.Mutex
+	owner *configurer
+	iface string
+}
+
+// claimPrimaryDNS makes c the DNSPrimary owner, or reports the interface
+// of the configurer that is.
+func (c *configurer) claimPrimaryDNS(iface string) (holder string, ok bool) {
+	primaryDNS.mu.Lock()
+	defer primaryDNS.mu.Unlock()
+	if primaryDNS.owner != nil && primaryDNS.owner != c {
+		return primaryDNS.iface, false
+	}
+	primaryDNS.owner, primaryDNS.iface = c, iface
+	return "", true
+}
+
+// releasePrimaryDNS gives up the DNSPrimary ownership if c holds it.
+func (c *configurer) releasePrimaryDNS() {
+	primaryDNS.mu.Lock()
+	defer primaryDNS.mu.Unlock()
+	if primaryDNS.owner == c {
+		primaryDNS.owner, primaryDNS.iface = nil, ""
+	}
 }
 
 func (c *configurer) exec(ctx context.Context, s Step) error {

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/netip"
+	"os"
 	"reflect"
 	"slices"
 	"sort"
@@ -33,7 +35,22 @@ type fakeStore struct {
 	setErr string
 }
 
-func newFakeStore() *fakeStore { return &fakeStore{keys: map[string]fdict{}} }
+// newFakeStore also frees the process-wide DNSPrimary ownership (P12), now
+// and when the test ends, so tests do not see each other's tunnels.
+func newFakeStore(t *testing.T) *fakeStore {
+	freshPrimaryDNS(t)
+	return &fakeStore{keys: map[string]fdict{}}
+}
+
+func freshPrimaryDNS(t *testing.T) {
+	reset := func() {
+		primaryDNS.mu.Lock()
+		primaryDNS.owner, primaryDNS.iface = nil, ""
+		primaryDNS.mu.Unlock()
+	}
+	reset()
+	t.Cleanup(reset)
+}
 
 func (f *fakeStore) Run(c2 context.Context, name string, args []string, in []byte) ([]byte, error) {
 	if name != "scutil" {
@@ -61,6 +78,10 @@ func (f *fakeStore) Run(c2 context.Context, name string, args []string, in []byt
 			rest := tok[2:]
 			if len(rest) > 0 && (rest[0] == "*" || rest[0] == "#") {
 				v.kind, rest = rest[0], rest[1:]
+			}
+			if len(rest) == 0 {
+				out.WriteString("d.add: no values.\n")
+				continue
 			}
 			v.vals = rest
 			cur[tok[1]] = v
@@ -200,7 +221,7 @@ func (f *fakeStore) writes() []string {
 }
 
 func TestDarwinDNSPrimaryWritesAndRestores(t *testing.T) {
-	f := newFakeStore()
+	f := newFakeStore(t)
 	f.setPrimary(svc1)
 	orig := fdict{
 		"ServerAddresses": arr("192.168.1.1", "fe80::1%en0"),
@@ -285,7 +306,7 @@ func TestDarwinDNSPrimaryWritesAndRestores(t *testing.T) {
 // Leak, not clobber: a dictionary somebody wrote after Latchwire is left
 // alone, and so is a key that is gone (the service went down).
 func TestDarwinDNSPrimaryUndoLeavesForeignDict(t *testing.T) {
-	f := newFakeStore()
+	f := newFakeStore(t)
 	f.setPrimary(svc1)
 	f.keys[dnsKey(svc1)] = fdict{"ServerAddresses": arr("192.168.1.1")}
 	j, _ := newJournal(t)
@@ -320,7 +341,7 @@ func TestDarwinDNSPrimaryUndoLeavesForeignDict(t *testing.T) {
 }
 
 func TestDarwinDNSPrimaryNoOriginalRemoves(t *testing.T) {
-	f := newFakeStore()
+	f := newFakeStore(t)
 	f.setPrimary(svc1)
 	j, _ := newJournal(t)
 	c := newDarwin(f, j)
@@ -350,7 +371,7 @@ func TestDarwinDNSPrimaryNoOriginalRemoves(t *testing.T) {
 }
 
 func TestDarwinDNSScopedSupplemental(t *testing.T) {
-	f := newFakeStore()
+	f := newFakeStore(t)
 	f.setPrimary(svc1)
 	primary := fdict{"ServerAddresses": arr("192.168.1.1")}
 	f.keys[dnsKey(svc1)] = maps2(primary)
@@ -390,7 +411,7 @@ func TestDarwinDNSScopedSupplemental(t *testing.T) {
 	}
 
 	// Scoped without search domains has nothing to answer: no change.
-	f2 := newFakeStore()
+	f2 := newFakeStore(t)
 	res, err = newDarwin(f2, nil).Apply(ctx, darwinDNSPlan(DNSScoped))
 	if err != nil || res.DNS != DNSOutcomeScutilScoped || len(f2.scripts) != 0 {
 		t.Errorf("scoped without domains: %+v %v %q", res, err, f2.scripts)
@@ -398,7 +419,7 @@ func TestDarwinDNSScopedSupplemental(t *testing.T) {
 }
 
 func TestDarwinDNSRefreshPrimaryServiceChange(t *testing.T) {
-	f := newFakeStore()
+	f := newFakeStore(t)
 	f.setPrimary(svc1)
 	orig1 := fdict{"ServerAddresses": arr("192.168.1.1")}
 	orig2 := fdict{"ServerAddresses": arr("172.20.10.1"), "SearchDomains": arr("mobile.lan")}
@@ -472,7 +493,7 @@ func TestDarwinDNSRefreshPrimaryServiceChange(t *testing.T) {
 
 // A move that fails is not retried on every network event (P9).
 func TestDarwinDNSRefreshBacksOff(t *testing.T) {
-	f := newFakeStore()
+	f := newFakeStore(t)
 	f.setPrimary(svc1)
 	c := newDarwin(f, nil).(*configurer)
 	now := time.Unix(1000, 0)
@@ -505,7 +526,7 @@ func TestDarwinDNSRefreshBacksOff(t *testing.T) {
 }
 
 func TestDarwinDNSIPv6OnlyPrimaryAndSetupOverride(t *testing.T) {
-	f := newFakeStore()
+	f := newFakeStore(t)
 	f.keys["State:/Network/Global/IPv6"] = fdict{"PrimaryService": str(svc1)}
 	f.keys["Setup:/Network/Service/"+svc1+"/DNS"] = fdict{"ServerAddresses": arr("1.1.1.1")}
 	res, err := newDarwin(f, nil).Apply(ctx, darwinDNSPlan(DNSPrimary))
@@ -523,7 +544,7 @@ func TestDarwinDNSIPv6OnlyPrimaryAndSetupOverride(t *testing.T) {
 
 	// No primary service at all: nothing to set now; Refresh applies once
 	// one appears.
-	f2 := newFakeStore()
+	f2 := newFakeStore(t)
 	c := newDarwin(f2, nil)
 	if res, err := c.Apply(ctx, darwinDNSPlan(DNSPrimary)); err != nil || res.DNS != DNSOutcomeScutilPrimary {
 		t.Fatalf("offline Apply: %+v %v", res, err)
@@ -546,7 +567,7 @@ func TestDarwinDNSRejectsBadInput(t *testing.T) {
 	zoned.DNS = append(zoned.DNS, netip.MustParseAddr("fe80::1%en0"))
 	bad = append(bad, zoned)
 	for _, p := range bad {
-		f := newFakeStore()
+		f := newFakeStore(t)
 		f.setPrimary(svc1)
 		if _, err := newDarwin(f, nil).Apply(ctx, p); err == nil {
 			t.Errorf("%v %q accepted", p.DNS, p.DNSSearch)
@@ -561,7 +582,7 @@ func TestDarwinDNSRejectsBadInput(t *testing.T) {
 		func(f *fakeStore) { f.setPrimary("../Global/IPv4") },
 		func(f *fakeStore) { f.setPrimary("a b") },
 	} {
-		f := newFakeStore()
+		f := newFakeStore(t)
 		setup(f)
 		if _, err := newDarwin(f, nil).Apply(ctx, darwinDNSPlan(DNSPrimary)); err == nil || len(f.writes()) != 0 {
 			t.Errorf("bad service: err=%v writes=%q", err, f.writes())
@@ -574,7 +595,7 @@ func TestDarwinDNSRejectsBadInput(t *testing.T) {
 	// Bad interface names never reach a scoped key.
 	p := darwinDNSPlan(DNSScoped, "corp.example")
 	p.Iface = "utun7/x"
-	if _, err := newDarwin(newFakeStore(), nil).Apply(ctx, p); err == nil {
+	if _, err := newDarwin(newFakeStore(t), nil).Apply(ctx, p); err == nil {
 		t.Error("bad interface name accepted")
 	}
 }
@@ -582,7 +603,7 @@ func TestDarwinDNSRejectsBadInput(t *testing.T) {
 // scutil reports its errors on stdout and exits 0: any output from a
 // write is a failure, and Apply rolls back.
 func TestDarwinDNSWriteFailure(t *testing.T) {
-	f := newFakeStore()
+	f := newFakeStore(t)
 	f.setPrimary(svc1)
 	orig := fdict{"ServerAddresses": arr("192.168.1.1")}
 	f.keys[dnsKey(svc1)] = maps2(orig)
@@ -620,6 +641,8 @@ func TestParseScutilDict(t *testing.T) {
   SupplementalMatchOrders : <array> {
     0 : 100
   }
+  SortList : <array> {
+  }
   Unknown : x
   __FLAGS__ : 2
 }
@@ -629,7 +652,7 @@ func TestParseScutilDict(t *testing.T) {
 		t.Fatalf("found=%v err=%v", found, err)
 	}
 	keep, dropped := restorableDNS(d)
-	wantDropped := []string{"Nested", "SupplementalMatchOrders", "Unknown", "__FLAGS__"}
+	wantDropped := []string{"Nested", "SupplementalMatchOrders", "SortList", "Unknown", "__FLAGS__"}
 	if !reflect.DeepEqual(dropped, wantDropped) {
 		t.Errorf("dropped %q, want %q", dropped, wantDropped)
 	}
@@ -664,7 +687,7 @@ func TestParseScutilDict(t *testing.T) {
 }
 
 func TestScutilUndoUnreadableLeavesAlone(t *testing.T) {
-	f := newFakeStore()
+	f := newFakeStore(t)
 	f.keys[dnsKey(svc1)] = fdict{"ServerAddresses": arr("10.0.0.1")}
 	// A malformed journal step fails instead of running.
 	if err := runUndo(ctx, f, Step{Name: "scutil", Stdin: []byte("d.init\n")}); err == nil {
@@ -681,4 +704,132 @@ func TestScutilUndoUnreadableLeavesAlone(t *testing.T) {
 	if err := runUndo(ctx, r, s); err != nil || len(r.cmds) != 1 {
 		t.Errorf("unreadable: err=%v cmds=%q", err, r.cmds)
 	}
+}
+
+// An empty array in the original is left out of the undo: d.add cannot
+// write one, and the whole restore would fail.
+func TestDarwinDNSEmptyArrayRestores(t *testing.T) {
+	f := newFakeStore(t)
+	f.setPrimary(svc1)
+	f.keys[dnsKey(svc1)] = fdict{"ServerAddresses": arr("192.168.1.1"), "SearchDomains": arr()}
+	c := newDarwin(f, nil)
+	if _, err := c.Apply(ctx, darwinDNSPlan(DNSPrimary)); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Remove(ctx); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if want := (fdict{"ServerAddresses": arr("192.168.1.1")}); !reflect.DeepEqual(f.keys[dnsKey(svc1)], want) {
+		t.Errorf("restored %v, want %v", f.keys[dnsKey(svc1)], want)
+	}
+}
+
+// P12: one DNSPrimary tunnel per process. A second one applies no DNS and
+// says so; the first one's original is restored intact; ownership ends with
+// Remove or a rolled-back Apply.
+func TestDarwinDNSPrimaryOneOwner(t *testing.T) {
+	f := newFakeStore(t)
+	f.setPrimary(svc1)
+	orig := fdict{"ServerAddresses": arr("192.168.1.1")}
+	f.keys[dnsKey(svc1)] = maps2(orig)
+	j, _ := newJournal(t)
+	a, b := newDarwin(f, j), newDarwin(f, j)
+	if res, err := a.Apply(ctx, darwinDNSPlan(DNSPrimary)); err != nil || res.DNS != DNSOutcomeScutilPrimary {
+		t.Fatalf("first: %+v %v", res, err)
+	}
+	pb := darwinDNSPlan(DNSPrimary, "other.example")
+	pb.Iface, pb.Addresses = "utun8", pfx("10.9.0.2/32")
+	pb.DNS = []netip.Addr{netip.MustParseAddr("10.9.0.1")}
+	n := len(f.scripts)
+	res, err := b.Apply(ctx, pb)
+	if err != nil || res.DNS != DNSOutcomePrimaryBusy {
+		t.Fatalf("second: %+v %v", res, err)
+	}
+	if len(f.scripts) != n || len(scutilUndos(j, "utun8")) != 0 {
+		t.Errorf("second tunnel touched DNS: %q", f.scripts[n:])
+	}
+	if err := b.Refresh(ctx); err != nil || len(f.scripts) != n {
+		t.Errorf("second tunnel's Refresh touched DNS: %v %q", err, f.scripts[n:])
+	}
+	if err := b.Remove(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Remove(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(f.keys[dnsKey(svc1)], orig) {
+		t.Errorf("restored %v, want %v", f.keys[dnsKey(svc1)], orig)
+	}
+	// Released by Remove: b can have it now.
+	if res, err := b.Apply(ctx, pb); err != nil || res.DNS != DNSOutcomeScutilPrimary {
+		t.Fatalf("after release: %+v %v", res, err)
+	}
+	if err := b.Remove(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Released by a rolled-back Apply.
+	f.setErr = "  set: Permission denied"
+	if _, err := a.Apply(ctx, darwinDNSPlan(DNSPrimary)); err == nil {
+		t.Fatal("failing Apply succeeded")
+	}
+	f.setErr = ""
+	if res, err := b.Apply(ctx, pb); err != nil || res.DNS != DNSOutcomeScutilPrimary {
+		t.Fatalf("after rollback: %+v %v", res, err)
+	}
+	// Scoped DNS is not limited.
+	ps := darwinDNSPlan(DNSScoped, "corp.example")
+	if res, err := newDarwin(f, nil).Apply(ctx, ps); err != nil || res.DNS != DNSOutcomeScutilScoped {
+		t.Fatalf("scoped next to a primary: %+v %v", res, err)
+	}
+}
+
+// Another tool that keeps rewriting the DNS: each Refresh (the daemon's
+// 30 s tick, P12) puts the tunnel's back, logging it once per service and
+// without "leaving them alone" noise; overridden follows the service.
+func TestDarwinDNSFightLogsOnce(t *testing.T) {
+	logs := captureLog(t)
+	f := newFakeStore(t)
+	f.setPrimary(svc1)
+	f.keys["Setup:/Network/Service/"+svc1+"/DNS"] = fdict{"ServerAddresses": arr("1.1.1.1")}
+	c := newDarwin(f, nil).(*configurer)
+	if res, err := c.Apply(ctx, darwinDNSPlan(DNSPrimary)); err != nil || res.DNS != DNSOutcomeScutilPrimaryOverridden || !c.dn.overridden {
+		t.Fatalf("%+v %v overridden=%v", res, err, c.dn.overridden)
+	}
+	ours := fdict{"ServerAddresses": arr("10.0.0.1", "fd00::1")}
+	for i := range 3 {
+		f.keys[dnsKey(svc1)] = fdict{"ServerAddresses": arr(fmt.Sprintf("192.168.1.%d", i+10))}
+		if err := c.Refresh(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(f.keys[dnsKey(svc1)], ours) {
+			t.Fatalf("round %d: %v", i, f.keys[dnsKey(svc1)])
+		}
+	}
+	out := logs.String()
+	if n := strings.Count(out, "DNS applied again to network service "+svc1); n != 1 {
+		t.Errorf("re-apply logged %d times:\n%s", n, out)
+	}
+	if strings.Contains(out, "leaving them alone") {
+		t.Errorf("fight logged as foreign settings:\n%s", out)
+	}
+	// The last rewrite is what Remove restores.
+	f.setPrimary(svc2)
+	if err := c.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if c.dn.overridden {
+		t.Error("overridden kept after moving to a service without manual DNS")
+	}
+	if want := (fdict{"ServerAddresses": arr("192.168.1.12")}); !reflect.DeepEqual(f.keys[dnsKey(svc1)], want) {
+		t.Errorf("svc1 restored %v, want %v", f.keys[dnsKey(svc1)], want)
+	}
+}
+
+// captureLog sends the log to a buffer until the test ends.
+func captureLog(t *testing.T) *strings.Builder {
+	t.Helper()
+	var b strings.Builder
+	log.SetOutput(&b)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	return &b
 }

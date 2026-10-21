@@ -20,6 +20,9 @@ const (
 	DNSOutcomeResolvconf        = "resolvconf"         // through openresolv, which takes the servers exclusively
 	DNSOutcomeResolvconfShared  = "resolvconf-shared"  // through classic resolvconf: other interfaces' servers stay in the list
 	DNSOutcomeScopedUnsupported = "scoped-unsupported" // scoped DNS wanted, resolvconf cannot do it: not applied
+	// DNSOutcomePrimaryBusy (both platforms): another tunnel of this
+	// process already answers every name (P12); nothing is applied.
+	DNSOutcomePrimaryBusy = "primary-busy"
 )
 
 // ErrDNSUnsupported is returned, before any command runs, when a tunnel has

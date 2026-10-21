@@ -230,7 +230,9 @@ func restorableDNS(d scDict) (keep scDict, dropped []string) {
 		}
 		switch kind {
 		case 'a':
-			ok = ok && e.array
+			// d.add cannot write an empty array ("d.add: no
+			// values."), and an empty array says nothing.
+			ok = ok && e.array && len(e.vals) > 0
 		case 's':
 			ok = ok && !e.array && len(e.vals) == 1 && e.vals[0] != "" && !typeMarker(e.vals[0])
 		case 'n':
@@ -552,7 +554,7 @@ func (c *configurer) darwinDNS(ctx context.Context, r Runner, p Plan) ([]step, s
 		return nil, "", err
 	}
 	how := DNSOutcomeScutilPrimary
-	if manualDNS(ctx, r, svc) {
+	if c.dn.overridden = manualDNS(ctx, r, svc); c.dn.overridden {
 		log.Printf(msg.NetDNSManualFmt, p.Iface)
 		how = DNSOutcomeScutilPrimaryOverridden
 	}
@@ -566,12 +568,16 @@ func (c *configurer) darwinDNS(ctx context.Context, r Runner, p Plan) ([]step, s
 // Latchwire's) and the tunnel's written to the current one. Otherwise it
 // only reads (P9). Offline (no primary service) nothing changes. A move
 // that failed is not retried for moveBackoff unless the service changes.
+// The daemon calls Refresh every 30 s as well (P12); a re-apply is logged
+// once per service, so a tool that keeps rewriting the DNS does not flood
+// the log.
 func (c *configurer) refreshDNSLocked(ctx context.Context) error {
 	d := &c.dn
 	svc, err := primaryService(ctx, c.run)
 	if err != nil || svc == "" {
 		return err
 	}
+	rewritten := false
 	if svc == d.dnsSvc {
 		cur, found, err := scutilShow(ctx, c.run, serviceDNSKey(svc))
 		if err != nil {
@@ -580,32 +586,42 @@ func (c *configurer) refreshDNSLocked(ctx context.Context) error {
 		if found && sameDict(cur, d.dnsOurs) {
 			return nil
 		}
+		rewritten = true
 	}
 	now := c.clock()
 	if d.dnsFailed && d.dnsFailSvc == svc && now.Sub(d.dnsFailAt) < moveBackoff {
 		return nil
 	}
-	if err := c.moveDNSLocked(ctx, svc); err != nil {
+	if err := c.moveDNSLocked(ctx, svc, rewritten); err != nil {
 		d.dnsFailed, d.dnsFailSvc, d.dnsFailAt = true, svc, now
 		log.Printf("netcfg: %s: moving the DNS settings to network service %s failed (retried on the next network change after %v, or when the service changes): %v",
 			d.iface, svc, moveBackoff, err)
 		return err
 	}
 	d.dnsFailed = false
+	if d.dnsLogged != svc {
+		d.dnsLogged = svc
+		log.Printf("netcfg: %s: DNS applied again to network service %s (the primary service changed or its DNS was rewritten; logged once per service)", d.iface, svc)
+	}
 	return nil
 }
 
 // moveDNSLocked undoes the applied primary DNS step, forgets it in the
-// journal, then journals and applies one for svc.
-func (c *configurer) moveDNSLocked(ctx context.Context, svc string) error {
+// journal, then journals and applies one for svc. rewritten says that svc
+// is the service the step wrote and its DNS was just read as no longer
+// Latchwire's: the old undo has nothing to restore and is dropped without
+// running (and without logging that it leaves the key alone).
+func (c *configurer) moveDNSLocked(ctx context.Context, svc string, rewritten bool) error {
 	d := &c.dn
 	for i := len(c.applied) - 1; i >= 0; i-- {
 		s := c.applied[i]
 		if !s.dnsPrimary {
 			continue
 		}
-		if err := runUndo(ctx, c.run, *s.undo); err != nil {
-			return err
+		if !rewritten {
+			if err := runUndo(ctx, c.run, *s.undo); err != nil {
+				return err
+			}
 		}
 		c.applied = slices.Delete(c.applied, i, i+1)
 		d.dnsSvc = ""
@@ -625,7 +641,8 @@ func (c *configurer) moveDNSLocked(ctx context.Context, svc string) error {
 		return err
 	}
 	d.dnsSvc = svc
-	if manualDNS(ctx, c.run, svc) {
+	was := d.overridden
+	if d.overridden = manualDNS(ctx, c.run, svc); d.overridden && !was {
 		log.Printf(msg.NetDNSManualFmt, d.iface)
 	}
 	return nil
@@ -637,6 +654,11 @@ type dnsFollow struct {
 	dnsPrimary bool   // DNSPrimary: the DNS follows the primary service
 	dnsOurs    scDict // what is written
 	dnsSvc     string // the service whose DNS holds it ("" none)
+	// overridden: dnsSvc has DNS servers set by hand (Setup:), which
+	// configd prefers (Applied.DNS scutil-primary-overridden), as last
+	// read.
+	overridden bool
+	dnsLogged  string // the service a re-apply was last logged for
 	dnsFailed  bool
 	dnsFailSvc string
 	dnsFailAt  time.Time

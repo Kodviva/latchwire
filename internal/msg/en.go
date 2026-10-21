@@ -94,6 +94,9 @@ const (
 	NetDNSUnreadableFmt = "cannot read the DNS settings of network service %s, so they could not be restored afterwards; they are left unchanged: %v"
 	// NetDNSNoServiceFmt takes the interface name.
 	NetDNSNoServiceFmt = "no network is active: the DNS servers of %s are applied when one comes up"
+	// NetDNSPrimaryBusyFmt takes the interface name and the interface of
+	// the tunnel whose DNS is in use.
+	NetDNSPrimaryBusyFmt = "the DNS servers of %s are not applied: the tunnel on %s already answers every name, and only one tunnel at a time can; disconnect it first to use these"
 	// NetDNSManualFmt takes the interface name.
 	NetDNSManualFmt = "DNS servers set by hand for the active network (System Settings) take precedence over those of %s, so names may still be sent outside the tunnel; remove them in System Settings, or turn the kill switch on"
 )

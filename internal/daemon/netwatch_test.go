@@ -8,6 +8,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -169,22 +170,65 @@ func (failingSource) Next(context.Context) (string, error) {
 	return "", errors.New("route socket closed")
 }
 
-// When the notifications stop for good the daemon says so: endpoint routes
-// and the MTU no longer follow the network.
+// When the notifications stop for good the daemon says so, and the
+// periodic check goes on until the daemon stops.
 func TestWatchNetworkLogsSourceFailure(t *testing.T) {
-	var buf bytes.Buffer
-	log.SetOutput(&buf)
+	logs := &syncBuffer{}
+	log.SetOutput(logs)
 	defer log.SetOutput(os.Stderr)
-	m := NewManager(Options{})
+	m := NewManager(Options{VerifyEvery: time.Hour})
 	m.netSource = func() (netmon.Source, error) { return failingSource{}, nil }
+	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { m.watchNetwork(context.Background()); close(done) }()
+	go func() { m.watchNetwork(ctx); close(done) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(logs.String(), "network change notifications stopped") {
+		if time.Now().After(deadline) {
+			t.Fatalf("log %q does not report the stop", logs.String())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	select {
+	case <-done:
+		t.Fatal("watchNetwork returned: the periodic check stopped with the notifications")
+	case <-time.After(50 * time.Millisecond):
+	}
+	cancel()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("watchNetwork did not return after the source failed")
+		t.Fatal("watchNetwork did not return after ctx ended")
 	}
-	if !strings.Contains(buf.String(), "network change notifications stopped") {
-		t.Errorf("log %q does not report the stop", buf.String())
+}
+
+// syncBuffer is a bytes.Buffer safe for the log's writes from other
+// goroutines.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// Without any network notification, the connected tunnels are refreshed
+// every VerifyEvery (P12): a DHCP renewal that rewrote the DNS is noticed
+// by the next tick (netcfg's Refresh puts the tunnel's DNS back, see
+// TestDarwinDNSRefreshPrimaryServiceChange and TestDarwinDNSFightLogsOnce).
+func TestVerifyTickRefreshesWithoutNetworkChange(t *testing.T) {
+	e, _ := connected(t, envOpts{verifyEvery: 20 * time.Millisecond})
+	_, cfg := e.f.last()
+	waitRefreshes(t, cfg, 2)
+	if st := e.status(); st.State != StateConnected {
+		t.Fatalf("state %q, want connected", st.State)
 	}
 }

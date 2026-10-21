@@ -59,6 +59,11 @@ const (
 	// netDebounce is how long the network must be quiet before its
 	// changes are acted on.
 	netDebounce = 500 * time.Millisecond
+	// verifyEvery is how often the connected tunnels' network
+	// configuration is checked without a network change (P12): DHCP lease
+	// renewals and router advertisements rewrite the DNS (macOS) without
+	// a route or link event.
+	verifyEvery = 30 * time.Second
 
 	// agentGrace is how long a user's tunnels stay up after that user's
 	// agent connection closes. An agent restarted within it keeps them; after
@@ -84,6 +89,10 @@ type Options struct {
 	// Runner runs the system commands of the default TUN factory and of
 	// the startup cleanup; nil = netcfg.ExecRunner().
 	Runner netcfg.Runner
+	// VerifyEvery is how often the connected tunnels' network
+	// configuration is checked when nothing signals a network change;
+	// 0 = 30 s.
+	VerifyEvery time.Duration
 }
 
 // DefaultTUN returns the factory that creates kernel TUN devices (utunN on
@@ -139,6 +148,7 @@ type Manager struct {
 	// the netDebounce constant (tests shorten it).
 	netSource   func() (netmon.Source, error)
 	netDebounce time.Duration
+	verifyEvery time.Duration // Options.VerifyEvery
 	ops         devOps
 	// agentGrace is the agentGrace constant; tests shorten it.
 	agentGrace time.Duration
@@ -213,6 +223,10 @@ func NewManager(o Options) *Manager {
 		fullTunnel:  runtime.GOOS == "linux" || runtime.GOOS == "darwin",
 		netSource:   netmon.NewSource,
 		netDebounce: netDebounce,
+		verifyEvery: o.VerifyEvery,
+	}
+	if m.verifyEvery <= 0 {
+		m.verifyEvery = verifyEvery
 	}
 	if runtime.GOOS == "linux" {
 		m.pickTable = func(ctx context.Context) (uint32, error) { return netcfg.LinuxTable(ctx, m.runner) }
@@ -322,20 +336,42 @@ func (m *Manager) Serve(ctx context.Context) error {
 }
 
 // watchNetwork refreshes the connected tunnels' network configuration (the
-// endpoint routes that follow the gateway, the automatic MTU) after every
-// network change, until ctx ends. Notifications about the tunnels' own
-// interfaces are not changes of the network.
+// endpoint routes that follow the gateway, the automatic MTU, the DNS that
+// follows the primary service) after every network change, and every
+// verifyEvery without one (P12: DHCP renewals rewrite the DNS silently),
+// until ctx ends. Refresh changes nothing when nothing changed (P9).
+// Notifications about the tunnels' own interfaces are not changes of the
+// network. When the notifications fail, the periodic check goes on.
 func (m *Manager) watchNetwork(ctx context.Context) {
-	src, err := m.netSource()
-	if err != nil {
+	var changes <-chan netmon.Event
+	if src, err := m.netSource(); err != nil {
 		log.Printf("daemon: not watching network changes: %v", err)
-		return
+	} else {
+		changes = netmon.Watch(ctx, src, m.netDebounce, m.ownIface)
 	}
-	for range netmon.Watch(ctx, src, m.netDebounce, m.ownIface) {
-		m.refreshAll(ctx)
-	}
-	if ctx.Err() == nil {
-		log.Print("daemon: network change notifications stopped (the source failed); endpoint routes and the MTU no longer follow the network until restart")
+	tick := time.NewTicker(m.verifyEvery)
+	defer tick.Stop()
+	for {
+		select {
+		case _, ok := <-changes:
+			if !ok {
+				changes = nil
+				if ctx.Err() != nil {
+					return
+				}
+				log.Printf("daemon: network change notifications stopped (the source failed); the network configuration is only checked every %v until restart", m.verifyEvery)
+				continue
+			}
+			m.refreshAll(ctx)
+		case <-tick.C:
+			m.refreshAll(ctx)
+		case <-ctx.Done():
+			if changes != nil {
+				for range changes { // the watcher ends with ctx
+				}
+			}
+			return
+		}
 	}
 }
 
