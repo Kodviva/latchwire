@@ -242,7 +242,8 @@ func rpScript(iface, name, mark string, addrs []netip.Prefix) []byte {
 // alreadyUndone reports whether err from undo step s only says that what s
 // removes is already gone (the runner's environment fixes the C locale):
 // "ip rule del" of a rule that does not exist (ENOENT), or macOS "route
-// delete" of a route that does not exist ("not in table", ESRCH). Such an
+// delete" of a route that does not exist ("not in table", ESRCH), or an
+// scutil remove of a key that does not exist ("No such key"). Such an
 // undo succeeded. (The nft undo is idempotent by itself.)
 func alreadyUndone(s Step, err error) bool {
 	switch s.Name {
@@ -253,6 +254,9 @@ func alreadyUndone(s Step, err error) bool {
 		return dnsUndoneAlready(s, err)
 	case "route":
 		return slices.Contains(s.Args, "delete") && notInTable(err)
+	case scutilCmd:
+		u, ok := parseScutilUndo(s.Stdin)
+		return ok && u.remove && strings.Contains(err.Error(), "No such key")
 	}
 	return false
 }

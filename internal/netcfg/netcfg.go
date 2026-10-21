@@ -2,7 +2,8 @@
 // running the platform's network commands (ifconfig/route on macOS, ip on
 // Linux). Linux routes full tunnels (0.0.0.0/0, ::/0) with fwmark policy
 // routing; macOS with /1 routes and endpoint host routes that follow the
-// default gateway (Refresh). DNS goes through systemd-resolved or resolvconf (Linux).
+// default gateway (Refresh). DNS goes through systemd-resolved or resolvconf
+// (Linux), or configd's dynamic store with scutil (macOS).
 //
 // Every change to the system is written to a Journal before it is made, so
 // that a crash leaves the commands that undo it; Cleanup runs them at start.
@@ -62,8 +63,8 @@ type Plan struct {
 // Applied reports what Apply put in place. Table is a full tunnel's routing
 // table (Linux). RPFilter reports whether a full tunnel got its reverse-path
 // filter (false when nft is not installed). DNS says how the tunnel's DNS
-// servers were applied (Linux: a DNSOutcome value; "" where Apply does not
-// handle DNS).
+// servers were applied (a DNSOutcome value; "" where Apply does not handle
+// DNS).
 type Applied struct {
 	MTU        int
 	FullTunnel bool
@@ -87,12 +88,14 @@ type Configurer interface {
 // missing, when set, makes a command that is not installed (exec.ErrNotFound)
 // no failure: the message is logged and the step skipped. hostRoute marks a
 // macOS endpoint host route: Refresh moves it, and a route to the endpoint
-// that exists already is left alone (the step is skipped).
+// that exists already is left alone (the step is skipped). dnsPrimary marks
+// the macOS step that writes the primary service's DNS: Refresh moves it.
 type step struct {
-	do        Step
-	undo      *Step
-	missing   string
-	hostRoute bool
+	do         Step
+	undo       *Step
+	missing    string
+	hostRoute  bool
+	dnsPrimary bool
 }
 
 // planner turns a Plan into the commands for one platform.
@@ -344,7 +347,7 @@ func (c *configurer) undoLocked(ctx context.Context) error {
 }
 
 func (c *configurer) exec(ctx context.Context, s Step) error {
-	if _, err := c.run.Run(ctx, s.Name, s.Args, s.Stdin); err != nil {
+	if err := runStep(ctx, c.run, s); err != nil {
 		return fmt.Errorf("%s: %w", s, err)
 	}
 	return nil
@@ -361,6 +364,7 @@ func newDarwin(r Runner, j *Journal) Configurer {
 	c := newConfigurer(r, j, planDarwin, nil)
 	c.full = c.darwinFullTunnel
 	c.refresh = c.refreshDarwin
+	c.dns = c.darwinDNS
 	return c
 }
 

@@ -337,8 +337,12 @@ func ifaceRouteUndo(s Step) (p netip.Prefix, iface string, ok bool) {
 // gateway (and blackhole flag) or, for an interface route, the same
 // interface. A different prefix means ours is gone; output that cannot be
 // read leaves the route in place: a leak is safer than deleting another
-// tool's route. Other steps are not checked.
+// tool's route. scutil DNS steps are checked by scutilUndoOurs; other
+// steps are not checked.
 func undoTargetOurs(ctx context.Context, r Runner, s Step) (bool, error) {
+	if s.Name == scutilCmd {
+		return scutilUndoOurs(ctx, r, s)
+	}
 	var (
 		want  netip.Prefix
 		query string
@@ -388,7 +392,7 @@ func runUndo(ctx context.Context, r Runner, s Step) error {
 	if !ours {
 		return nil
 	}
-	if _, err := r.Run(ctx, s.Name, s.Args, s.Stdin); err != nil && !alreadyUndone(s, err) {
+	if err := runStep(ctx, r, s); err != nil && !alreadyUndone(s, err) {
 		return fmt.Errorf("%s: %w", s, err)
 	}
 	return nil
@@ -446,6 +450,8 @@ type darwinFollow struct {
 	failed [2]bool
 	failGW [2]netip.Addr
 	failAt [2]time.Time
+	// The DNS that follows the primary service (darwinplan_dns.go).
+	dnsFollow
 }
 
 // moveBackoff is how long a failed move of the endpoint routes to one
@@ -545,6 +551,11 @@ func (c *configurer) refreshDarwin(ctx context.Context) error {
 			} else {
 				d.mtu = mtu
 			}
+		}
+	}
+	if d.dnsPrimary {
+		if err := c.refreshDNSLocked(ctx); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)

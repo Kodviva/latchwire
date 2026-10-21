@@ -90,6 +90,12 @@ const (
 	NetBadSearchDomainFmt = "invalid DNS search domain %q"
 	// NetZonedDNSFmt takes the DNS server address.
 	NetZonedDNSFmt = "DNS server %s names a network interface (a %%zone suffix); use an address without a zone"
+	// NetDNSUnreadableFmt takes the network service ID and the error.
+	NetDNSUnreadableFmt = "cannot read the DNS settings of network service %s, so they could not be restored afterwards; they are left unchanged: %v"
+	// NetDNSNoServiceFmt takes the interface name.
+	NetDNSNoServiceFmt = "no network is active: the DNS servers of %s are applied when one comes up"
+	// NetDNSManualFmt takes the interface name.
+	NetDNSManualFmt = "DNS servers set by hand for the active network (System Settings) take precedence over those of %s, so names may still be sent outside the tunnel; remove them in System Settings, or turn the kill switch on"
 )
 
 // Tunnel daemon. None of these formats take key material or a PIN.

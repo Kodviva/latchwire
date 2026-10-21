@@ -3,7 +3,6 @@ package netcfg
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log"
 	"net/netip"
 	"os"
@@ -49,18 +48,8 @@ func linuxDNS(ctx context.Context, r Runner, resolvConf string, p Plan) ([]step,
 	if p.DNSRole == DNSNone || len(p.DNS) == 0 {
 		return nil, DNSOutcomeNone, nil
 	}
-	for _, a := range p.DNS {
-		// A link-local server needs its zone, which names an interface of
-		// the user's machine; without one the address is useless, so the
-		// tunnel is refused rather than half configured.
-		if a.Zone() != "" {
-			return nil, "", fmt.Errorf(msg.NetZonedDNSFmt, a)
-		}
-	}
-	for _, d := range p.DNSSearch {
-		if !plainDomain(d) {
-			return nil, "", fmt.Errorf(msg.NetBadSearchDomainFmt, d)
-		}
+	if err := validateDNS(p); err != nil {
+		return nil, "", err
 	}
 	switch {
 	case usesResolved(ctx, r, resolvConf):

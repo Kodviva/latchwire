@@ -76,7 +76,7 @@ func TestDarwinFullTunnelSplitsDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := (Applied{FullTunnel: true}); a != want {
+	if want := (Applied{FullTunnel: true, DNS: DNSOutcomeNone}); a != want {
 		t.Errorf("Applied = %+v, want %+v", a, want)
 	}
 	// No endpoint: nothing to look up, no host route.
