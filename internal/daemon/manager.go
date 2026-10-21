@@ -29,6 +29,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/curve25519"
@@ -172,6 +173,12 @@ type Manager struct {
 	fw     killswitch.Firewall
 	fwErr  error
 	ksLast *killswitch.State
+	// ksSaved is what the kill switch's tunnel record (store) holds.
+	ksSaved []ksTunnel
+	// ksBlocking says that blocking rules may be in place: a blocking Set
+	// was attempted and no release has succeeded since. Endpoint lookups
+	// behind them may fail in any way, so any failure may use the cache.
+	ksBlocking atomic.Bool
 
 	mu      sync.Mutex
 	ctx     context.Context // Serve's ctx; tunnel lifetimes derive from it
@@ -405,6 +412,7 @@ func (m *Manager) watchNetwork(ctx context.Context) {
 			m.refreshAll(ctx)
 		case <-tick.C:
 			m.refreshAll(ctx)
+			m.verifyKillSwitch(ctx)
 		case <-ctx.Done():
 			if changes != nil {
 				for range changes { // the watcher ends with ctx
@@ -1048,7 +1056,7 @@ func (m *Manager) connect(caller context.Context, name string, uid uint32, admin
 	gen := t.gen
 	t.state = StateConnecting
 	t.ref, t.hasRef, t.uid = c.id.Ref, true, c.uid
-	t.policy, t.mark = pol, 0
+	t.policy, t.mark, t.endpoints = pol, 0, nil
 	life, cancelLife := context.WithCancel(m.ctx)
 	attempt, cancelAttempt := context.WithCancel(life)
 	t.cancel = cancelLife
@@ -1076,7 +1084,7 @@ func (m *Manager) connect(caller context.Context, name string, uid uint32, admin
 		return m.status(t), nil
 	}
 	if t.gen == gen {
-		t.state, t.cancel, t.mark = StateError, nil, 0
+		t.state, t.cancel, t.mark, t.endpoints = StateError, nil, 0, nil
 	}
 	m.mu.Unlock()
 	cancelLife()
@@ -1185,8 +1193,10 @@ type devInfo struct {
 // The kill switch follows the connecting state only once the endpoints are
 // resolved, so a first connect can still look up a name; a tunnel that was
 // blocking already (card_removed, error) resolves behind it, with the mark
-// (Linux full tunnel) or from the endpoint cache. A tunnel whose kill
-// switch is on is refused when the kill switch cannot block.
+// (Linux full tunnel) or from the endpoint cache. From then on the
+// connecting tunnel's endpoints pass outbound (replies only come back), so
+// the first handshake is not rejected. A tunnel whose kill switch is on is
+// refused when the kill switch cannot block.
 //
 // A full tunnel (a default route in some peer's AllowedIPs) on Linux gets a
 // routing table T first: its endpoint lookups and its WireGuard socket carry the
@@ -1216,13 +1226,20 @@ func (m *Manager) build(attempt, life context.Context, cfg *config.Tunnel, c can
 		t.mark = mark
 	}
 	m.mu.Unlock()
-	rt, err := m.resolveTunnel(attempt, cfg, mark)
+	rt, err := m.resolveTunnel(attempt, cfg, mark, m.ksBlocking.Load())
 	if err != nil {
 		return nil, nil, devInfo{}, err
 	}
 	if err := attempt.Err(); err != nil {
 		return nil, nil, devInfo{}, err
 	}
+	// From here the endpoints pass the kill switch outbound (P17): the
+	// first handshake leaves as soon as the device is up.
+	m.mu.Lock()
+	if t.gen == gen {
+		t.endpoints = resolvedEndpoints(rt)
+	}
+	m.mu.Unlock()
 	if err := m.armKillSwitch(t); err != nil {
 		return nil, nil, devInfo{}, err
 	}
@@ -1318,8 +1335,10 @@ func resolvedEndpoints(rt *config.Tunnel) []netip.AddrPort {
 // cache; when a lookup fails for a transient reason (and ctx has not
 // ended), the cached address of that peer is used if its configured
 // endpoint is unchanged. A name that does not exist (NXDOMAIN) never falls
-// back to the cache.
-func (m *Manager) resolveTunnel(ctx context.Context, cfg *config.Tunnel, mark uint32) (*config.Tunnel, error) {
+// back to the cache, unless blocked: behind the kill switch the resolver
+// reaches no DNS server, and the system resolver may then report any
+// error (macOS: "no such host"), so any failure uses the cache (P17).
+func (m *Manager) resolveTunnel(ctx context.Context, cfg *config.Tunnel, mark uint32, blocked bool) (*config.Tunnel, error) {
 	rt := *cfg
 	rt.Peers = slices.Clone(cfg.Peers)
 	var (
@@ -1350,7 +1369,8 @@ func (m *Manager) resolveTunnel(ctx context.Context, cfg *config.Tunnel, mark ui
 		addrs, lerr := m.resolve(rctx, host, mark)
 		cancel()
 		if lerr != nil || len(addrs) == 0 {
-			if !loaded && ctx.Err() == nil && transientLookupErr(lerr) {
+			cacheOK := transientLookupErr(lerr) || blocked
+			if !loaded && ctx.Err() == nil && cacheOK {
 				loaded = true
 				if cache, err = m.store.loadEndpoints(cfg.Name); err != nil {
 					log.Printf("daemon: %s: ignoring the endpoint cache: %v", cfg.Name, err)
@@ -1358,10 +1378,10 @@ func (m *Manager) resolveTunnel(ctx context.Context, cfg *config.Tunnel, mark ui
 			}
 			c, ok := cache[key]
 			ap, perr := netip.ParseAddrPort(c.Addr)
-			if ctx.Err() != nil || !transientLookupErr(lerr) || !ok || c.Endpoint != ep || perr != nil || ap.Port() != uint16(port) {
+			if ctx.Err() != nil || !cacheOK || !ok || c.Endpoint != ep || perr != nil || ap.Port() != uint16(port) {
 				return nil, &ipc.Error{Code: ipc.CodeUnavailable, Message: fmt.Sprintf(msg.DaemonResolveFmt, host)}
 			}
-			log.Printf("daemon: %s: cannot resolve %s (%v); using the address %s cached %v ago", cfg.Name, host, lerr, ap, time.Since(c.Resolved).Round(time.Second))
+			log.Printf("daemon: %s: cannot resolve %s (%v, kill switch blocking: %v); using the address %s cached %v ago", cfg.Name, host, lerr, blocked, ap, time.Since(c.Resolved).Round(time.Second))
 			found[key] = c
 			rt.Peers[i].Endpoint = ap.String()
 			continue
@@ -1486,9 +1506,26 @@ func userErr(err error) error {
 // connecting, connected, waiting for its card (card_removed) or failed
 // (error): it is fail-closed, and only down, remove and a graceful shutdown
 // (all to disconnected) end it. While blocking, every connected tunnel's
-// interface, resolved endpoints and listen port pass, and so do the
-// packets with a full tunnel's mark (Linux), connected or connecting.
+// interface, resolved endpoints and listen port pass; a connecting tunnel's
+// resolved endpoints pass outbound only (P17); and so do the packets with a
+// full tunnel's mark (Linux), connected or connecting.
 func (m *Manager) killSwitchState() killswitch.State {
+	s, _ := m.killSwitchStateAndOwners()
+	return s
+}
+
+// ksTunnel is one tunnel the kill switch blocks for, as recorded in the
+// store so that a restarted daemon restores it (P17): its name and, when
+// bound, the key and the user whose agent serves it.
+type ksTunnel struct {
+	Name string `json:"name"`
+	Ref  string `json:"ref,omitempty"`
+	UID  uint32 `json:"uid"`
+}
+
+// killSwitchStateAndOwners returns killSwitchState and the armed tunnels
+// that make it block, in name order.
+func (m *Manager) killSwitchStateAndOwners() (killswitch.State, []ksTunnel) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	names := make([]string, 0, len(m.tunnels))
@@ -1496,18 +1533,26 @@ func (m *Manager) killSwitchState() killswitch.State {
 		names = append(names, n)
 	}
 	slices.Sort(names)
-	var s killswitch.State
+	var (
+		s      killswitch.State
+		owners []ksTunnel
+	)
 	for _, n := range names {
 		t := m.tunnels[n]
 		switch t.state {
 		case StateConnecting, StateConnected, StateCardRemoved, StateError:
 			if t.policy.armed(t.cfg) {
 				s.Block = true
+				o := ksTunnel{Name: n}
+				if t.hasRef {
+					o.Ref, o.UID = t.ref.String(), t.uid
+				}
+				owners = append(owners, o)
 			}
 		}
 	}
 	if !s.Block {
-		return killswitch.State{}
+		return killswitch.State{}, nil
 	}
 	for _, n := range names {
 		t := m.tunnels[n]
@@ -1520,12 +1565,15 @@ func (m *Manager) killSwitchState() killswitch.State {
 				s.FwMark = t.mark
 			}
 		case StateConnecting:
+			if len(t.endpoints) > 0 {
+				s.Tunnels = append(s.Tunnels, killswitch.TunnelRule{Endpoints: slices.Clone(t.endpoints)})
+			}
 			if t.mark != 0 && s.FwMark == 0 {
 				s.FwMark = t.mark
 			}
 		}
 	}
-	return s
+	return s, owners
 }
 
 // statesEqual reports whether two kill switch states are the same.
@@ -1543,11 +1591,24 @@ func (m *Manager) syncKillSwitch() error {
 }
 
 // setKillSwitch is syncKillSwitch; force sets the state even when it is
-// believed in place.
+// believed in place. Before a blocking Set, the tunnels it blocks for are
+// recorded in the store (saveKillSwitchTunnels); the record goes once a
+// release succeeded.
 func (m *Manager) setKillSwitch(force bool) error {
 	m.ksMu.Lock()
 	defer m.ksMu.Unlock()
-	s := m.killSwitchState()
+	return m.setKillSwitchLocked(force)
+}
+
+func (m *Manager) setKillSwitchLocked(force bool) error {
+	s, owners := m.killSwitchStateAndOwners()
+	if s.Block && !slices.Equal(owners, m.ksSaved) {
+		if err := m.store.saveKillSwitchTunnels(owners); err != nil {
+			log.Printf("daemon: kill switch: recording its tunnels: %v", err)
+		} else {
+			m.ksSaved = owners
+		}
+	}
 	if !force && m.ksLast != nil && statesEqual(*m.ksLast, s) {
 		return nil
 	}
@@ -1556,11 +1617,15 @@ func (m *Manager) setKillSwitch(force bool) error {
 		if !s.Block && errors.Is(err, killswitch.ErrUnsupported) {
 			// No firewall here: nothing can be blocking.
 			m.ksLast = &s
+			m.released()
 			return nil
 		}
 		m.ksLast = nil
 		log.Printf("daemon: kill switch: %v", err)
 		return err
+	}
+	if s.Block {
+		m.ksBlocking.Store(true)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), killSwitchTimeout)
 	defer cancel()
@@ -1570,7 +1635,54 @@ func (m *Manager) setKillSwitch(force bool) error {
 		return err
 	}
 	m.ksLast = &s
+	if !s.Block {
+		m.released()
+	}
 	return nil
+}
+
+// released notes that no kill switch is in place; m.ksMu is held.
+func (m *Manager) released() {
+	m.ksBlocking.Store(false)
+	if err := m.store.removeKillSwitchTunnels(); err != nil {
+		log.Printf("daemon: kill switch: removing the record of its tunnels: %v", err)
+		return
+	}
+	m.ksSaved = nil
+}
+
+// verifyKillSwitch runs at the verification tick (P17). While the kill
+// switch should block, it asks the firewall whether the blocking is still
+// in effect (pf enabled with the anchor's rules, the nft table there) and
+// sets it again when not. A state whose Set failed is retried.
+func (m *Manager) verifyKillSwitch(ctx context.Context) {
+	m.ksMu.Lock()
+	defer m.ksMu.Unlock()
+	if m.ksLast == nil {
+		if m.fwErr == nil {
+			m.setKillSwitchLocked(true)
+		}
+		return
+	}
+	if !m.ksLast.Block || m.fw == nil {
+		return
+	}
+	v, ok := m.fw.(killswitch.Verifier)
+	if !ok {
+		return
+	}
+	vctx, cancel := context.WithTimeout(ctx, killSwitchTimeout)
+	defer cancel()
+	in, err := v.Verify(vctx)
+	if in || ctx.Err() != nil {
+		return
+	}
+	if err != nil {
+		log.Printf("daemon: kill switch: checking it: %v; setting it again", err)
+	} else {
+		log.Printf("daemon: WARNING: the kill switch was no longer in effect (pf disabled or its rules removed); setting it again")
+	}
+	m.setKillSwitchLocked(true)
 }
 
 // firewallLocked returns the kill switch's firewall, made on first use.
@@ -1610,13 +1722,20 @@ func (m *Manager) armKillSwitch(t *tunnel) error {
 }
 
 // startKillSwitch settles the kill switch at startup, after the cleanup
-// and the load. held says that the journal holds an active kill switch (a
-// crash, or a stop that could not remove it): the tunnels whose kill
-// switch is on are loaded as card_removed, so it keeps blocking until they
-// are taken down (or reconnected). recovered says that the journal was
-// unreadable (P6): what it held is unknown, so the kill switch's
-// well-known objects (the pf anchor, the nft table) are removed: on a
-// corrupt journal the kill switch fails open, which is logged.
+// and the load.
+//
+// held says that the journal holds an active kill switch (a crash, or a
+// stop that could not remove it). The tunnels it blocked for, as recorded
+// in the store, are restored to card_removed with their key and user, so
+// the card's return reconnects them and their user can take them down;
+// the other tunnels load disconnected. It keeps blocking while a restored
+// tunnel's kill switch is still on; otherwise it is removed. A record that
+// cannot be read restores nothing (logged).
+//
+// recovered says that the journal was unreadable (P6): what it held is
+// unknown, so the kill switch's well-known objects (the pf anchor, the nft
+// table) are removed: on a corrupt journal the kill switch fails open,
+// which is logged.
 func (m *Manager) startKillSwitch(held, recovered bool) {
 	switch {
 	case recovered:
@@ -1628,20 +1747,15 @@ func (m *Manager) startKillSwitch(held, recovered bool) {
 			log.Printf("daemon: removing the kill switch after an unreadable journal: %v", err)
 		}
 	case held:
-		m.mu.Lock()
-		var names []string
-		for n, t := range m.tunnels {
-			if t.policy.armed(t.cfg) {
-				t.state = StateCardRemoved
-				names = append(names, n)
-			}
+		recs, err := m.store.loadKillSwitchTunnels()
+		if err != nil {
+			log.Printf("daemon: WARNING: the record of the kill switch's tunnels is unusable (%v): the kill switch of the previous run is removed", err)
 		}
-		m.mu.Unlock()
-		slices.Sort(names)
-		if len(names) > 0 {
-			log.Printf("daemon: the kill switch of the previous run is still on: blocking for %v until they are taken down or connected", names)
+		restored := m.restoreKillSwitchTunnels(recs)
+		if len(restored) > 0 {
+			log.Printf("daemon: the kill switch of the previous run is still on: blocking for %v until they are taken down or reconnected", restored)
 		} else {
-			log.Printf("daemon: removing the kill switch of the previous run: no tunnel has its kill switch on")
+			log.Printf("daemon: removing the kill switch of the previous run: none of its tunnels has its kill switch on now")
 		}
 		m.ksMu.Lock()
 		m.ksLast = nil
@@ -1649,5 +1763,34 @@ func (m *Manager) startKillSwitch(held, recovered bool) {
 		if err := m.syncKillSwitch(); err != nil {
 			log.Printf("daemon: restoring the kill switch: %v", err)
 		}
+	default:
+		// A record left behind by a run whose kill switch is gone
+		// (a reboot clears the journal).
+		if err := m.store.removeKillSwitchTunnels(); err != nil {
+			log.Printf("daemon: kill switch: removing a stale record of its tunnels: %v", err)
+		}
 	}
+}
+
+// restoreKillSwitchTunnels puts the recorded tunnels that still exist and
+// still have their kill switch on into card_removed, bound to the recorded
+// key (one of the tunnel's identities) and user, and returns their names.
+func (m *Manager) restoreKillSwitchTunnels(recs []ksTunnel) []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var names []string
+	for _, r := range recs {
+		t := m.tunnels[r.Name]
+		if t == nil || !t.policy.armed(t.cfg) {
+			continue
+		}
+		t.state = StateCardRemoved
+		if ref, err := keyref.Parse(r.Ref); err == nil && slices.ContainsFunc(t.cfg.Identities, func(id config.Identity) bool { return id.Ref == ref }) {
+			t.ref, t.hasRef, t.uid = ref, true, r.UID
+		} else if r.Ref != "" {
+			log.Printf("daemon: tunnel %s: the recorded key %q is not one of its identities; it waits unbound", r.Name, r.Ref)
+		}
+		names = append(names, r.Name)
+	}
+	return names
 }

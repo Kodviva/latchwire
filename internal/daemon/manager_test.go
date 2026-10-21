@@ -2004,6 +2004,13 @@ func newFullTunnelEnvTable(t *testing.T, table bool) *fullTunnelEnv {
 
 func newFullTunnelEnvWith(t *testing.T, supported, table bool) *fullTunnelEnv {
 	t.Helper()
+	return newFullTunnelEnvOpts(t, supported, table, envOpts{})
+}
+
+// newFullTunnelEnvOpts is newFullTunnelEnvWith with base options (card A
+// present, the hook are set here).
+func newFullTunnelEnvOpts(t *testing.T, supported, table bool, o envOpts) *fullTunnelEnv {
+	t.Helper()
 	fe := &fullTunnelEnv{}
 	hook := func(m *Manager) {
 		m.fullTunnel = supported
@@ -2028,7 +2035,8 @@ func newFullTunnelEnvWith(t *testing.T, supported, table bool) *fullTunnelEnv {
 			return real(d, s)
 		}
 	}
-	fe.env = newEnv(t, envOpts{present: []uint32{serialA}, hook: hook})
+	o.present, o.hook = []uint32{serialA}, hook
+	fe.env = newEnv(t, o)
 	fe.srv = newServer(t, fe.b.pub(serialA), "10.0.0.2")
 	cfg := fe.config([]keyref.Ref{refA}, []string{"10.0.0.2"}, fe.srv, fmt.Sprintf("vpn.example.test:%d", fe.srv.port))
 	fe.add(strings.Replace(cfg, "AllowedIPs = "+serverIP.String()+"/32", "AllowedIPs = 0.0.0.0/0", 1))

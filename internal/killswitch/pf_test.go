@@ -65,11 +65,12 @@ anchor "com.apple/*" all
 const wantPfRules = `pass quick on lo0 all no state
 pass quick on wg0 all no state
 pass quick on office all no state
-pass out quick inet proto udp from any port 68 to any port 67 no state
-pass in quick inet proto udp from any port 67 to any port 68 no state
-pass out quick inet6 proto udp from any port 546 to any port 547 no state
-pass in quick inet6 proto udp from any port 547 to any port 546 no state
-pass quick inet6 proto icmp6 all icmp6-type { 133, 134, 135, 136 } no state
+pass out quick inet proto udp from any port 68 to { 255.255.255.255, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 } port 67 user root no state
+pass in quick inet proto udp from { 0.0.0.0, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 } port 67 to any port 68 no state
+pass out quick inet6 proto udp from fe80::/10 port 546 to ff02::1:2 port 547 user root no state
+pass in quick inet6 proto udp from fe80::/10 port 547 to any port 546 no state
+pass quick inet6 proto icmp6 from fe80::/10 to any icmp6-type { 133, 134, 135, 136 } no state
+pass quick inet6 proto icmp6 from any to { fe80::/10, ff02::/16 } icmp6-type { 133, 134, 135, 136 } no state
 pass out quick inet6 proto icmp6 from { fe80::/10, ::/128 } to any icmp6-type { 131, 143 } no state
 pass in quick inet6 proto icmp6 from { fe80::/10, ::/128 } to any icmp6-type 130 no state
 pass out quick inet proto udp from any to 203.0.113.5 port 51820 keep state
@@ -186,7 +187,7 @@ func TestPfRulesNoDNSAndListenPortOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"pass quick on lo0 all no state\n", "port 68 to any port 67", "block return out quick all\n", "block drop in quick all\n"} {
+	for _, want := range []string{"pass quick on lo0 all no state\n", "port 67 user root no state\n", "block return out quick all\n", "block drop in quick all\n"} {
 		if !strings.Contains(string(got), want) {
 			t.Errorf("empty block state lacks %q:\n%s", want, got)
 		}
@@ -199,7 +200,6 @@ func TestPfRulesNoDNSAndListenPortOnly(t *testing.T) {
 func TestPfRulesRejectBadInput(t *testing.T) {
 	for name, s := range map[string]State{
 		"quote in iface": {Block: true, Tunnels: []TunnelRule{{Iface: `utun3 all`}}},
-		"no listen port": {Block: true, Tunnels: []TunnelRule{{Iface: "utun3", Endpoints: []netip.AddrPort{netip.MustParseAddrPort("192.0.2.1:51820")}}}},
 		"zoned endpoint": {Block: true, Tunnels: []TunnelRule{{Iface: "utun3", ListenPort: 1, Endpoints: []netip.AddrPort{netip.MustParseAddrPort("[fe80::1%en0]:51820")}}}},
 	} {
 		if _, err := pfRules(s); err == nil {
@@ -358,4 +358,73 @@ func TestPfJournalCleanup(t *testing.T) {
 	if !reflect.DeepEqual(r.cmds, []string{pfRelTok, pfFlush}) {
 		t.Fatalf("cleanup ran %q", r.cmds)
 	}
+}
+
+// A tunnel still connecting gets the outbound endpoint rule only; its
+// state lets the replies in (P17).
+func TestPfConnectingTunnelOutboundOnly(t *testing.T) {
+	got, err := pfRules(State{Block: true, Tunnels: []TunnelRule{{Endpoints: []netip.AddrPort{netip.MustParseAddrPort("[2001:db8::5]:51820")}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "pass out quick inet6 proto udp from any to 2001:db8::5 port 51820 keep state\n") {
+		t.Errorf("no outbound endpoint rule:\n%s", got)
+	}
+	for _, bad := range []string{"from 2001:db8::5", "pass quick on  ", "port 0"} {
+		if strings.Contains(string(got), bad) {
+			t.Errorf("rules have %q:\n%s", bad, got)
+		}
+	}
+}
+
+// DHCP passes only from root's sockets to where a DHCP server can be, and
+// back (P16); neighbour discovery only with a link-local or link-scope
+// multicast address on one side (P17).
+func TestPfLinkRulesNarrow(t *testing.T) {
+	got, err := pfRules(State{Block: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for line := range strings.Lines(string(got)) {
+		switch {
+		case strings.Contains(line, "port 67 user") || strings.Contains(line, "port 547 user"):
+		case strings.Contains(line, "port 67") || strings.Contains(line, "port 547"):
+			if strings.HasPrefix(line, "pass out") {
+				t.Errorf("DHCP request rule without user root: %q", line)
+			}
+		}
+		if strings.Contains(line, "from any port 67") || strings.Contains(line, "from any port 547") ||
+			strings.Contains(line, "to any port 67") || strings.Contains(line, "to any port 547") {
+			t.Errorf("DHCP rule open to any address: %q", line)
+		}
+		if strings.Contains(line, "icmp6-type { 133") && !strings.Contains(line, "from fe80::/10 to any") &&
+			!strings.Contains(line, "from any to { fe80::/10, ff02::/16 }") {
+			t.Errorf("neighbour discovery rule too wide: %q", line)
+		}
+	}
+}
+
+func TestPfVerify(t *testing.T) {
+	r := newPfRecorder()
+	f := newPf(r, nil)
+	const info = "Status: Enabled for 0 days 00:01:02           Debug: Urgent\n\nState Table                          Total             Rate\n"
+	for _, tc := range []struct {
+		info, anchor string
+		want         bool
+	}{
+		{info, "block drop in quick all\n", true},
+		{strings.Replace(info, "Enabled", "Disabled", 1), "block drop in quick all\n", false},
+		{info, "", false},
+		{"", "block drop in quick all\n", false},
+	} {
+		r.out["pfctl -s info"], r.out["pfctl -a com.apple/250.latchwire -sr"] = tc.info, tc.anchor
+		if ok, err := f.Verify(context.Background()); ok != tc.want || err != nil {
+			t.Errorf("Verify(%.20q, %q) = %v, %v; want %v", tc.info, tc.anchor, ok, err, tc.want)
+		}
+	}
+	r.errs["pfctl -s info"] = errors.New("exit status 1: pfctl: /dev/pf: Permission denied")
+	if ok, err := f.Verify(context.Background()); ok || err == nil {
+		t.Errorf("Verify that cannot read = %v, %v", ok, err)
+	}
+	var _ Verifier = f
 }

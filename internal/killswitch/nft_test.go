@@ -22,6 +22,7 @@ type recorder struct {
 	stdin   []string
 	missing bool
 	fail    string
+	failErr error // returned for fail; nil: a syntax error
 }
 
 func (r *recorder) Run(_ context.Context, name string, args []string, in []byte) ([]byte, error) {
@@ -32,6 +33,9 @@ func (r *recorder) Run(_ context.Context, name string, args []string, in []byte)
 		return nil, fmt.Errorf("%s: %w", name, exec.ErrNotFound)
 	}
 	if r.fail != "" && strings.HasPrefix(c, r.fail) {
+		if r.failErr != nil {
+			return nil, r.failErr
+		}
 		return nil, errors.New("exit status 1: Error: syntax error")
 	}
 	return nil, nil
@@ -77,9 +81,10 @@ table inet latchwire {
 		oifname "wg0" accept
 		oifname "office" accept
 		meta mark 51820 ct mark set meta mark accept
-		meta nfproto ipv4 udp sport 68 udp dport 67 accept
-		meta nfproto ipv6 udp sport 546 udp dport 547 accept
-		icmpv6 type { nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } ip6 hoplimit 255 accept
+		meta skuid 0 ip daddr { 255.255.255.255, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 } udp sport 68 udp dport 67 accept
+		meta skuid 0 ip6 saddr fe80::/10 ip6 daddr ff02::1:2 udp sport 546 udp dport 547 accept
+		icmpv6 type { nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } ip6 hoplimit 255 ip6 saddr fe80::/10 accept
+		icmpv6 type { nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } ip6 hoplimit 255 ip6 daddr { fe80::/10, ff02::/16 } accept
 		icmpv6 type { mld-listener-report, mld2-listener-report } ip6 hoplimit 1 ip6 saddr { fe80::/10, :: } accept
 		ip daddr 203.0.113.5 udp dport 51820 accept
 		ip6 daddr 2001:db8::5 udp dport 51820 accept
@@ -92,9 +97,10 @@ table inet latchwire {
 		iifname "wg0" accept
 		iifname "office" accept
 		ct mark 51820 ct state established,related accept
-		meta nfproto ipv4 udp sport 67 udp dport 68 accept
-		meta nfproto ipv6 udp sport 547 udp dport 546 accept
-		icmpv6 type { nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } ip6 hoplimit 255 accept
+		ip saddr { 0.0.0.0, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 } udp sport 67 udp dport 68 accept
+		ip6 saddr fe80::/10 udp sport 547 udp dport 546 accept
+		icmpv6 type { nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } ip6 hoplimit 255 ip6 saddr fe80::/10 accept
+		icmpv6 type { nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } ip6 hoplimit 255 ip6 daddr { fe80::/10, ff02::/16 } accept
 		icmpv6 type mld-listener-query ip6 hoplimit 1 ip6 saddr { fe80::/10, :: } accept
 		ip saddr 203.0.113.5 udp sport 51820 udp dport 41641 accept
 		ct state related ct original ip daddr 203.0.113.5 accept
@@ -173,12 +179,10 @@ func TestNftRulesBlockState(t *testing.T) {
 func TestNftScriptRejectsBadInput(t *testing.T) {
 	for name, s := range map[string]State{
 		"quote in iface":   {Block: true, Tunnels: []TunnelRule{{Iface: `wg0" accept`}}},
-		"empty iface":      {Block: true, Tunnels: []TunnelRule{{Iface: ""}}},
 		"long iface":       {Block: true, Tunnels: []TunnelRule{{Iface: "abcdefghijklmnop"}}},
 		"invalid endpoint": {Block: true, Tunnels: []TunnelRule{{Iface: "wg0", ListenPort: 1, Endpoints: []netip.AddrPort{{}}}}},
 		"port 0":           {Block: true, Tunnels: []TunnelRule{{Iface: "wg0", ListenPort: 1, Endpoints: []netip.AddrPort{netip.MustParseAddrPort("192.0.2.1:0")}}}},
 		"zoned endpoint":   {Block: true, Tunnels: []TunnelRule{{Iface: "wg0", ListenPort: 1, Endpoints: []netip.AddrPort{netip.MustParseAddrPort("[fe80::1%eth0]:51820")}}}},
-		"no listen port":   {Block: true, Tunnels: []TunnelRule{{Iface: "wg0", Endpoints: []netip.AddrPort{netip.MustParseAddrPort("192.0.2.1:51820")}}}},
 	} {
 		if _, err := nftScript(s); err == nil {
 			t.Errorf("%s: no error", name)
@@ -294,5 +298,80 @@ func TestNftUnsupported(t *testing.T) {
 	r.missing = true
 	if err := f.Set(context.Background(), blockState()); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("Set without nft: %v, want ErrUnsupported", err)
+	}
+}
+
+// A tunnel still connecting (no interface, no listen port) gets outbound
+// endpoint rules and, inbound, only the replies conntrack matches to them:
+// no local port is opened (P17).
+func TestNftConnectingTunnelOutboundOnly(t *testing.T) {
+	s := State{Block: true, Tunnels: []TunnelRule{{Endpoints: []netip.AddrPort{netip.MustParseAddrPort("203.0.113.5:51820")}}}}
+	got, err := nftScript(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"\t\tip daddr 203.0.113.5 udp dport 51820 accept\n",
+		"\t\tip saddr 203.0.113.5 udp sport 51820 ct state established accept\n",
+		"\t\tct state related ct original ip daddr 203.0.113.5 accept\n",
+	} {
+		if !strings.Contains(string(got), want) {
+			t.Errorf("script lacks %q:\n%s", want, got)
+		}
+	}
+	for _, bad := range []string{"udp dport 0", `ifname ""`, "saddr 203.0.113.5 udp sport 51820 accept", "udp sport 51820 udp dport"} {
+		if strings.Contains(string(got), bad) {
+			t.Errorf("script has %q:\n%s", bad, got)
+		}
+	}
+}
+
+// DHCP passes only from root's sockets to where a DHCP server can be, and
+// back (P16); neighbour discovery only with a link-local or link-scope
+// multicast address on one side (P17).
+func TestNftLinkRulesNarrow(t *testing.T) {
+	got, err := nftScript(State{Block: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for line := range strings.Lines(string(got)) {
+		switch {
+		case strings.Contains(line, "dport 67") || strings.Contains(line, "dport 547"):
+			if !strings.Contains(line, "meta skuid 0") || !strings.Contains(line, "daddr") {
+				t.Errorf("DHCP request rule too wide: %q", line)
+			}
+		case strings.Contains(line, "dport 68") || strings.Contains(line, "dport 546"):
+			if !strings.Contains(line, "saddr") {
+				t.Errorf("DHCP reply rule too wide: %q", line)
+			}
+		case strings.Contains(line, "nd-neighbor-solicit"):
+			if !strings.Contains(line, "saddr fe80::/10") && !strings.Contains(line, "daddr { fe80::/10, ff02::/16 }") {
+				t.Errorf("neighbour discovery rule too wide: %q", line)
+			}
+		}
+	}
+}
+
+func TestNftVerify(t *testing.T) {
+	r := &recorder{}
+	f, err := newNft(context.Background(), r, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := f.(Verifier)
+	if ok, err := v.Verify(context.Background()); !ok || err != nil {
+		t.Fatalf("Verify with the table = %v, %v", ok, err)
+	}
+	if r.cmds[len(r.cmds)-1] != "nft list table inet latchwire" {
+		t.Errorf("Verify ran %q", r.cmds[len(r.cmds)-1])
+	}
+	r.failErr = errors.New("exit status 1: Error: No such file or directory\nlist table inet latchwire")
+	r.fail = "nft list"
+	if ok, err := v.Verify(context.Background()); ok || err != nil {
+		t.Fatalf("Verify without the table = %v, %v; want false, nil", ok, err)
+	}
+	r.failErr = errors.New("exit status 1: Error: Operation not permitted")
+	if ok, err := v.Verify(context.Background()); ok || err == nil {
+		t.Fatalf("Verify that cannot read = %v, %v; want false and an error", ok, err)
 	}
 }

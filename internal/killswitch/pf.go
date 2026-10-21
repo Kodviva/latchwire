@@ -24,23 +24,39 @@ const (
 	pfAnchor = "com.apple/250.latchwire"
 )
 
-// pfLines are the rules that let a link come up, in pf.conf syntax:
-// DHCPv4 and DHCPv6 both ways, IPv6 neighbour discovery (router and
-// neighbour solicitation and advertisement; redirects, 137, are left out,
-// as in the nft rules) and MLD (reports out, queries in), which a switch
-// that snoops MLD needs to keep forwarding the solicited-node groups. pf
-// cannot match the hop limit (255 for neighbour discovery, 1 for MLD), so
-// MLD is limited to link-local and unspecified sources instead; the
-// neighbour discovery types pass from any source.
+// pfLinkLines are the rules that let a link come up, in pf.conf syntax.
+//
+//   - DHCP (P16): requests only from root's sockets (user root; the
+//     system's DHCP client is root) and only to the broadcast address or
+//     private and link-local networks, replies only from those (or
+//     0.0.0.0); DHCPv6 only from a link-local address to ff02::1:2, replies
+//     only from link-local addresses. An unprivileged process (macOS lets
+//     any process bind ports below 1024) can thus not reach arbitrary
+//     hosts on ports 67 or 547.
+//   - IPv6 neighbour discovery: router and neighbour solicitation and
+//     advertisement (redirects, 137, are left out, as in the nft rules),
+//     only from a link-local source or to a link-local or link-scope
+//     multicast destination. That covers the default router, duplicate
+//     address detection and address resolution through the solicited-node
+//     groups; neighbour discovery between two global addresses (an
+//     endpoint on the local link) is not covered.
+//   - MLD (reports out, queries in), which a switch that snoops MLD needs
+//     to keep forwarding the solicited-node groups. pf cannot match the
+//     hop limit (255 for neighbour discovery, 1 for MLD), so MLD is
+//     limited to link-local and unspecified sources instead.
 var pfLinkLines = []string{
-	"pass out quick inet proto udp from any port 68 to any port 67 no state",
-	"pass in quick inet proto udp from any port 67 to any port 68 no state",
-	"pass out quick inet6 proto udp from any port 546 to any port 547 no state",
-	"pass in quick inet6 proto udp from any port 547 to any port 546 no state",
-	"pass quick inet6 proto icmp6 all icmp6-type { 133, 134, 135, 136 } no state",
+	"pass out quick inet proto udp from any port 68 to { 255.255.255.255, " + pfDHCP4Nets + " } port 67 user root no state",
+	"pass in quick inet proto udp from { 0.0.0.0, " + pfDHCP4Nets + " } port 67 to any port 68 no state",
+	"pass out quick inet6 proto udp from fe80::/10 port 546 to ff02::1:2 port 547 user root no state",
+	"pass in quick inet6 proto udp from fe80::/10 port 547 to any port 546 no state",
+	"pass quick inet6 proto icmp6 from fe80::/10 to any icmp6-type { 133, 134, 135, 136 } no state",
+	"pass quick inet6 proto icmp6 from any to { fe80::/10, ff02::/16 } icmp6-type { 133, 134, 135, 136 } no state",
 	"pass out quick inet6 proto icmp6 from { fe80::/10, ::/128 } to any icmp6-type { 131, 143 } no state",
 	"pass in quick inet6 proto icmp6 from { fe80::/10, ::/128 } to any icmp6-type 130 no state",
 }
+
+// pfDHCP4Nets are the networks a DHCPv4 server can be on.
+const pfDHCP4Nets = "10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16"
 
 // pfRules returns the anchor's ruleset for s, loaded with pfctl -a <anchor>
 // -f - (which replaces the anchor's rules as a whole). s.Block must be set;
@@ -50,8 +66,10 @@ var pfLinkLines = []string{
 // (stateless); then what a link needs (pfLinkLines); then UDP out to each
 // endpoint, and UDP in from each endpoint to the tunnel's listen port only
 // (the peer may start a handshake; no other local port is open to a source
-// address anyone can forge), both keeping state, which also passes ICMP
-// errors about the flow (path MTU). Everything else is blocked: outgoing
+// address anyone can forge), both keeping state, which also passes the
+// replies and ICMP errors about the flow (path MTU). A tunnel still
+// connecting (no interface, no listen port yet) gets the outbound rule
+// only: its state lets the replies in. Everything else is blocked: outgoing
 // packets with an error to the sender (TCP reset, ICMP unreachable) so
 // applications fail at once, incoming ones silently.
 //
@@ -69,7 +87,9 @@ func pfRules(s State) ([]byte, error) {
 	}
 	line("pass quick on lo0 all no state")
 	for _, t := range s.Tunnels {
-		line("pass quick on %s all no state", t.Iface)
+		if t.Iface != "" {
+			line("pass quick on %s all no state", t.Iface)
+		}
 	}
 	for _, l := range pfLinkLines {
 		line("%s", l)
@@ -82,7 +102,9 @@ func pfRules(s State) ([]byte, error) {
 				af = "inet6"
 			}
 			line("pass out quick %s proto udp from any to %s port %d keep state", af, a, e.Port())
-			line("pass in quick %s proto udp from %s port %d to any port %d keep state", af, a, e.Port(), t.ListenPort)
+			if t.ListenPort != 0 {
+				line("pass in quick %s proto udp from %s port %d to any port %d keep state", af, a, e.Port(), t.ListenPort)
+			}
 		}
 	}
 	line("block return out quick all")
@@ -237,6 +259,37 @@ func (f *pfFirewall) Set(ctx context.Context, s State) error {
 	}
 	f.tokens = append(kept, tok)
 	return f.recordLocked()
+}
+
+// Verify checks that pf is enabled (pfctl -s info: "Status: Enabled") and
+// that the anchor still holds rules (pfctl -a <anchor> -sr).
+func (f *pfFirewall) Verify(ctx context.Context) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out, err := f.r.Run(ctx, pfctlCmd, []string{"-s", "info"}, nil)
+	if err != nil {
+		return false, fmt.Errorf("killswitch: pfctl -s info: %w", err)
+	}
+	if !pfEnabled(string(out)) {
+		return false, nil
+	}
+	out, err = f.r.Run(ctx, pfctlCmd, []string{"-a", pfAnchor, "-sr"}, nil)
+	if err != nil {
+		return false, fmt.Errorf("killswitch: pfctl -a %s -sr: %w", pfAnchor, err)
+	}
+	return strings.TrimSpace(string(out)) != "", nil
+}
+
+// pfEnabled reads the Status line of pfctl -s info ("Status: Enabled for
+// 0 days 00:01:02   Debug: Urgent").
+func pfEnabled(info string) bool {
+	for l := range strings.Lines(info) {
+		f := strings.Fields(l)
+		if len(f) >= 2 && f[0] == "Status:" {
+			return f[1] == "Enabled"
+		}
+	}
+	return false
 }
 
 // releaseLocked flushes the anchor and releases every reference held, then

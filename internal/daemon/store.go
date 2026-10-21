@@ -260,3 +260,80 @@ func (s *store) removeEndpoints(name string) error {
 	}
 	return err
 }
+
+// The kill switch's tunnel record: killswitch.state (0600, never a tunnel
+// file: those end in .conf, .endpoints or .policy) lists the tunnels an
+// active kill switch blocks for, with the key and user each is bound to.
+// A daemon restarted after a crash restores exactly those (P17).
+const (
+	ksTunnelsFile    = "killswitch.state"
+	ksTunnelsVersion = 1
+	maxKSTunnelsFile = 64 << 10
+)
+
+type ksTunnelsRecord struct {
+	Version int        `json:"version"`
+	Tunnels []ksTunnel `json:"tunnels"`
+}
+
+// saveKillSwitchTunnels replaces the record.
+func (s *store) saveKillSwitchTunnels(ts []ksTunnel) error {
+	b, err := json.Marshal(ksTunnelsRecord{Version: ksTunnelsVersion, Tunnels: ts})
+	if err != nil {
+		return err
+	}
+	return s.writeAtomic(ksTunnelsFile, string(b))
+}
+
+// loadKillSwitchTunnels reads the record. A missing file is an empty
+// record; a file that is not a regular file, is writable by group or
+// others, is too large or does not validate is an error.
+func (s *store) loadKillSwitchTunnels() ([]ksTunnel, error) {
+	p := filepath.Join(s.dir, ksTunnelsFile)
+	fi, err := os.Lstat(p)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case !fi.Mode().IsRegular():
+		return nil, fmt.Errorf("%s: not a regular file", p)
+	case fi.Mode().Perm()&0o022 != 0:
+		return nil, fmt.Errorf("%s: writable by group or others (mode %v)", p, fi.Mode().Perm())
+	case fi.Size() > maxKSTunnelsFile:
+		return nil, fmt.Errorf("%s: larger than %d bytes", p, maxKSTunnelsFile)
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return nil, err
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	var r ksTunnelsRecord
+	if err := dec.Decode(&r); err != nil {
+		return nil, fmt.Errorf("%s: %w", p, err)
+	}
+	if dec.More() {
+		return nil, fmt.Errorf("%s: trailing data", p)
+	}
+	if r.Version != ksTunnelsVersion {
+		return nil, fmt.Errorf("%s: unsupported version %d", p, r.Version)
+	}
+	for _, t := range r.Tunnels {
+		if !validName(t.Name) {
+			return nil, fmt.Errorf("%s: invalid tunnel name %q", p, t.Name)
+		}
+	}
+	return r.Tunnels, nil
+}
+
+// removeKillSwitchTunnels deletes the record.
+func (s *store) removeKillSwitchTunnels() error {
+	err := os.Remove(filepath.Join(s.dir, ksTunnelsFile))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}

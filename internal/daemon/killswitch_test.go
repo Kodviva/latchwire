@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -15,20 +16,40 @@ import (
 	"testing"
 	"time"
 
+	"golang.zx2c4.com/wireguard/device"
+
+	"github.com/Kodviva/latchwire/internal/agent"
 	"github.com/Kodviva/latchwire/internal/config"
 	"github.com/Kodviva/latchwire/internal/ipc"
 	"github.com/Kodviva/latchwire/internal/keyref"
 	"github.com/Kodviva/latchwire/internal/killswitch"
 	"github.com/Kodviva/latchwire/internal/msg"
 	"github.com/Kodviva/latchwire/internal/netcfg"
+	"github.com/Kodviva/latchwire/internal/netmon"
 )
 
 // fakeFirewall records the kill switch states the daemon sets. err, when
-// set, fails every Set that blocks.
+// set, fails every Set that blocks. It is a killswitch.Verifier whose
+// answer is lost (false: the blocking is gone) until the next Set.
 type fakeFirewall struct {
-	mu   sync.Mutex
-	sets []killswitch.State
-	err  error
+	mu       sync.Mutex
+	sets     []killswitch.State
+	err      error
+	lost     bool
+	verifies int
+}
+
+func (f *fakeFirewall) Verify(context.Context) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.verifies++
+	return !f.lost, nil
+}
+
+func (f *fakeFirewall) lose() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lost = true
 }
 
 func (f *fakeFirewall) Set(_ context.Context, s killswitch.State) error {
@@ -38,6 +59,7 @@ func (f *fakeFirewall) Set(_ context.Context, s killswitch.State) error {
 	if s.Block && f.err != nil {
 		return f.err
 	}
+	f.lost = false
 	return nil
 }
 
@@ -139,10 +161,13 @@ func TestKillSwitchAutoOnlyForSingleFullPeer(t *testing.T) {
 	if len(sets) != 2 {
 		t.Fatalf("sets %+v, want connecting then connected", sets)
 	}
-	// While connecting (endpoints resolved, no device yet) everything but
-	// the marked resolver and link setup is blocked.
-	if s := sets[0]; !s.Block || len(s.Tunnels) != 0 || s.FwMark != 51820 {
-		t.Errorf("connecting state %+v, want blocking without tunnels, mark 51820", s)
+	// While connecting (endpoints resolved, no device yet) the endpoint
+	// passes outbound only (no interface, no listen port: P17), so the
+	// first handshake leaves at once; the rest but the marked resolver and
+	// link setup is blocked.
+	wantConnecting := killswitch.State{Block: true, FwMark: 51820, Tunnels: []killswitch.TunnelRule{{Endpoints: want.Tunnels[0].Endpoints}}}
+	if !statesEqual(sets[0], wantConnecting) {
+		t.Errorf("connecting state %+v, want %+v", sets[0], wantConnecting)
 	}
 	if !statesEqual(sets[1], want) {
 		t.Errorf("connected state %+v, want %+v", sets[1], want)
@@ -243,7 +268,7 @@ func TestCardRemovedKeepsBlocking(t *testing.T) {
 	// which never lets go in between.
 	fe.b.setPresent(serialA, true)
 	fe.waitState(StateConnected, 5*time.Second)
-	fe.fw.waitLast(t, "the tunnel passing again", func(s killswitch.State) bool { return s.Block && len(s.Tunnels) == 1 })
+	fe.fw.waitLast(t, "the tunnel passing again", func(s killswitch.State) bool { return s.Block && len(s.Tunnels) == 1 && s.Tunnels[0].Iface != "" })
 	for _, s := range fe.fw.all() {
 		if !s.Block {
 			t.Fatalf("the kill switch was released between card removal and reconnect: %+v", fe.fw.all())
@@ -315,12 +340,17 @@ func TestKillSwitchUnsupportedRefusesConnect(t *testing.T) {
 // identity uses card A's slot with pub.
 func writeFullTunnel(t *testing.T, dir string, pub [32]byte) {
 	t.Helper()
+	writeFullTunnelNamed(t, dir, tunName, pub)
+}
+
+func writeFullTunnelNamed(t *testing.T, dir, name string, pub [32]byte) {
+	t.Helper()
 	var peer [32]byte
 	peer[0] = 9
 	cfg := fmt.Sprintf("[Interface]\nMTU = 1420\n[Identity]\nKeyRef = %s\nPublicKey = %s\nAddress = 10.0.0.2/32\n"+
 		"[Peer]\nPublicKey = %s\nEndpoint = 192.0.2.1:51820\nAllowedIPs = 0.0.0.0/0\n",
 		refA, base64.StdEncoding.EncodeToString(pub[:]), base64.StdEncoding.EncodeToString(peer[:]))
-	if err := (&store{dir: dir}).save(tunName, cfg); err != nil {
+	if err := (&store{dir: dir}).save(name, cfg); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -378,8 +408,10 @@ func shortDir(t *testing.T) string {
 }
 
 // A daemon that crashed with the kill switch on finds it in the journal:
-// the startup cleanup leaves it, the armed tunnels load in card_removed,
-// and blocking goes on until down.
+// the startup cleanup leaves it; the tunnels it blocked for (the store's
+// record) load in card_removed, bound to their key and user, so their user
+// can take them down; other tunnels load disconnected; blocking goes on
+// until down (P17).
 func TestStartupKeepsKillSwitchBlocking(t *testing.T) {
 	dir := shortDir(t)
 	jpath := filepath.Join(dir, "run", "journal.json")
@@ -395,6 +427,11 @@ func TestStartupKeepsKillSwitchBlocking(t *testing.T) {
 	}
 	stdir := filepath.Join(dir, "tunnels")
 	writeFullTunnel(t, stdir, [32]byte{1})
+	writeFullTunnelNamed(t, stdir, "spare", [32]byte{2}) // armed, but was not up
+	const owner = 501
+	if err := (&store{dir: stdir}).saveKillSwitchTunnels([]ksTunnel{{Name: tunName, Ref: refA.String(), UID: owner}, {Name: "gone"}}); err != nil {
+		t.Fatal(err)
+	}
 	r := &cmdRunner{}
 	fw := &fakeFirewall{}
 	m := NewManager(Options{Socket: filepath.Join(dir, "s"), StoreDir: stdir, JournalPath: jpath, Runner: r,
@@ -420,21 +457,283 @@ func TestStartupKeepsKillSwitchBlocking(t *testing.T) {
 		t.Error("the kill switch left the journal at startup")
 	}
 	m.mu.Lock()
-	state := m.tunnels[tunName].state
+	tun, spare := m.tunnels[tunName], m.tunnels["spare"]
+	state, ref, hasRef, uid, spareState := tun.state, tun.ref, tun.hasRef, tun.uid, spare.state
 	m.mu.Unlock()
-	if state != StateCardRemoved {
-		t.Fatalf("tunnel state %q, want card_removed", state)
+	if state != StateCardRemoved || !hasRef || ref != refA || uid != owner {
+		t.Fatalf("tunnel %s, ref %v %v, uid %d; want card_removed bound to %v of uid %d", state, hasRef, ref, uid, refA, owner)
+	}
+	if spareState != StateDisconnected {
+		t.Errorf("tunnel spare is %s, want disconnected (it was not blocking)", spareState)
 	}
 	s, ok := fw.last()
 	if !ok || !s.Block || len(s.Tunnels) != 0 {
 		t.Fatalf("kill switch at startup %+v (sets %+v), want blocking without tunnels", s, fw.all())
 	}
 
-	if _, err := m.disconnect(tunName, nil); err != nil {
-		t.Fatal(err)
+	// Another user may not take it down; its owner may (requestDisconnect
+	// with a registered agent of the owner checks exactly this).
+	if m.teardown(tun, StateDisconnected, func(t *tunnel) bool { return t.boundTo(owner + 1) }) {
+		t.Fatal("another user took the tunnel down")
+	}
+	if _, err := m.disconnect(tunName, func(t *tunnel) bool { return t.boundTo(owner) }); err != nil {
+		t.Fatalf("down by its owner: %v", err)
 	}
 	if s, _ := fw.last(); s.Block {
 		t.Fatalf("down left the kill switch on: %+v", fw.all())
+	}
+	if _, err := os.Stat(filepath.Join(stdir, ksTunnelsFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("record still there after the release: %v", err)
+	}
+}
+
+// A journaled kill switch whose record is unusable restores nothing: the
+// kill switch is removed (logged), the tunnels load disconnected.
+func TestStartupUnusableRecordReleases(t *testing.T) {
+	dir := shortDir(t)
+	jpath := filepath.Join(dir, "journal.json")
+	j, err := netcfg.OpenJournal(jpath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := j.Record(killswitch.JournalOwner, []netcfg.Step{{Name: "nft", Args: []string{"-f", "-"}, Persistent: true}}); err != nil {
+		t.Fatal(err)
+	}
+	stdir := filepath.Join(dir, "tunnels")
+	writeFullTunnel(t, stdir, [32]byte{1})
+	if err := os.WriteFile(filepath.Join(stdir, ksTunnelsFile), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fw := &fakeFirewall{}
+	m := NewManager(Options{Socket: filepath.Join(dir, "s"), StoreDir: stdir, JournalPath: jpath,
+		Runner: &cmdRunner{}, TUN: (&netFactory{}).make, Firewall: fw})
+	serveManager(t, m)
+	if sets := fw.all(); len(sets) != 1 || sets[0].Block {
+		t.Fatalf("sets %+v, want one release", sets)
+	}
+}
+
+func TestLoadKillSwitchTunnels(t *testing.T) {
+	s := &store{dir: t.TempDir()}
+	if r, err := s.loadKillSwitchTunnels(); err != nil || r != nil {
+		t.Fatalf("missing record: %v, %v", r, err)
+	}
+	want := []ksTunnel{{Name: "office", Ref: refA.String(), UID: 501}}
+	if err := s.saveKillSwitchTunnels(want); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(filepath.Join(s.dir, ksTunnelsFile))
+	if err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("record mode %v, %v; want 0600", fi.Mode(), err)
+	}
+	if got, err := s.loadKillSwitchTunnels(); err != nil || !slices.Equal(got, want) {
+		t.Fatalf("loaded %+v, %v", got, err)
+	}
+	p := filepath.Join(s.dir, ksTunnelsFile)
+	for _, bad := range []string{
+		`{"version":2,"tunnels":[]}`,
+		`{"version":1,"tunnels":[{"name":"../x","uid":0}]}`,
+		`{"version":1,"tunnels":[],"x":1}`,
+		`{"version":1,"tunnels":[]} {}`,
+	} {
+		if err := os.WriteFile(p, []byte(bad), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.loadKillSwitchTunnels(); err == nil {
+			t.Errorf("record %q accepted", bad)
+		}
+	}
+	if err := os.WriteFile(p, []byte(`{"version":1,"tunnels":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(p, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.loadKillSwitchTunnels(); err == nil {
+		t.Error("a record writable by others was accepted")
+	}
+}
+
+// The daemon records the tunnels it blocks for; after a crash a new daemon
+// restores them, and the card's return (an agent reporting it) reconnects
+// the tunnel behind the kill switch (P17).
+func TestRestartRestoresKillSwitchTunnelAndReconnects(t *testing.T) {
+	fe := newFullTunnelEnv(t, true)
+	fe.connect()
+	rec := filepath.Join(fe.store, ksTunnelsFile)
+	got, err := (&store{dir: fe.store}).loadKillSwitchTunnels()
+	if err != nil || len(got) != 1 || got[0] != (ksTunnel{Name: tunName, Ref: refA.String(), UID: fe.boundUID()}) {
+		t.Fatalf("record %+v, %v", got, err)
+	}
+
+	// The "crash": a second daemon starts on a copy of the store, with
+	// the kill switch in its journal.
+	dir := shortDir(t)
+	stdir := filepath.Join(dir, "tunnels")
+	if err := os.MkdirAll(stdir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{tunName + ".conf", tunName + ".endpoints", ksTunnelsFile} {
+		b, err := os.ReadFile(filepath.Join(fe.store, f))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(stdir, f), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	jpath := filepath.Join(dir, "journal.json")
+	j, err := netcfg.OpenJournal(jpath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := j.Record(killswitch.JournalOwner, []netcfg.Step{{Name: "nft", Args: []string{"-f", "-"}, Persistent: true}}); err != nil {
+		t.Fatal(err)
+	}
+	fw := &fakeFirewall{}
+	sock := filepath.Join(dir, "s")
+	m := NewManager(Options{Socket: sock, StoreDir: stdir, JournalPath: jpath, Runner: &cmdRunner{},
+		TUN: (&netFactory{addrs: []netip.Addr{netip.MustParseAddr("10.0.0.2")}}).make, Firewall: fw,
+		IsAdmin: func(uint32) (bool, error) { return false, nil }})
+	m.netSource = func() (netmon.Source, error) { return make(chanSource), nil }
+	m.fullTunnel = true
+	m.pickTable = func(context.Context) (uint32, error) { return 51820, nil }
+	m.resolve = func(context.Context, string, uint32) ([]netip.Addr, error) {
+		return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
+	}
+	real := m.ops.ipcSet
+	m.ops.ipcSet = func(d *device.Device, s string) error {
+		s, _ = strings.CutPrefix(s, "fwmark=51820\n") // no CAP_NET_ADMIN for SO_MARK
+		return real(d, s)
+	}
+	serveManager(t, m)
+	if s, ok := fw.last(); !ok || !s.Block {
+		t.Fatalf("restarted daemon not blocking: %+v", fw.all())
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	a := agent.New(sock, fe.b, fe.p, fastPoll)
+	go func() { a.Run(ctx); close(done) }()
+	t.Cleanup(func() { cancel(); <-done })
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		m.mu.Lock()
+		st := m.tunnels[tunName].state
+		m.mu.Unlock()
+		if st == StateConnected {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("restored tunnel did not reconnect when the card was reported (state %s)", st)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	fw.waitLast(t, "the reconnected tunnel passing", func(s killswitch.State) bool { return s.Block && len(s.Tunnels) == 1 && s.Tunnels[0].Iface != "" })
+	if _, err := os.Stat(rec); err != nil {
+		t.Errorf("first daemon's record: %v", err)
+	}
+}
+
+// While the kill switch blocks, a reconnect's failed lookup of any kind
+// (macOS reports "no such host" when no DNS server is reachable) uses the
+// endpoint cache; without it, NXDOMAIN still never does (P17).
+func TestBlockedLookupUsesCacheOnAnyError(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		failErr error
+	)
+	hook := func(m *Manager) {
+		m.resolve = func(context.Context, string, uint32) ([]netip.Addr, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			if failErr != nil {
+				return nil, failErr
+			}
+			return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
+		}
+	}
+	e := newEnv(t, envOpts{present: []uint32{serialA}, hook: hook})
+	srv := newServer(t, e.b.pub(serialA), "10.0.0.2")
+	if err := os.MkdirAll(e.store, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(e.store, tunName+".policy"), []byte(`{"kill_switch":"on"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e.add(e.config([]keyref.Ref{refA}, []string{"10.0.0.2"}, srv, fmt.Sprintf("vpn.example.test:%d", srv.port)))
+	e.waitCard(serialA, true)
+	e.connect()
+
+	mu.Lock()
+	failErr = &net.DNSError{Err: "no such host", Name: "vpn.example.test", IsNotFound: true}
+	mu.Unlock()
+	e.b.setPresent(serialA, false)
+	e.waitState(StateCardRemoved, 3*time.Second)
+	e.fw.waitLast(t, "blocking", blocking)
+	e.b.setPresent(serialA, true)
+	e.waitState(StateConnected, 5*time.Second)
+	tnet, _ := e.f.last()
+	if err := get(tnet, 5*time.Second); err != nil {
+		t.Fatalf("GET via the cached endpoint: %v", err)
+	}
+
+	// Released (down): NXDOMAIN is final again.
+	if err := e.call(ipc.MethodTunnelDisconnect, ipc.TunnelName{Name: tunName}, nil); err != nil {
+		t.Fatal(err)
+	}
+	e.fw.waitLast(t, "a release", released)
+	assertCode(t, e.call(ipc.MethodTunnelConnect, ipc.TunnelName{Name: tunName}, nil), ipc.CodeUnavailable)
+}
+
+// The verification tick asks the firewall whether the blocking is still in
+// effect and sets it again when not (P17).
+func TestVerifyTickReappliesKillSwitch(t *testing.T) {
+	fe := newFullTunnelEnvOpts(t, true, true, envOpts{verifyEvery: 20 * time.Millisecond})
+	fe.connect()
+	want := fe.fw.waitLast(t, "the tunnel passing", func(s killswitch.State) bool { return s.Block && len(s.Tunnels) == 1 && s.Tunnels[0].Iface != "" })
+	n := len(fe.fw.all())
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		fe.fw.mu.Lock()
+		v := fe.fw.verifies
+		fe.fw.mu.Unlock()
+		if v >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the tick never verified the kill switch")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := len(fe.fw.all()); got != n {
+		t.Fatalf("a kill switch in effect was set again: %+v", fe.fw.all()[n:])
+	}
+	fe.fw.lose() // pfctl -d, nft delete table
+	deadline = time.Now().Add(5 * time.Second)
+	for len(fe.fw.all()) == n {
+		if time.Now().After(deadline) {
+			t.Fatal("a lost kill switch was not set again")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if s, _ := fe.fw.last(); !statesEqual(s, want) {
+		t.Errorf("set again with %+v, want %+v", s, want)
+	}
+
+	// Nothing is verified while not blocking.
+	if err := fe.call(ipc.MethodTunnelDisconnect, ipc.TunnelName{Name: tunName}, nil); err != nil {
+		t.Fatal(err)
+	}
+	fe.fw.waitLast(t, "a release", released)
+	fe.fw.mu.Lock()
+	v := fe.fw.verifies
+	fe.fw.mu.Unlock()
+	time.Sleep(100 * time.Millisecond)
+	fe.fw.mu.Lock()
+	defer fe.fw.mu.Unlock()
+	if fe.fw.verifies != v {
+		t.Errorf("verified %d times while released", fe.fw.verifies-v)
 	}
 }
 
@@ -444,6 +743,9 @@ func TestStartupWithoutKillSwitchLeavesFirewall(t *testing.T) {
 	dir := shortDir(t)
 	stdir := filepath.Join(dir, "tunnels")
 	writeFullTunnel(t, stdir, [32]byte{1})
+	if err := (&store{dir: stdir}).saveKillSwitchTunnels([]ksTunnel{{Name: tunName}}); err != nil {
+		t.Fatal(err)
+	}
 	fw := &fakeFirewall{}
 	m := NewManager(Options{Socket: filepath.Join(dir, "s"), StoreDir: stdir, JournalPath: filepath.Join(dir, "journal.json"),
 		Runner: &cmdRunner{}, TUN: (&netFactory{}).make, Firewall: fw})
@@ -457,6 +759,11 @@ func TestStartupWithoutKillSwitchLeavesFirewall(t *testing.T) {
 	stop()
 	if sets := fw.all(); len(sets) != 0 {
 		t.Errorf("firewall sets %+v, want none", sets)
+	}
+	// A record without a journaled kill switch is stale (a reboot cleared
+	// the journal) and goes.
+	if _, err := os.Stat(filepath.Join(stdir, ksTunnelsFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("stale record kept: %v", err)
 	}
 }
 

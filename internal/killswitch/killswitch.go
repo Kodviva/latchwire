@@ -42,10 +42,14 @@ const JournalOwner = "latchwire:killswitch"
 // TunnelRule is what one tunnel needs to pass the kill switch: its
 // interface, its peers' endpoints (literal addresses) and the local UDP port
 // its WireGuard socket is bound to. ListenPort must be the port actually
-// bound (the device's listen_port when the configuration sets none); it is
-// required when there are endpoints, since only that port accepts their
-// packets. DNS passes only through the tunnel interface, so a tunnel's DNS
-// servers need no rule.
+// bound (the device's listen_port when the configuration sets none).
+//
+// A tunnel that is still connecting has no interface yet (Iface "": no
+// interface rule) and no bound port (ListenPort 0): its endpoints get
+// outbound rules only, and only the replies to what was sent come back
+// (pf state, nft conntrack); no local port is opened to them. That lets the
+// first handshake out the moment the device comes up. DNS passes only
+// through the tunnel interface, so a tunnel's DNS servers need no rule.
 type TunnelRule struct {
 	Iface      string
 	Endpoints  []netip.AddrPort
@@ -61,6 +65,14 @@ type State struct {
 	Block   bool
 	Tunnels []TunnelRule
 	FwMark  uint32
+}
+
+// Verifier is a Firewall that can check that the blocking state it last
+// set is still in effect: something outside Latchwire may have disabled pf
+// (pfctl -d) or deleted the nft table. ok false asks for the state to be
+// set again; err says why the check itself failed (ok is then false too).
+type Verifier interface {
+	Verify(ctx context.Context) (ok bool, err error)
 }
 
 // Firewall puts a State in place. Each Set replaces the previous one as a

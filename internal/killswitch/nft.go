@@ -26,7 +26,33 @@ const removeScript = "table inet " + tableName + " {}\ndelete table inet " + tab
 // solicitation and advertisement (address resolution, duplicate address
 // detection). Redirects (137) are left out: a host on the link could use
 // them to steer traffic, and nothing breaks without them.
+//
+// They pass only from a link-local source or to a link-local or
+// link-scope multicast destination: that covers the default router (always
+// link-local), duplicate address detection (from ::, to the solicited-node
+// group) and address resolution through the solicited-node groups. Not
+// covered: neighbour discovery between two global addresses on the link,
+// which only an endpoint on the local link would need.
 const ndTypes = "icmpv6 type { nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } ip6 hoplimit 255"
+
+// ndScopes are the two conditions, either of which lets ndTypes pass.
+var ndScopes = []string{"ip6 saddr fe80::/10", "ip6 daddr { fe80::/10, ff02::/16 }"}
+
+// DHCP (P16): requests leave only from sockets of root (the system's DHCP
+// clients; one using a packet socket is not filtered at all) and only to
+// the broadcast address or private and link-local networks, where a DHCP
+// server can be; replies come only from those networks (or 0.0.0.0).
+// DHCPv6 goes from a link-local address to the All_DHCP_Relay_Agents_and_
+// Servers group, and replies come from link-local addresses. Otherwise an
+// unprivileged process could reach any host on ports 67 and 547 around the
+// kill switch.
+const (
+	dhcp4Nets = "10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16"
+	dhcp4Out  = "meta skuid 0 ip daddr { 255.255.255.255, " + dhcp4Nets + " } udp sport 68 udp dport 67"
+	dhcp4In   = "ip saddr { 0.0.0.0, " + dhcp4Nets + " } udp sport 67 udp dport 68"
+	dhcp6Out  = "meta skuid 0 ip6 saddr fe80::/10 ip6 daddr ff02::1:2 udp sport 546 udp dport 547"
+	dhcp6In   = "ip6 saddr fe80::/10 udp sport 547 udp dport 546"
+)
 
 // MLD: the kernel reports the multicast groups it listens on (the
 // solicited-node groups neighbour discovery depends on) and answers the
@@ -46,15 +72,18 @@ const (
 //
 //   - output: loopback; the tunnel interfaces; packets with the mark (the
 //     WireGuard socket, the endpoint resolver), whose connections get the
-//     mark too; DHCPv4 and DHCPv6 requests; neighbour discovery; MLD
-//     reports; UDP to each endpoint. The rest is rejected
-//     (admin-prohibited), so applications fail at once.
+//     mark too; DHCPv4 and DHCPv6 requests (dhcp4Out, dhcp6Out); neighbour
+//     discovery; MLD reports; UDP to each endpoint, connected or
+//     connecting. The rest is rejected (admin-prohibited), so applications
+//     fail at once.
 //   - input: loopback; the tunnel interfaces; established and related
 //     packets of connections that carry the mark; DHCP replies; neighbour
 //     discovery; MLD queries; UDP from each endpoint to the tunnel's listen
 //     port (the peer may start a handshake; no other local port is open to
-//     a source address anyone can forge) and ICMP errors about traffic to
-//     the endpoint (path MTU). The rest is dropped. Established traffic in
+//     a source address anyone can forge), or, for a tunnel still
+//     connecting (no listen port yet), only the replies of flows to the
+//     endpoint that conntrack has seen go out; and ICMP errors about
+//     traffic to the endpoint (path MTU). The rest is dropped. Established traffic in
 //     general is not accepted: a connection opened before the kill switch
 //     came on must not survive it.
 //
@@ -92,14 +121,18 @@ func nftScript(s State) ([]byte, error) {
 	chain("output")
 	rule(`oifname "lo" accept`)
 	for _, t := range s.Tunnels {
-		rule("oifname %s accept", strconv.Quote(t.Iface))
+		if t.Iface != "" {
+			rule("oifname %s accept", strconv.Quote(t.Iface))
+		}
 	}
 	if s.FwMark != 0 {
 		rule("meta mark %s ct mark set meta mark accept", mark)
 	}
-	rule("meta nfproto ipv4 udp sport 68 udp dport 67 accept")
-	rule("meta nfproto ipv6 udp sport 546 udp dport 547 accept")
-	rule("%s accept", ndTypes)
+	rule("%s accept", dhcp4Out)
+	rule("%s accept", dhcp6Out)
+	for _, sc := range ndScopes {
+		rule("%s %s accept", ndTypes, sc)
+	}
 	rule("%s accept", mldOut)
 	for _, t := range s.Tunnels {
 		for _, e := range t.Endpoints {
@@ -113,19 +146,27 @@ func nftScript(s State) ([]byte, error) {
 	chain("input")
 	rule(`iifname "lo" accept`)
 	for _, t := range s.Tunnels {
-		rule("iifname %s accept", strconv.Quote(t.Iface))
+		if t.Iface != "" {
+			rule("iifname %s accept", strconv.Quote(t.Iface))
+		}
 	}
 	if s.FwMark != 0 {
 		rule("ct mark %s ct state established,related accept", mark)
 	}
-	rule("meta nfproto ipv4 udp sport 67 udp dport 68 accept")
-	rule("meta nfproto ipv6 udp sport 547 udp dport 546 accept")
-	rule("%s accept", ndTypes)
+	rule("%s accept", dhcp4In)
+	rule("%s accept", dhcp6In)
+	for _, sc := range ndScopes {
+		rule("%s %s accept", ndTypes, sc)
+	}
 	rule("%s accept", mldIn)
 	for _, t := range s.Tunnels {
 		for _, e := range t.Endpoints {
 			a := e.Addr().Unmap()
-			rule("%s saddr %s udp sport %d udp dport %d accept", fam(a), a, e.Port(), t.ListenPort)
+			if t.ListenPort != 0 {
+				rule("%s saddr %s udp sport %d udp dport %d accept", fam(a), a, e.Port(), t.ListenPort)
+			} else {
+				rule("%s saddr %s udp sport %d ct state established accept", fam(a), a, e.Port())
+			}
 			rule("ct state related ct original %s daddr %s accept", fam(a), a)
 		}
 	}
@@ -134,6 +175,9 @@ func nftScript(s State) ([]byte, error) {
 
 	chain("forward")
 	for _, t := range s.Tunnels {
+		if t.Iface == "" {
+			continue
+		}
 		q := strconv.Quote(t.Iface)
 		rule("oifname %s accept", q)
 		rule("iifname %s ct state established,related accept", q)
@@ -151,22 +195,20 @@ func fam(a netip.Addr) string {
 	return "ip6"
 }
 
-// validState checks what goes into the script: interface names that need
-// no escaping in an nft string (the tunnel name rules, at most 15
-// characters), literal endpoint addresses without a zone (nft has none),
-// and a listen port wherever there are endpoints.
+// validState checks what goes into the script: interface names (empty for
+// a tunnel still connecting) that need no escaping in an nft string (the
+// tunnel name rules, at most 15 characters), and literal endpoint
+// addresses without a zone (nft has none). A tunnel without a listen port
+// gets outbound endpoint rules only.
 func validState(s State) error {
 	for _, t := range s.Tunnels {
-		if !validIface(t.Iface) {
+		if t.Iface != "" && !validIface(t.Iface) {
 			return fmt.Errorf("killswitch: invalid interface name %q", t.Iface)
 		}
 		for _, e := range t.Endpoints {
 			if !e.IsValid() || e.Port() == 0 || e.Addr().Zone() != "" {
-				return fmt.Errorf("killswitch: invalid endpoint %q for %s", e, t.Iface)
+				return fmt.Errorf("killswitch: invalid endpoint %q for %q", e, t.Iface)
 			}
-		}
-		if len(t.Endpoints) > 0 && t.ListenPort == 0 {
-			return fmt.Errorf("killswitch: no listen port for %s", t.Iface)
 		}
 	}
 	return nil
@@ -238,4 +280,18 @@ func (f *nftFirewall) Set(ctx context.Context, s State) error {
 		return f.j.Forget(JournalOwner)
 	}
 	return nil
+}
+
+// Verify checks that the table is there (nft list table): nft reports a
+// table that does not exist with ENOENT's text.
+func (f *nftFirewall) Verify(ctx context.Context) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, err := f.r.Run(ctx, "nft", []string{"list", "table", "inet", tableName}, nil); err != nil {
+		if strings.Contains(err.Error(), "No such file or directory") {
+			return false, nil
+		}
+		return false, fmt.Errorf("killswitch: nft list table inet %s: %w", tableName, err)
+	}
+	return true, nil
 }
