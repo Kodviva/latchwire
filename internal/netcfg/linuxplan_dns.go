@@ -40,12 +40,21 @@ const resolvedStub = "127.0.0.53"
 //
 // systemd-resolved is in use when resolv.conf lists its stub or "resolvectl
 // status" works; else resolvconf is used when it is installed; else the
-// result is ErrDNSUnsupported. With resolvconf, scoped DNS cannot be
+// result is ErrDNSUnsupported. A resolv.conf stub does not count when the
+// resolvectl command is missing. With resolvconf, scoped DNS cannot be
 // expressed (resolvconf merges every nameserver into one list), so nothing
 // is applied.
 func linuxDNS(ctx context.Context, r Runner, resolvConf string, p Plan) ([]step, string, error) {
 	if p.DNSRole == DNSNone || len(p.DNS) == 0 {
 		return nil, DNSOutcomeNone, nil
+	}
+	for _, a := range p.DNS {
+		// A link-local server needs its zone, which names an interface of
+		// the user's machine; without one the address is useless, so the
+		// tunnel is refused rather than half configured.
+		if a.Zone() != "" {
+			return nil, "", fmt.Errorf(msg.NetZonedDNSFmt, a)
+		}
 	}
 	for _, d := range p.DNSSearch {
 		if !plainDomain(d) {
@@ -55,34 +64,63 @@ func linuxDNS(ctx context.Context, r Runner, resolvConf string, p Plan) ([]step,
 	switch {
 	case usesResolved(ctx, r, resolvConf):
 		return planResolved(p), DNSOutcomeResolved, nil
-	case haveResolvconf(ctx, r):
-		if p.DNSRole == DNSScoped {
-			log.Printf(msg.NetDNSScopedUnsupportedFmt, p.Iface)
-			return nil, DNSOutcomeScopedUnsupported, nil
-		}
-		return planResolvconf(p), DNSOutcomeResolvconf, nil
 	}
-	return nil, "", ErrDNSUnsupported
+	flavor := resolvconfFlavor(ctx, r)
+	if flavor == resolvconfAbsent {
+		return nil, "", ErrDNSUnsupported
+	}
+	if p.DNSRole == DNSScoped {
+		log.Printf(msg.NetDNSScopedUnsupportedFmt, p.Iface)
+		return nil, DNSOutcomeScopedUnsupported, nil
+	}
+	return planResolvconf(p, flavor == resolvconfOpen), DNSOutcomeResolvconf, nil
 }
 
-// usesResolved reports whether systemd-resolved manages the system's DNS.
+// usesResolved reports whether systemd-resolved manages the system's DNS:
+// resolvectl is installed and either resolv.conf lists the stub or its
+// status works.
 func usesResolved(ctx context.Context, r Runner, resolvConf string) bool {
-	if b, err := os.ReadFile(resolvConf); err == nil {
+	_, err := r.Run(ctx, "resolvectl", []string{"status"}, nil)
+	if errors.Is(err, exec.ErrNotFound) {
+		return false
+	}
+	if err == nil {
+		return true
+	}
+	if b, rerr := os.ReadFile(resolvConf); rerr == nil {
 		for line := range strings.Lines(string(b)) {
 			if f := strings.Fields(line); len(f) >= 2 && f[0] == "nameserver" && f[1] == resolvedStub {
 				return true
 			}
 		}
 	}
-	_, err := r.Run(ctx, "resolvectl", []string{"status"}, nil)
-	return err == nil
+	return false
 }
 
-// haveResolvconf reports whether resolvconf is installed: any answer from
-// it, even an error, says so; only a missing command says no.
-func haveResolvconf(ctx context.Context, r Runner) bool {
-	_, err := r.Run(ctx, "resolvconf", []string{"--version"}, nil)
-	return !errors.Is(err, exec.ErrNotFound)
+type resolvconfKind int
+
+const (
+	resolvconfAbsent  resolvconfKind = iota
+	resolvconfClassic                // Debian/Ubuntu resolvconf: -a IFACE, -d IFACE only
+	resolvconfOpen                   // openresolv: also -m METRIC, -x, -f
+)
+
+// resolvconfFlavor finds which resolvconf is installed. Only a missing
+// command means none. openresolv prints a first line starting with
+// "openresolv" for --version; any other answer, even an error, is the
+// classic resolvconf, which rejects openresolv's flags (-m, -x, -f).
+func resolvconfFlavor(ctx context.Context, r Runner) resolvconfKind {
+	out, err := r.Run(ctx, "resolvconf", []string{"--version"}, nil)
+	if errors.Is(err, exec.ErrNotFound) {
+		return resolvconfAbsent
+	}
+	if err == nil {
+		first, _, _ := strings.Cut(string(out), "\n")
+		if strings.HasPrefix(strings.TrimSpace(first), "openresolv") {
+			return resolvconfOpen
+		}
+	}
+	return resolvconfClassic
 }
 
 // plainDomain reports whether d is safe as one resolvectl argument and one
@@ -140,8 +178,11 @@ func planResolved(p Plan) []step {
 }
 
 // planResolvconf: the entry lives in /run/resolvconf, outside the link, so
-// its undo is persistent; -f makes the delete succeed when it is gone.
-func planResolvconf(p Plan) []step {
+// its undo is persistent. openresolv gets metric 0 and exclusive mode, and
+// -f on the delete (both quiet when the entry is gone); the classic
+// resolvconf takes neither flag, and its "-d" of an unknown interface
+// already succeeds (checked with resolvconf 1.91 on Debian 12).
+func planResolvconf(p Plan, openresolv bool) []step {
 	var b strings.Builder
 	for _, s := range addrStrings(p.DNS) {
 		b.WriteString("nameserver " + s + "\n")
@@ -149,9 +190,15 @@ func planResolvconf(p Plan) []step {
 	if len(p.DNSSearch) > 0 {
 		b.WriteString("search " + strings.Join(p.DNSSearch, " ") + "\n")
 	}
-	do := command("resolvconf", "-a", p.Iface, "-m", "0", "-x")
+	add := []string{"-a", p.Iface}
+	del := []string{"-d", p.Iface}
+	if openresolv {
+		add = append(add, "-m", "0", "-x")
+		del = append(del, "-f")
+	}
+	do := command("resolvconf", add...)
 	do.Stdin = []byte(b.String())
-	return []step{{do: do, undo: persistentUndo("resolvconf", "-d", p.Iface, "-f")}}
+	return []step{{do: do, undo: persistentUndo("resolvconf", del...)}}
 }
 
 // dnsUndoneAlready reports whether err from undo step s only says that what

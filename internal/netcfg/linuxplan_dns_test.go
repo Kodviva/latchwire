@@ -39,8 +39,13 @@ func TestLinuxDNSResolvedPrimary(t *testing.T) {
 	if err != nil || got != DNSOutcomeResolved {
 		t.Fatalf("got %q, %v", got, err)
 	}
-	if len(r.cmds) != 0 {
-		t.Errorf("a stub resolv.conf needs no command to detect resolved, ran %q", r.cmds)
+	if !reflect.DeepEqual(r.cmds, []string{"resolvectl status"}) {
+		t.Errorf("detection ran %q", r.cmds)
+	}
+	// A status that fails (resolved not answering yet) does not matter
+	// when resolv.conf lists the stub.
+	if _, got, err := linuxDNS(ctx, &recorder{failOn: "resolvectl"}, resolvFile(t, stubResolv), dnsPlan(DNSPrimary)); err != nil || got != DNSOutcomeResolved {
+		t.Errorf("stub with failing status: %q, %v", got, err)
 	}
 	do, undo := render(ss)
 	wantDo := []string{
@@ -95,9 +100,12 @@ func TestLinuxDNSResolvedScoped(t *testing.T) {
 	}
 }
 
+const openresolvVersion = "openresolv 3.12.0\nCopyright (c) 2007-2020 Roy Marples\n"
+
 func TestLinuxDNSResolvconfFallback(t *testing.T) {
-	// resolved is not there: resolv.conf is plain and resolvectl fails.
-	r := &recorder{failOn: "resolvectl"}
+	// openresolv: resolved is not there (resolv.conf is plain and
+	// resolvectl fails); its flags are used.
+	r := &recorder{failOn: "resolvectl", out: map[string]string{"resolvconf --version": openresolvVersion}}
 	ss, got, err := linuxDNS(ctx, r, resolvFile(t, "nameserver 192.168.1.1\n"), dnsPlan(DNSPrimary, "corp.example", "lan"))
 	if err != nil || got != DNSOutcomeResolvconf {
 		t.Fatalf("got %q, %v", got, err)
@@ -109,8 +117,8 @@ func TestLinuxDNSResolvconfFallback(t *testing.T) {
 	if want := "nameserver 10.0.0.1\nnameserver fd00::1\nsearch corp.example lan\n"; string(ss[0].do.Stdin) != want {
 		t.Errorf("stdin %q, want %q", ss[0].do.Stdin, want)
 	}
-	// The resolvconf entry lives in /run/resolvconf, not on the link, and
-	// -f makes the delete succeed when it is gone.
+	// The entry lives in /run/resolvconf, not on the link, and -f makes
+	// the delete succeed when it is gone.
 	if !reflect.DeepEqual(undo, []string{"P resolvconf -d wg0 -f"}) {
 		t.Errorf("undo %q", undo)
 	}
@@ -121,9 +129,91 @@ func TestLinuxDNSResolvconfFallback(t *testing.T) {
 	}
 
 	// Scoped DNS cannot be expressed: nothing is applied, and it is said.
-	ss, got, err = linuxDNS(ctx, &recorder{failOn: "resolvectl"}, resolvFile(t, ""), dnsPlan(DNSScoped, "lan"))
-	if err != nil || got != DNSOutcomeScopedUnsupported || len(ss) != 0 {
-		t.Errorf("scoped: %q %v steps %d", got, err, len(ss))
+	for _, out := range []string{openresolvVersion, "Debian resolvconf 1.91+nmu1\n"} {
+		r = &recorder{failOn: "resolvectl", out: map[string]string{"resolvconf --version": out}}
+		ss, got, err = linuxDNS(ctx, r, resolvFile(t, ""), dnsPlan(DNSScoped, "lan"))
+		if err != nil || got != DNSOutcomeScopedUnsupported || len(ss) != 0 {
+			t.Errorf("scoped: %q %v steps %d", got, err, len(ss))
+		}
+	}
+}
+
+// The Debian/Ubuntu resolvconf has no -m, -x or -f: it must get plain
+// "-a IFACE" and "-d IFACE" (its delete of an unknown interface succeeds).
+func TestLinuxDNSClassicResolvconf(t *testing.T) {
+	for name, r := range map[string]*recorder{
+		"debian version":        {failOn: "resolvectl", out: map[string]string{"resolvconf --version": "Debian resolvconf 1.91+nmu1\nCopyright: \n"}},
+		"silent version":        {failOn: "resolvectl"},
+		"version not supported": {failOn: "resolvectl", fail: map[string]error{"resolvconf --version": errors.New("exit status 1")}},
+		"openresolv not first":  {failOn: "resolvectl", out: map[string]string{"resolvconf --version": "Debian resolvconf (openresolv compatible)\n"}},
+	} {
+		ss, got, err := linuxDNS(ctx, r, resolvFile(t, ""), dnsPlan(DNSPrimary, "lan"))
+		if err != nil || got != DNSOutcomeResolvconf {
+			t.Fatalf("%s: got %q, %v", name, got, err)
+		}
+		do, undo := render(ss)
+		if !reflect.DeepEqual(do, []string{"resolvconf -a wg0"}) {
+			t.Errorf("%s: apply %q", name, do)
+		}
+		if !reflect.DeepEqual(undo, []string{"P resolvconf -d wg0"}) {
+			t.Errorf("%s: undo %q", name, undo)
+		}
+		if want := "nameserver 10.0.0.1\nnameserver fd00::1\nsearch lan\n"; string(ss[0].do.Stdin) != want {
+			t.Errorf("%s: stdin %q", name, ss[0].do.Stdin)
+		}
+	}
+}
+
+// Either resolvconf's delete is idempotent, so a persistent undo never
+// stays stuck in the journal; the command being gone counts as undone.
+func TestLinuxResolvconfUndoRetired(t *testing.T) {
+	for _, openresolv := range []bool{true, false} {
+		ss := planResolvconf(dnsPlan(DNSPrimary), openresolv)
+		u := *ss[0].undo
+		if !u.Persistent {
+			t.Error("resolvconf undo must be persistent")
+		}
+		// Run through the real undo path: a missing resolvconf succeeds,
+		// another failure does not.
+		if err := runUndo(ctx, &recorder{missing: "resolvconf"}, u); err != nil {
+			t.Errorf("openresolv=%v: command gone: %v", openresolv, err)
+		}
+		if err := runUndo(ctx, &recorder{failOn: "resolvconf"}, u); err == nil {
+			t.Errorf("openresolv=%v: a failing delete reported success", openresolv)
+		}
+		r := &recorder{}
+		if err := runUndo(ctx, r, u); err != nil || len(r.cmds) != 1 {
+			t.Errorf("openresolv=%v: %v %q", openresolv, err, r.cmds)
+		}
+	}
+}
+
+func TestLinuxDNSRejectsZonedServers(t *testing.T) {
+	p := dnsPlan(DNSPrimary)
+	p.DNS = []netip.Addr{netip.MustParseAddr("10.0.0.1"), netip.MustParseAddr("fe80::1%eth0")}
+	r := &recorder{}
+	ss, _, err := linuxDNS(ctx, r, resolvFile(t, stubResolv), p)
+	if err == nil || !strings.Contains(err.Error(), "fe80::1%eth0") || len(ss) != 0 || len(r.cmds) != 0 {
+		t.Errorf("err %v, %d steps, ran %q", err, len(ss), r.cmds)
+	}
+	// No DNS role: the address is not used, so it is not an error.
+	p.DNSRole = DNSNone
+	if _, got, err := linuxDNS(ctx, r, resolvFile(t, ""), p); err != nil || got != DNSOutcomeNone {
+		t.Errorf("no role: %q, %v", got, err)
+	}
+}
+
+// A stub in resolv.conf without the resolvectl command to drive it is not
+// systemd-resolved we can use: fall through to resolvconf, then give up.
+func TestLinuxDNSStubWithoutResolvectl(t *testing.T) {
+	r := &recorder{missing: "resolvectl", out: map[string]string{"resolvconf --version": openresolvVersion}}
+	ss, got, err := linuxDNS(ctx, r, resolvFile(t, stubResolv), dnsPlan(DNSPrimary))
+	if err != nil || got != DNSOutcomeResolvconf || ss[0].do.Name != "resolvconf" {
+		t.Errorf("got %q, %v", got, err)
+	}
+	r = &recorder{missing: "resolvectl", fail: map[string]error{"resolvconf --version": exec.ErrNotFound}}
+	if _, _, err := linuxDNS(ctx, r, resolvFile(t, stubResolv), dnsPlan(DNSPrimary)); !errors.Is(err, ErrDNSUnsupported) {
+		t.Errorf("err %v, want ErrDNSUnsupported", err)
 	}
 }
 
@@ -139,12 +229,6 @@ func TestLinuxDNSUnsupported(t *testing.T) {
 	r.fail = map[string]error{"resolvconf --version": exec.ErrNotFound}
 	if _, _, err = linuxDNS(ctx, r, resolvFile(t, ""), dnsPlan(DNSScoped, "lan")); !errors.Is(err, ErrDNSUnsupported) {
 		t.Errorf("err %v", err)
-	}
-	// A resolvconf that exists but rejects --version is still resolvconf.
-	r = &recorder{failOn: "resolvectl"}
-	r.fail = map[string]error{"resolvconf --version": errors.New("exit status 1")}
-	if _, got, err = linuxDNS(ctx, r, resolvFile(t, ""), dnsPlan(DNSPrimary)); err != nil || got != DNSOutcomeResolvconf {
-		t.Errorf("got %q, %v", got, err)
 	}
 }
 
@@ -207,6 +291,7 @@ func TestLinuxApplyDNS(t *testing.T) {
 		t.Fatalf("%+v %v", res, err)
 	}
 	want := []string{
+		"resolvectl status", // read first: nothing changes if DNS is unsupported
 		"ip address add 10.0.0.2/32 dev wg0",
 		"ip link set wg0 up",
 		"resolvectl dns wg0 10.0.0.1 fd00::1",

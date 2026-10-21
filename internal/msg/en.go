@@ -86,6 +86,8 @@ const (
 	NetDNSScopedUnsupportedFmt = "DNS for %s is limited to its search domains, which resolvconf cannot do: the tunnel's DNS servers are not applied; use systemd-resolved to enable them"
 	// NetBadSearchDomainFmt takes the search domain.
 	NetBadSearchDomainFmt = "invalid DNS search domain %q"
+	// NetZonedDNSFmt takes the DNS server address.
+	NetZonedDNSFmt = "DNS server %s names a network interface (a %%zone suffix); use an address without a zone"
 )
 
 // Tunnel daemon. None of these formats take key material or a PIN.
