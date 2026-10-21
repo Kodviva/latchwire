@@ -1,7 +1,7 @@
 // Package killswitch blocks the traffic that would leave outside the
 // tunnels: while a kill switch is on, only the tunnel interfaces, loopback,
-// the tunnels' endpoints, their DNS servers and what a link needs to come up
-// (DHCP, IPv6 neighbour discovery) pass. Linux uses one nftables table
+// the tunnels' endpoints and what a link needs to come up (DHCP, IPv6
+// neighbour discovery and MLD) pass; DNS goes through the tunnels only. Linux uses one nftables table
 // (inet latchwire); other platforms have no implementation yet.
 //
 // Every change is journaled (owner JournalOwner) before it is made, so a
@@ -30,11 +30,16 @@ var ErrUnsupported = errors.New(msg.KillSwitchUnsupported)
 const JournalOwner = "latchwire:killswitch"
 
 // TunnelRule is what one tunnel needs to pass the kill switch: its
-// interface, its peers' endpoints (literal addresses) and its DNS servers.
+// interface, its peers' endpoints (literal addresses) and the local UDP port
+// its WireGuard socket is bound to. ListenPort must be the port actually
+// bound (the device's listen_port when the configuration sets none); it is
+// required when there are endpoints, since only that port accepts their
+// packets. DNS passes only through the tunnel interface, so a tunnel's DNS
+// servers need no rule.
 type TunnelRule struct {
-	Iface     string
-	Endpoints []netip.AddrPort
-	DNS       []netip.Addr
+	Iface      string
+	Endpoints  []netip.AddrPort
+	ListenPort uint16
 }
 
 // State is the whole kill switch. Block false removes the rules; Block true

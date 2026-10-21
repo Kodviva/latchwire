@@ -1206,8 +1206,10 @@ func resolvedEndpoints(rt *config.Tunnel) []netip.AddrPort {
 // resolveTunnel returns a copy of cfg whose endpoints are literal IP:port.
 // Names are resolved at every connect, with mark (see Manager.resolve); IPv4
 // is preferred. The addresses found are written to the tunnel's endpoint
-// cache; when a lookup fails (and ctx has not ended), the cached address of
-// that peer is used if its configured endpoint is unchanged.
+// cache; when a lookup fails for a transient reason (and ctx has not
+// ended), the cached address of that peer is used if its configured
+// endpoint is unchanged. A name that does not exist (NXDOMAIN) never falls
+// back to the cache.
 func (m *Manager) resolveTunnel(ctx context.Context, cfg *config.Tunnel, mark uint32) (*config.Tunnel, error) {
 	rt := *cfg
 	rt.Peers = slices.Clone(cfg.Peers)
@@ -1239,7 +1241,7 @@ func (m *Manager) resolveTunnel(ctx context.Context, cfg *config.Tunnel, mark ui
 		addrs, lerr := m.resolve(rctx, host, mark)
 		cancel()
 		if lerr != nil || len(addrs) == 0 {
-			if !loaded && ctx.Err() == nil {
+			if !loaded && ctx.Err() == nil && transientLookupErr(lerr) {
 				loaded = true
 				if cache, err = m.store.loadEndpoints(cfg.Name); err != nil {
 					log.Printf("daemon: %s: ignoring the endpoint cache: %v", cfg.Name, err)
@@ -1247,10 +1249,10 @@ func (m *Manager) resolveTunnel(ctx context.Context, cfg *config.Tunnel, mark ui
 			}
 			c, ok := cache[key]
 			ap, perr := netip.ParseAddrPort(c.Addr)
-			if ctx.Err() != nil || !ok || c.Endpoint != ep || perr != nil || ap.Port() != uint16(port) {
+			if ctx.Err() != nil || !transientLookupErr(lerr) || !ok || c.Endpoint != ep || perr != nil || ap.Port() != uint16(port) {
 				return nil, &ipc.Error{Code: ipc.CodeUnavailable, Message: fmt.Sprintf(msg.DaemonResolveFmt, host)}
 			}
-			log.Printf("daemon: %s: cannot resolve %s (%v); using the cached address %s", cfg.Name, host, lerr, ap)
+			log.Printf("daemon: %s: cannot resolve %s (%v); using the address %s cached %v ago", cfg.Name, host, lerr, ap, time.Since(c.Resolved).Round(time.Second))
 			found[key] = c
 			rt.Peers[i].Endpoint = ap.String()
 			continue
@@ -1264,7 +1266,7 @@ func (m *Manager) resolveTunnel(ctx context.Context, cfg *config.Tunnel, mark ui
 		}
 		ap := netip.AddrPortFrom(addr.Unmap(), uint16(port))
 		rt.Peers[i].Endpoint = ap.String()
-		found[key] = cachedEndpoint{Endpoint: ep, Addr: ap.String()}
+		found[key] = cachedEndpoint{Endpoint: ep, Addr: ap.String(), Resolved: time.Now().UTC().Round(0)}
 	}
 	// An attempt that ended (a teardown, a remove) writes nothing: remove
 	// deletes the cache once the attempt has let go of the tunnel.
@@ -1274,6 +1276,22 @@ func (m *Manager) resolveTunnel(ctx context.Context, cfg *config.Tunnel, mark ui
 		}
 	}
 	return &rt, nil
+}
+
+// transientLookupErr reports whether a failed endpoint lookup may succeed
+// later, so that the cached address may stand in: a timeout, a temporary
+// failure (SERVFAIL, a socket error such as no route or a kill switch's
+// reject) or an error from outside the resolver. A name that does not exist
+// (IsNotFound), any other DNS answer, or an empty answer is not.
+func transientLookupErr(err error) bool {
+	if err == nil {
+		return false // no error, no addresses
+	}
+	var de *net.DNSError
+	if errors.As(err, &de) {
+		return !de.IsNotFound && (de.IsTemporary || de.IsTimeout)
+	}
+	return true
 }
 
 // teardown moves t to state and closes its device. cond, if set, is checked

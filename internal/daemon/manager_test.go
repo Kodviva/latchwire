@@ -1210,18 +1210,23 @@ func TestReconnectUsesCachedEndpointUnderKillSwitch(t *testing.T) {
 	var (
 		mu      sync.Mutex
 		lookups int
-		fail    bool
+		failErr error
 	)
 	hook := func(m *Manager) {
 		m.resolve = func(ctx context.Context, host string, mark uint32) ([]netip.Addr, error) {
 			mu.Lock()
 			defer mu.Unlock()
 			lookups++
-			if fail {
-				return nil, errors.New("no such host")
+			if failErr != nil {
+				return nil, failErr
 			}
 			return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
 		}
+	}
+	setFail := func(err error) {
+		mu.Lock()
+		failErr = err
+		mu.Unlock()
 	}
 	e := newEnv(t, envOpts{present: []uint32{serialA}, hook: hook})
 	srv := newServer(t, e.b.pub(serialA), "10.0.0.2")
@@ -1245,22 +1250,22 @@ func TestReconnectUsesCachedEndpointUnderKillSwitch(t *testing.T) {
 	var c struct {
 		Version int `json:"version"`
 		Peers   map[string]struct {
-			Endpoint string `json:"endpoint"`
-			Addr     string `json:"addr"`
+			Endpoint string    `json:"endpoint"`
+			Addr     string    `json:"addr"`
+			Resolved time.Time `json:"resolved"`
 		} `json:"peers"`
 	}
 	if err := json.Unmarshal(b, &c); err != nil {
 		t.Fatalf("cache %s: %v", b, err)
 	}
 	pk := hex.EncodeToString(srv.pub[:])
-	if p := c.Peers[pk]; c.Version != 1 || len(c.Peers) != 1 || p.Endpoint != ep || p.Addr != fmt.Sprintf("127.0.0.1:%d", srv.port) {
+	if p := c.Peers[pk]; c.Version != 1 || len(c.Peers) != 1 || p.Endpoint != ep || p.Addr != fmt.Sprintf("127.0.0.1:%d", srv.port) ||
+		time.Since(p.Resolved) > time.Minute || time.Since(p.Resolved) < 0 {
 		t.Fatalf("cache %s, want peer %s → 127.0.0.1:%d", b, pk, srv.port)
 	}
 
-	// The card goes and comes back; the lookup now fails.
-	mu.Lock()
-	fail = true
-	mu.Unlock()
+	// The card goes and comes back; the lookup now times out (transient).
+	setFail(&net.DNSError{Err: "i/o timeout", Name: "vpn.example.test", IsTimeout: true})
 	e.b.setPresent(serialA, false)
 	e.waitState(StateCardRemoved, 3*time.Second)
 	e.b.setPresent(serialA, true)
@@ -1276,13 +1281,27 @@ func TestReconnectUsesCachedEndpointUnderKillSwitch(t *testing.T) {
 		t.Errorf("%d lookups, want 2 (the name is still resolved first, R11)", n)
 	}
 
+	// A name that does not exist (NXDOMAIN) never uses the cache.
+	if err := e.call(ipc.MethodTunnelDisconnect, ipc.TunnelName{Name: tunName}, nil); err != nil {
+		t.Fatal(err)
+	}
+	setFail(&net.DNSError{Err: "no such host", Name: "vpn.example.test", IsNotFound: true})
+	assertCode(t, e.call(ipc.MethodTunnelConnect, ipc.TunnelName{Name: tunName}, nil), ipc.CodeUnavailable)
+	// A socket error (the resolver's servers unreachable) is transient.
+	setFail(errors.New("dial udp: connect: network is unreachable"))
+	e.connect()
+
 	// A cache that does not validate is ignored.
+	port := strconv.Itoa(srv.port)
+	const at = `,"resolved":"2026-10-21T10:00:00Z"`
 	for _, bad := range []string{
 		"garbage",
-		`{"version":1,"peers":{"` + pk + `":{"endpoint":"` + ep + `","addr":"127.0.0.1:0"}}}`,
-		`{"version":1,"peers":{"` + pk + `":{"endpoint":"other.example.test:1","addr":"127.0.0.1:` + strconv.Itoa(srv.port) + `"}}}`,
-		`{"version":2,"peers":{"` + pk + `":{"endpoint":"` + ep + `","addr":"127.0.0.1:` + strconv.Itoa(srv.port) + `"}}}`,
-		`{"version":1,"peers":{"` + pk + `":{"endpoint":"` + ep + `","addr":"127.0.0.1:` + strconv.Itoa(srv.port) + `","x":1}}}`,
+		`{"version":1,"peers":{"` + pk + `":{"endpoint":"` + ep + `","addr":"127.0.0.1:0"` + at + `}}}`,
+		`{"version":1,"peers":{"` + pk + `":{"endpoint":"other.example.test:1","addr":"127.0.0.1:` + port + `"` + at + `}}}`,
+		`{"version":2,"peers":{"` + pk + `":{"endpoint":"` + ep + `","addr":"127.0.0.1:` + port + `"` + at + `}}}`,
+		`{"version":1,"peers":{"` + pk + `":{"endpoint":"` + ep + `","addr":"127.0.0.1:` + port + `"` + at + `,"x":1}}}`,
+		`{"version":1,"peers":{"` + pk + `":{"endpoint":"` + ep + `","addr":"127.0.0.1:` + port + `"}}}`,
+		`{"version":1,"peers":{"` + strings.ToUpper(pk) + `":{"endpoint":"` + ep + `","addr":"127.0.0.1:` + port + `"` + at + `}}}`,
 	} {
 		if err := e.call(ipc.MethodTunnelDisconnect, ipc.TunnelName{Name: tunName}, nil); err != nil {
 			t.Fatal(err)
@@ -1292,12 +1311,50 @@ func TestReconnectUsesCachedEndpointUnderKillSwitch(t *testing.T) {
 		}
 		assertCode(t, e.call(ipc.MethodTunnelConnect, ipc.TunnelName{Name: tunName}, nil), ipc.CodeUnavailable)
 	}
+	// The same entry with its lookup time is used; a file writable by
+	// others is not.
+	good := `{"version":1,"peers":{"` + pk + `":{"endpoint":"` + ep + `","addr":"127.0.0.1:` + port + `"` + at + `}}}`
+	if err := e.call(ipc.MethodTunnelDisconnect, ipc.TunnelName{Name: tunName}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cache, []byte(good), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e.connect()
+	if err := e.call(ipc.MethodTunnelDisconnect, ipc.TunnelName{Name: tunName}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(cache, 0o622); err != nil {
+		t.Fatal(err)
+	}
+	assertCode(t, e.call(ipc.MethodTunnelConnect, ipc.TunnelName{Name: tunName}, nil), ipc.CodeUnavailable)
 
 	if err := e.call(ipc.MethodTunnelRemove, ipc.TunnelName{Name: tunName}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(cache); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("endpoint cache still on disk after remove: %v", err)
+	}
+}
+
+func TestTransientLookupErr(t *testing.T) {
+	for _, c := range []struct {
+		err  error
+		want bool
+	}{
+		{nil, false},
+		{&net.DNSError{Err: "no such host", IsNotFound: true}, false},
+		{&net.DNSError{Err: "no such host", IsNotFound: true, IsTemporary: true}, false},
+		{&net.DNSError{Err: "i/o timeout", IsTimeout: true}, true},
+		{&net.DNSError{Err: "server misbehaving", IsTemporary: true}, true},
+		{&net.DNSError{Err: "cannot unmarshal DNS message"}, false},
+		{fmt.Errorf("lookup: %w", &net.DNSError{Err: "connection refused", IsTemporary: true}), true},
+		{&net.OpError{Op: "dial", Net: "udp", Err: errors.New("network is unreachable")}, true},
+		{context.DeadlineExceeded, true},
+	} {
+		if got := transientLookupErr(c.err); got != c.want {
+			t.Errorf("transientLookupErr(%v) = %v, want %v", c.err, got, c.want)
+		}
 	}
 }
 

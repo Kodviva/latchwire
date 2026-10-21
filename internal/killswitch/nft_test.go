@@ -57,11 +57,12 @@ func blockState() State {
 					netip.MustParseAddrPort("203.0.113.5:51820"),
 					netip.MustParseAddrPort("[2001:db8::5]:51820"),
 				},
-				DNS: []netip.Addr{netip.MustParseAddr("10.64.0.1"), netip.MustParseAddr("fd00::1")},
+				ListenPort: 41641,
 			},
 			{
-				Iface:     "office",
-				Endpoints: []netip.AddrPort{netip.MustParseAddrPort("[::ffff:198.51.100.7]:4500")},
+				Iface:      "office",
+				Endpoints:  []netip.AddrPort{netip.MustParseAddrPort("[::ffff:198.51.100.7]:4500")},
+				ListenPort: 51820,
 			},
 		},
 	}
@@ -79,8 +80,7 @@ table inet latchwire {
 		meta nfproto ipv4 udp sport 68 udp dport 67 accept
 		meta nfproto ipv6 udp sport 546 udp dport 547 accept
 		icmpv6 type { nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } ip6 hoplimit 255 accept
-		ip daddr 10.64.0.1 meta l4proto { tcp, udp } th dport 53 accept
-		ip6 daddr fd00::1 meta l4proto { tcp, udp } th dport 53 accept
+		icmpv6 type { mld-listener-report, mld2-listener-report } ip6 hoplimit 1 ip6 saddr { fe80::/10, :: } accept
 		ip daddr 203.0.113.5 udp dport 51820 accept
 		ip6 daddr 2001:db8::5 udp dport 51820 accept
 		ip daddr 198.51.100.7 udp dport 4500 accept
@@ -95,13 +95,12 @@ table inet latchwire {
 		meta nfproto ipv4 udp sport 67 udp dport 68 accept
 		meta nfproto ipv6 udp sport 547 udp dport 546 accept
 		icmpv6 type { nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } ip6 hoplimit 255 accept
-		ip saddr 10.64.0.1 meta l4proto { tcp, udp } th sport 53 ct state established accept
-		ip6 saddr fd00::1 meta l4proto { tcp, udp } th sport 53 ct state established accept
-		ip saddr 203.0.113.5 udp sport 51820 accept
+		icmpv6 type mld-listener-query ip6 hoplimit 1 ip6 saddr { fe80::/10, :: } accept
+		ip saddr 203.0.113.5 udp sport 51820 udp dport 41641 accept
 		ct state related ct original ip daddr 203.0.113.5 accept
-		ip6 saddr 2001:db8::5 udp sport 51820 accept
+		ip6 saddr 2001:db8::5 udp sport 51820 udp dport 41641 accept
 		ct state related ct original ip6 daddr 2001:db8::5 accept
-		ip saddr 198.51.100.7 udp sport 4500 accept
+		ip saddr 198.51.100.7 udp sport 4500 udp dport 51820 accept
 		ct state related ct original ip daddr 198.51.100.7 accept
 		drop
 	}
@@ -126,11 +125,24 @@ func TestNftRulesBlockState(t *testing.T) {
 	if string(got) != wantBlockScript {
 		t.Fatalf("script:\n%s\nwant:\n%s", got, wantBlockScript)
 	}
-	// DNS passes only to the tunnels' servers: every rule naming port 53
-	// names one of them.
+	// DNS passes only through the tunnel interfaces (P14): no rule names
+	// port 53, so a query to any server outside a tunnel is rejected.
+	if strings.Contains(string(got), "port 53") {
+		t.Errorf("script accepts DNS outside the tunnels:\n%s", got)
+	}
+	// Endpoint packets reach only the tunnel's listen port (P15).
 	for line := range strings.Lines(string(got)) {
-		if strings.Contains(line, " 53 ") && !strings.Contains(line, "10.64.0.1") && !strings.Contains(line, "fd00::1") {
-			t.Errorf("DNS rule not limited to the tunnel servers: %q", line)
+		if strings.Contains(line, "saddr") && strings.Contains(line, "udp sport") && !strings.Contains(line, "udp dport ") {
+			t.Errorf("inbound endpoint rule open to every local port: %q", line)
+		}
+	}
+	// MLD reports go out and queries come in, link-local only (P15).
+	for _, want := range []string{
+		"icmpv6 type { mld-listener-report, mld2-listener-report } ip6 hoplimit 1 ip6 saddr { fe80::/10, :: } accept",
+		"icmpv6 type mld-listener-query ip6 hoplimit 1 ip6 saddr { fe80::/10, :: } accept",
+	} {
+		if !strings.Contains(string(got), want) {
+			t.Errorf("script lacks %q", want)
 		}
 	}
 
@@ -163,15 +175,18 @@ func TestNftScriptRejectsBadInput(t *testing.T) {
 		"quote in iface":   {Block: true, Tunnels: []TunnelRule{{Iface: `wg0" accept`}}},
 		"empty iface":      {Block: true, Tunnels: []TunnelRule{{Iface: ""}}},
 		"long iface":       {Block: true, Tunnels: []TunnelRule{{Iface: "abcdefghijklmnop"}}},
-		"invalid endpoint": {Block: true, Tunnels: []TunnelRule{{Iface: "wg0", Endpoints: []netip.AddrPort{{}}}}},
-		"port 0":           {Block: true, Tunnels: []TunnelRule{{Iface: "wg0", Endpoints: []netip.AddrPort{netip.MustParseAddrPort("192.0.2.1:0")}}}},
-		"zoned endpoint":   {Block: true, Tunnels: []TunnelRule{{Iface: "wg0", Endpoints: []netip.AddrPort{netip.MustParseAddrPort("[fe80::1%eth0]:51820")}}}},
-		"invalid dns":      {Block: true, Tunnels: []TunnelRule{{Iface: "wg0", DNS: []netip.Addr{{}}}}},
-		"zoned dns":        {Block: true, Tunnels: []TunnelRule{{Iface: "wg0", DNS: []netip.Addr{netip.MustParseAddr("fe80::1%eth0")}}}},
+		"invalid endpoint": {Block: true, Tunnels: []TunnelRule{{Iface: "wg0", ListenPort: 1, Endpoints: []netip.AddrPort{{}}}}},
+		"port 0":           {Block: true, Tunnels: []TunnelRule{{Iface: "wg0", ListenPort: 1, Endpoints: []netip.AddrPort{netip.MustParseAddrPort("192.0.2.1:0")}}}},
+		"zoned endpoint":   {Block: true, Tunnels: []TunnelRule{{Iface: "wg0", ListenPort: 1, Endpoints: []netip.AddrPort{netip.MustParseAddrPort("[fe80::1%eth0]:51820")}}}},
+		"no listen port":   {Block: true, Tunnels: []TunnelRule{{Iface: "wg0", Endpoints: []netip.AddrPort{netip.MustParseAddrPort("192.0.2.1:51820")}}}},
 	} {
 		if _, err := nftScript(s); err == nil {
 			t.Errorf("%s: no error", name)
 		}
+	}
+	// A tunnel without endpoints (all peers roaming in) needs no port.
+	if _, err := nftScript(State{Block: true, Tunnels: []TunnelRule{{Iface: "wg0"}}}); err != nil {
+		t.Errorf("tunnel without endpoints: %v", err)
 	}
 }
 

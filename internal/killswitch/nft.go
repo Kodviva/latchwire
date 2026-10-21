@@ -28,6 +28,17 @@ const removeScript = "table inet " + tableName + " {}\ndelete table inet " + tab
 // them to steer traffic, and nothing breaks without them.
 const ndTypes = "icmpv6 type { nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } ip6 hoplimit 255"
 
+// MLD: the kernel reports the multicast groups it listens on (the
+// solicited-node groups neighbour discovery depends on) and answers the
+// router's queries. A switch that snoops MLD stops forwarding those groups
+// to a host that never reports, which cuts IPv6 off minutes later. MLD
+// always has hop limit 1 and a link-local (or, before an address is ready,
+// unspecified) source.
+const (
+	mldOut = "icmpv6 type { mld-listener-report, mld2-listener-report } ip6 hoplimit 1 ip6 saddr { fe80::/10, :: }"
+	mldIn  = "icmpv6 type mld-listener-query ip6 hoplimit 1 ip6 saddr { fe80::/10, :: }"
+)
+
 // nftScript returns the nft script, run as one transaction (nft -f -), that
 // puts s in place: the removal of the table, or its replacement.
 //
@@ -35,17 +46,23 @@ const ndTypes = "icmpv6 type { nd-router-solicit, nd-router-advert, nd-neighbor-
 //
 //   - output: loopback; the tunnel interfaces; packets with the mark (the
 //     WireGuard socket, the endpoint resolver), whose connections get the
-//     mark too; DHCPv4 and DHCPv6 requests; neighbour discovery; DNS (TCP
-//     and UDP 53) to the tunnels' DNS servers on any interface (they are
-//     routed into the tunnel when it is up); UDP to each endpoint. The rest
-//     is rejected (admin-prohibited), so applications fail at once.
+//     mark too; DHCPv4 and DHCPv6 requests; neighbour discovery; MLD
+//     reports; UDP to each endpoint. The rest is rejected
+//     (admin-prohibited), so applications fail at once.
 //   - input: loopback; the tunnel interfaces; established and related
 //     packets of connections that carry the mark; DHCP replies; neighbour
-//     discovery; DNS replies from the tunnels' servers in established
-//     connections; UDP from each endpoint (the peer may start a handshake)
-//     and ICMP errors about traffic to it (path MTU). The rest is dropped.
-//     Established traffic in general is not accepted: a connection opened
-//     before the kill switch came on must not survive it.
+//     discovery; MLD queries; UDP from each endpoint to the tunnel's listen
+//     port (the peer may start a handshake; no other local port is open to
+//     a source address anyone can forge) and ICMP errors about traffic to
+//     the endpoint (path MTU). The rest is dropped. Established traffic in
+//     general is not accepted: a connection opened before the kill switch
+//     came on must not survive it.
+//
+// There is no DNS rule: DNS passes only through the tunnel interfaces.
+// Accepting the tunnels' DNS servers on any interface would send queries
+// in clear text over the local network while a tunnel is down. Endpoint
+// names are resolved with the mark (Linux full tunnel) or come from the
+// daemon's endpoint cache.
 //   - forward: traffic routed into a tunnel, and its replies. The rest is
 //     dropped.
 //
@@ -83,12 +100,7 @@ func nftScript(s State) ([]byte, error) {
 	rule("meta nfproto ipv4 udp sport 68 udp dport 67 accept")
 	rule("meta nfproto ipv6 udp sport 546 udp dport 547 accept")
 	rule("%s accept", ndTypes)
-	for _, t := range s.Tunnels {
-		for _, d := range t.DNS {
-			d = d.Unmap()
-			rule("%s daddr %s meta l4proto { tcp, udp } th dport 53 accept", fam(d), d)
-		}
-	}
+	rule("%s accept", mldOut)
 	for _, t := range s.Tunnels {
 		for _, e := range t.Endpoints {
 			a := e.Addr().Unmap()
@@ -109,16 +121,11 @@ func nftScript(s State) ([]byte, error) {
 	rule("meta nfproto ipv4 udp sport 67 udp dport 68 accept")
 	rule("meta nfproto ipv6 udp sport 547 udp dport 546 accept")
 	rule("%s accept", ndTypes)
-	for _, t := range s.Tunnels {
-		for _, d := range t.DNS {
-			d = d.Unmap()
-			rule("%s saddr %s meta l4proto { tcp, udp } th sport 53 ct state established accept", fam(d), d)
-		}
-	}
+	rule("%s accept", mldIn)
 	for _, t := range s.Tunnels {
 		for _, e := range t.Endpoints {
 			a := e.Addr().Unmap()
-			rule("%s saddr %s udp sport %d accept", fam(a), a, e.Port())
+			rule("%s saddr %s udp sport %d udp dport %d accept", fam(a), a, e.Port(), t.ListenPort)
 			rule("ct state related ct original %s daddr %s accept", fam(a), a)
 		}
 	}
@@ -146,7 +153,8 @@ func fam(a netip.Addr) string {
 
 // validState checks what goes into the script: interface names that need
 // no escaping in an nft string (the tunnel name rules, at most 15
-// characters), and literal addresses without a zone (nft has none).
+// characters), literal endpoint addresses without a zone (nft has none),
+// and a listen port wherever there are endpoints.
 func validState(s State) error {
 	for _, t := range s.Tunnels {
 		if !validIface(t.Iface) {
@@ -157,10 +165,8 @@ func validState(s State) error {
 				return fmt.Errorf("killswitch: invalid endpoint %q for %s", e, t.Iface)
 			}
 		}
-		for _, d := range t.DNS {
-			if !d.IsValid() || d.Zone() != "" {
-				return fmt.Errorf("killswitch: invalid DNS server %q for %s", d, t.Iface)
-			}
+		if len(t.Endpoints) > 0 && t.ListenPort == 0 {
+			return fmt.Errorf("killswitch: no listen port for %s", t.Iface)
 		}
 	}
 	return nil

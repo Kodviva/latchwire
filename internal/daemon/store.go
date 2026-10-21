@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/Kodviva/latchwire/internal/config"
 )
@@ -144,9 +145,9 @@ func (s *store) remove(name string) error {
 
 // The endpoint cache: <name>.endpoints holds, for each peer whose endpoint
 // is a host name, the address the last successful lookup found. A connect
-// whose lookup fails uses it (under the kill switch the resolver may reach
-// no DNS server while the tunnel is down). Literal endpoints are never
-// cached.
+// whose lookup fails for a transient reason uses it (under the kill switch
+// the resolver may reach no DNS server while the tunnel is down). Literal
+// endpoints are never cached.
 const (
 	endpointsExt     = ".endpoints"
 	endpointsVersion = 1
@@ -155,10 +156,11 @@ const (
 )
 
 // cachedEndpoint is one peer's entry: the endpoint as configured
-// (host:port) and the address it resolved to (ip:port).
+// (host:port), the address it resolved to (ip:port) and when.
 type cachedEndpoint struct {
-	Endpoint string `json:"endpoint"`
-	Addr     string `json:"addr"`
+	Endpoint string    `json:"endpoint"`
+	Addr     string    `json:"addr"`
+	Resolved time.Time `json:"resolved"`
 }
 
 type endpointsFile struct {
@@ -194,8 +196,13 @@ func (s *store) loadEndpoints(name string) (map[string]cachedEndpoint, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !fi.Mode().IsRegular() || fi.Mode().Perm()&0o022 != 0 || fi.Size() > maxEndpointsFile {
-		return nil, fmt.Errorf("%s: not a regular 0600 file of at most %d bytes", p, maxEndpointsFile)
+	switch {
+	case !fi.Mode().IsRegular():
+		return nil, fmt.Errorf("%s: not a regular file", p)
+	case fi.Mode().Perm()&0o022 != 0:
+		return nil, fmt.Errorf("%s: writable by group or others (mode %v)", p, fi.Mode().Perm())
+	case fi.Size() > maxEndpointsFile:
+		return nil, fmt.Errorf("%s: larger than %d bytes", p, maxEndpointsFile)
 	}
 	b, err := os.ReadFile(p)
 	if err != nil {
@@ -222,7 +229,8 @@ func (s *store) loadEndpoints(name string) (map[string]cachedEndpoint, error) {
 }
 
 // validCachedEndpoint checks one cache entry: a lowercase hex X25519 public
-// key, a host:port endpoint, and a literal unicast ip:port without a zone.
+// key, a host:port endpoint, a literal unicast ip:port without a zone, and
+// the time of the lookup.
 func validCachedEndpoint(key string, e cachedEndpoint) error {
 	if k, err := hex.DecodeString(key); err != nil || len(k) != 32 || hex.EncodeToString(k) != key {
 		return fmt.Errorf("bad peer key %q", key)
@@ -234,6 +242,9 @@ func validCachedEndpoint(key string, e cachedEndpoint) error {
 	a := ap.Addr()
 	if err != nil || ap.Port() == 0 || a.Zone() != "" || a.Is4In6() || a.IsUnspecified() || a.IsMulticast() {
 		return fmt.Errorf("bad address %q", e.Addr)
+	}
+	if e.Resolved.IsZero() {
+		return errors.New("no lookup time")
 	}
 	return nil
 }
