@@ -2487,7 +2487,11 @@ func (m *Manager) setKillSwitchLocked(force bool) error {
 			return nil
 		}
 		m.ksLast = nil
-		log.Printf("daemon: kill switch: %v", err)
+		if s.Block && errors.Is(err, killswitch.ErrUnsupported) {
+			m.noEffect(err) // no firewall to block with (Linux without nft)
+		} else {
+			log.Printf("daemon: kill switch: %v", err)
+		}
 		return err
 	}
 	if s.Block {

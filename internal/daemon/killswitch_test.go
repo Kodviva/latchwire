@@ -334,8 +334,10 @@ func TestKillSwitchUnsupportedRefusesConnect(t *testing.T) {
 	if n := fe.f.count(); n != 0 {
 		t.Errorf("%d devices made, want 0", n)
 	}
-	if st := fe.status(); st.State != StateError {
-		t.Errorf("state %q, want error", st.State)
+	// It blocks nothing, and status says so.
+	wantWarn := fmt.Sprintf(msg.DaemonWarnKillSwitchNoEffectFmt, killswitch.ErrUnsupported)
+	if st := fe.status(); st.State != StateError || st.KillSwitch != ipc.KillSwitchStatusBlocking || st.Warning != wantWarn {
+		t.Errorf("status %+v, want error with %q", st, wantWarn)
 	}
 
 	// Any other failure to put the kill switch in place also refuses.
