@@ -377,7 +377,7 @@ func TestTeardownWindowStillActive(t *testing.T) {
 	err := m.conflictLocked(next)
 	next.cfg.Peers[0].AllowedIPs = []netip.Prefix{netip.MustParsePrefix("10.2.0.0/16")}
 	next.cfg.DNS = []netip.Addr{netip.MustParseAddr("10.2.0.53")}
-	role := m.dnsRoleLocked(next)
+	role, _ := m.dnsRoleLocked(next)
 	m.mu.Unlock()
 	if err == nil {
 		t.Error("no conflict with a tunnel whose device is still open")
@@ -463,5 +463,103 @@ func TestDNSStatusMapping(t *testing.T) {
 		if got != tc.want || warn != tc.warn {
 			t.Errorf("dnsStatus(%v, %v, %q) = %q, %q; want %q, %q", tc.role, tc.servers, tc.outcome, got, warn, tc.want, tc.warn)
 		}
+	}
+}
+
+// roleOf returns the DNS role tunnel name's newest Configurer has and the
+// SetDNSRole calls it got.
+func (e *env) roleOf(name string) (netcfg.DNSRole, []netcfg.DNSRole) {
+	e.t.Helper()
+	c := e.f.cfgFor(name)
+	if c == nil {
+		e.t.Fatalf("no Configurer for %s", name)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.dnsRole, slices.Clone(c.roleSets)
+}
+
+// P19: a full tunnel takes the role of answering every name from a split
+// tunnel even without DNS servers of its own, in both orders: an existing
+// split owner is demoted, and a split tunnel connecting beside it does not
+// become primary. When the full tunnel goes, the split tunnel gets the role
+// back.
+func TestDNSLessFullTunnelHoldsDNS(t *testing.T) {
+	for _, order := range []string{"split first", "full first"} {
+		t.Run(order, func(t *testing.T) {
+			e := multiEnv(t, false)
+			e.addTunnel("split", "10.1.0.0/16", "DNS = 10.1.0.53\n")
+			e.addTunnel("full", "0.0.0.0/0", "")
+			if order == "split first" {
+				e.mustConnect("split")
+				if st := e.statusOf("split"); st.DNS != "primary" {
+					t.Fatalf("split alone: %+v", st)
+				}
+				e.mustConnect("full")
+				if role, sets := e.roleOf("split"); role != netcfg.DNSNone || !slices.Equal(sets, []netcfg.DNSRole{netcfg.DNSNone}) {
+					t.Errorf("split after the full tunnel: role %v, SetDNSRole %v; want demoted to none", role, sets)
+				}
+			} else {
+				e.mustConnect("full")
+				e.mustConnect("split")
+				if role, sets := e.roleOf("split"); role != netcfg.DNSNone || len(sets) != 0 {
+					t.Errorf("split beside the full tunnel: role %v, SetDNSRole %v; want none", role, sets)
+				}
+			}
+			if st := e.statusOf("split"); st.DNS != "ignored" || st.Warning != msg.DaemonWarnDNSIgnored {
+				t.Errorf("split beside a DNS-less full tunnel: %+v", st)
+			}
+			if st := e.statusOf("full"); st.DNS != "none" {
+				t.Errorf("full without DNS servers: %+v", st)
+			}
+
+			// The full tunnel goes: the split tunnel answers every name
+			// again.
+			if err := e.call(ipc.MethodTunnelDisconnect, ipc.TunnelName{Name: "full"}, nil); err != nil {
+				t.Fatal(err)
+			}
+			role, sets := e.roleOf("split")
+			if role != netcfg.DNSPrimary || len(sets) == 0 || sets[len(sets)-1] != netcfg.DNSPrimary {
+				t.Errorf("split after the full tunnel left: role %v, SetDNSRole %v; want promoted", role, sets)
+			}
+			if st := e.statusOf("split"); st.DNS != "primary" || st.Warning != "" {
+				t.Errorf("split after the full tunnel left: %+v", st)
+			}
+		})
+	}
+}
+
+// A split tunnel demoted by a full tunnel with DNS servers is promoted back
+// when the full tunnel disconnects (no other tunnel holds the role), with
+// its search domains too; a split owner leaving still promotes nobody
+// (TestDNSOwnership).
+func TestDemotedSplitPromotedWhenFullTunnelLeaves(t *testing.T) {
+	e := multiEnv(t, false)
+	e.addTunnel("split", "10.1.0.0/16", "DNS = 10.1.0.53, corp.example\n")
+	e.addTunnel("other", "10.2.0.0/16", "DNS = 10.2.0.53\n")
+	e.addTunnel("full", "0.0.0.0/0", "DNS = 10.9.0.53\n")
+	e.mustConnect("split")
+	e.mustConnect("other") // ignored: split answers every name
+	e.mustConnect("full")
+	if st := e.statusOf("split"); st.DNS != "scoped" {
+		t.Fatalf("demoted split: %+v", st)
+	}
+	if err := e.call(ipc.MethodTunnelDisconnect, ipc.TunnelName{Name: "full"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if role, sets := e.roleOf("split"); role != netcfg.DNSPrimary || !slices.Equal(sets, []netcfg.DNSRole{netcfg.DNSScoped, netcfg.DNSPrimary}) {
+		t.Errorf("split: role %v, SetDNSRole %v; want scoped then primary", role, sets)
+	}
+	if st := e.statusOf("split"); st.DNS != "primary" {
+		t.Errorf("split after the full tunnel left: %+v", st)
+	}
+	// "other" never yielded to the full tunnel: it keeps its role.
+	if role, sets := e.roleOf("other"); role != netcfg.DNSNone || len(sets) != 0 {
+		t.Errorf("other: role %v, SetDNSRole %v; want untouched", role, sets)
+	}
+	// The full tunnel back: the split tunnel is demoted again.
+	e.mustConnect("full")
+	if role, _ := e.roleOf("split"); role != netcfg.DNSScoped {
+		t.Errorf("split after the full tunnel came back: role %v, want scoped", role)
 	}
 }

@@ -260,6 +260,10 @@ type tunnel struct {
 	// Configurer of dev put in place (zero without dev).
 	dnsRole netcfg.DNSRole
 	applied netcfg.Applied
+	// dnsYielded says that t's DNS servers stopped answering every name
+	// for a full tunnel (demoted, or connected beside one; P19): they are
+	// given that role back when no tunnel holds it any more (promoteDNS).
+	dnsYielded bool
 	// abort is cancelled by every teardown: a connect still proving an
 	// agent (and maybe waiting for a PIN) then gives up.
 	abort       context.Context
@@ -1405,7 +1409,7 @@ func (m *Manager) connect(caller context.Context, name string, uid uint32, admin
 		log.Printf("daemon: tunnel %s: connect: %v", name, err)
 		return ipc.TunnelStatus{}, err
 	}
-	t.dnsRole = m.dnsRoleLocked(t)
+	t.dnsRole, t.dnsYielded = m.dnsRoleLocked(t)
 	demote := m.demotionLocked(t)
 	prev := reservation{state: t.state, ref: t.ref, hasRef: t.hasRef, uid: t.uid, adminBound: t.adminBound, policy: t.policy, odConnected: t.odConnected}
 	t.gen++
@@ -1438,13 +1442,13 @@ func (m *Manager) connect(caller context.Context, name string, uid uint32, admin
 			m.mu.Unlock()
 			cancelLife()
 			m.syncKillSwitch() // a no-op unless a sync saw the reservation
+			m.promoteDNS()     // a half-done demotion gets its DNS back
 			log.Printf("daemon: tunnel %s: connect: %v", name, err)
 			return ipc.TunnelStatus{}, userErr(err)
 		}
 	}
 
 	t.op.Lock()
-	defer t.op.Unlock()
 	m.reap(t)
 
 	dev, cfgr, info, err := m.build(attempt, life, cfg, c, t, gen)
@@ -1457,6 +1461,7 @@ func (m *Manager) connect(caller context.Context, name string, uid uint32, admin
 		t.endpoints, t.listenPort, t.applied = info.endpoints, info.listenPort, info.applied
 		t.state = StateConnected
 		m.mu.Unlock()
+		t.op.Unlock()
 		log.Printf("daemon: tunnel %s connected with %s (uid %d)", name, c.id.Ref, c.uid)
 		// Its interface and endpoint pass the kill switch from here.
 		m.syncKillSwitch()
@@ -1470,7 +1475,9 @@ func (m *Manager) connect(caller context.Context, name string, uid uint32, admin
 	if dev != nil {
 		m.closeDevice(dev, cfgr)
 	}
+	t.op.Unlock()
 	m.syncKillSwitch()
+	m.promoteDNS() // a failed full tunnel gives the DNS back
 	log.Printf("daemon: tunnel %s: connect: %v", name, err)
 	return ipc.TunnelStatus{}, userErr(err)
 }
@@ -1730,10 +1737,12 @@ type reservation struct {
 }
 
 // demotionLocked returns the split tunnel whose DNS servers answer every
-// name when t, a full tunnel with DNS servers, is to take them over (P18),
-// or nil. Manager.mu is held.
+// name when t, a full tunnel, is to take that role over (P18), or nil. A
+// full tunnel without DNS servers takes it too (P19): all traffic goes into
+// it, so the system's own DNS then follows its routes instead of every name
+// going to the split tunnel's resolver. Manager.mu is held.
 func (m *Manager) demotionLocked(t *tunnel) *tunnel {
-	if t.dnsRole != netcfg.DNSPrimary || !routesAll(t.cfg) {
+	if !routesAll(t.cfg) {
 		return nil
 	}
 	for _, o := range m.othersLocked(t) {
@@ -1768,7 +1777,7 @@ func (m *Manager) demote(ctx context.Context, o *tunnel) error {
 	case o.dev != nil && o.devGen == o.gen && cfgr != nil:
 		// Connected: changed in place below.
 	case o.state == StateConnecting:
-		o.dnsRole = role // its build has not read it yet
+		o.dnsRole, o.dnsYielded = role, true // its build has not read it yet
 		m.mu.Unlock()
 		log.Printf("daemon: tunnel %s: its DNS servers no longer answer every name: a full tunnel connects", o.name)
 		return nil
@@ -1784,10 +1793,11 @@ func (m *Manager) demote(ctx context.Context, o *tunnel) error {
 	case o.cfgr != cfgr:
 		// Torn down meanwhile: its DNS went with its Configurer.
 	case err == nil:
-		o.dnsRole, o.applied.DNS = role, how
+		o.dnsRole, o.applied.DNS, o.dnsYielded = role, how, true
 	case how != o.applied.DNS:
-		// The old DNS is undone, the new one not applied.
-		o.dnsRole, o.applied.DNS = netcfg.DNSNone, how
+		// The old DNS is undone, the new one not applied: promoteDNS
+		// may put it back while no tunnel holds the role.
+		o.dnsRole, o.applied.DNS, o.dnsYielded = netcfg.DNSNone, how, true
 	}
 	if err != nil {
 		return &ipc.Error{Code: ipc.CodeInternal, Message: fmt.Sprintf(msg.DaemonDemoteFailedFmt, o.name, err)}
@@ -1854,32 +1864,121 @@ func (m *Manager) conflictLocked(t *tunnel) error {
 }
 
 // dnsRoleLocked chooses the part t's DNS servers take as it starts
-// connecting. A full tunnel's answer every name (DNSPrimary); so do a split
-// tunnel's when no other active tunnel's do. Otherwise they answer t's
-// search domains only (DNSScoped), or, without search domains, are not
-// applied (DNSNone; status "ignored").
+// connecting, and whether they yield it to a full tunnel. A full tunnel's
+// answer every name (DNSPrimary); so do a split tunnel's when no other
+// active tunnel holds that role: none is DNSPrimary and no full tunnel is
+// active, with or without DNS servers of its own (P19: all traffic goes
+// into the full tunnel, and so does the system's DNS). Otherwise they
+// answer t's search domains only (DNSScoped), or, without search domains,
+// are not applied (DNSNone; status "ignored").
 //
-// The owner leaving promotes nobody: the tunnels already up keep what they
-// have until they reconnect, and the next tunnel to connect may take it.
-// A full tunnel takes DNSPrimary from a split tunnel that holds it: the
-// connect demotes that one first (demotionLocked, demote; P18). Manager.mu
-// is held.
-func (m *Manager) dnsRoleLocked(t *tunnel) netcfg.DNSRole {
+// A split owner leaving promotes nobody: the tunnels already up keep what
+// they have until they reconnect, and the next tunnel to connect may take
+// it. A full tunnel takes DNSPrimary from a split tunnel that holds it: the
+// connect demotes that one first (demotionLocked, demote; P18); when the
+// full tunnel leaves, the split tunnels that yielded to it get the role
+// back (promoteDNS). Manager.mu is held.
+func (m *Manager) dnsRoleLocked(t *tunnel) (role netcfg.DNSRole, yielded bool) {
 	switch {
 	case len(t.cfg.DNS) == 0:
-		return netcfg.DNSNone
+		return netcfg.DNSNone, false
 	case routesAll(t.cfg):
-		return netcfg.DNSPrimary
+		return netcfg.DNSPrimary, false
 	}
+	held := false
 	for _, o := range m.othersLocked(t) {
-		if o.dnsRole == netcfg.DNSPrimary {
-			if len(t.cfg.DNSSearch) > 0 {
-				return netcfg.DNSScoped
-			}
-			return netcfg.DNSNone
+		switch {
+		case routesAll(o.cfg):
+			held, yielded = true, true
+		case o.dnsRole == netcfg.DNSPrimary:
+			held = true
 		}
 	}
-	return netcfg.DNSPrimary
+	if !held {
+		return netcfg.DNSPrimary, false
+	}
+	return secondaryDNSRole(t.cfg), yielded
+}
+
+// secondaryDNSRole is the role of cfg's DNS servers while another tunnel's
+// answer every name: its search domains (DNSScoped), or none.
+func secondaryDNSRole(cfg *config.Tunnel) netcfg.DNSRole {
+	if len(cfg.DNSSearch) > 0 {
+		return netcfg.DNSScoped
+	}
+	return netcfg.DNSNone
+}
+
+// dnsHeldLocked reports whether an active tunnel holds the role of
+// answering every name: a full tunnel (P19) or a DNSPrimary one. Manager.mu
+// is held.
+func (m *Manager) dnsHeldLocked() bool {
+	for _, o := range m.tunnels {
+		if o.active() && (routesAll(o.cfg) || o.dnsRole == netcfg.DNSPrimary) {
+			return true
+		}
+	}
+	return false
+}
+
+// promoteDNS gives the role of answering every name back to a connected
+// split tunnel that yielded it to a full tunnel (dnsYielded), once no
+// active tunnel holds it: the full tunnel went down, failed or was refused.
+// The first such tunnel by name gets it. Like demote, it holds the
+// tunnel's op, so its device is either recorded or gone; the role is
+// reserved under Manager.mu first, so a connect meanwhile sees it held.
+// Nothing is promoted while the daemon stops. No Manager lock or tunnel op
+// is held by the caller.
+func (m *Manager) promoteDNS() {
+	m.mu.Lock()
+	ctx := m.ctx
+	pick := func() *tunnel { // under Manager.mu
+		if ctx.Err() != nil || m.dnsHeldLocked() {
+			return nil
+		}
+		var best *tunnel
+		for _, o := range m.tunnels {
+			if o.dnsYielded && len(o.cfg.DNS) > 0 && o.state == StateConnected && o.dev != nil && o.devGen == o.gen && o.cfgr != nil &&
+				(best == nil || o.name < best.name) {
+				best = o
+			}
+		}
+		return best
+	}
+	o := pick()
+	m.mu.Unlock()
+	if o == nil {
+		return
+	}
+	o.op.Lock()
+	defer o.op.Unlock()
+	m.mu.Lock()
+	if pick() != o {
+		m.mu.Unlock()
+		return
+	}
+	old, cfgr := o.dnsRole, o.cfgr
+	o.dnsRole = netcfg.DNSPrimary // reserved: a connect meanwhile sees it held
+	m.mu.Unlock()
+	how, err := cfgr.SetDNSRole(ctx, netcfg.DNSPrimary)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	switch {
+	case o.cfgr != cfgr:
+		// Torn down meanwhile: its DNS went with its Configurer.
+	case err == nil:
+		o.applied.DNS, o.dnsYielded = how, false
+	case how != o.applied.DNS:
+		// The old DNS is undone, the new one not applied.
+		o.dnsRole, o.applied.DNS = netcfg.DNSNone, how
+	default:
+		o.dnsRole = old
+	}
+	if err != nil {
+		log.Printf("daemon: tunnel %s: giving its DNS servers every name back: %v", o.name, err)
+		return
+	}
+	log.Printf("daemon: tunnel %s: its DNS servers answer every name again (%s): no full tunnel is up", o.name, how)
 }
 
 // dnsStatus maps the DNS role a tunnel was given, whether it has DNS
@@ -2072,6 +2171,7 @@ func (m *Manager) teardownTo(t *tunnel, state *string, cond func(*tunnel) bool) 
 	m.reap(t)
 	t.op.Unlock()
 	m.syncKillSwitch()
+	m.promoteDNS() // a full tunnel that went gives the DNS back
 	return true
 }
 
