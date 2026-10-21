@@ -1,4 +1,4 @@
-//go:build linux
+//go:build e2e && linux
 
 // Command testserver is the WireGuard peer of the Linux end-to-end test
 // (test/e2e/linux): wireguard-go with an ordinary software private key, plus

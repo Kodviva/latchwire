@@ -15,9 +15,9 @@
 #
 # What it does: installs nftables, iproute2, openresolv, ping and the PC/SC
 # headers; builds the production CLI (cmd/latchwire) and two test-only
-# binaries (test/e2e/linux/testagent: the agent with software keys;
-# test/e2e/linux/testserver: a wireguard-go peer with a software key); then
-# runs the scenarios in e2e_test.go (build tag e2e).
+# binaries (build tag e2e, like the test; test/e2e/linux/testagent: the
+# agent with software keys; test/e2e/linux/testserver: a wireguard-go peer
+# with a software key); then runs the scenarios in e2e_test.go.
 set -euo pipefail
 
 die() { echo "run.sh: $*" >&2; exit 1; }
@@ -54,8 +54,8 @@ echo "== building"
 # The bind-mounted repository may belong to another uid; skip VCS stamping.
 export GOFLAGS=-buildvcs=false
 go build -o "$BIN/latchwire" ./cmd/latchwire
-go build -o "$BIN/testagent" ./test/e2e/linux/testagent
-go build -o "$BIN/testserver" ./test/e2e/linux/testserver
+go build -tags e2e -o "$BIN/testagent" ./test/e2e/linux/testagent
+go build -tags e2e -o "$BIN/testserver" ./test/e2e/linux/testserver
 go test -c -tags e2e -o "$BIN/e2e.test" ./test/e2e/linux
 # The shipped CLI must not contain the software key.
 deps=$(go list -deps ./cmd/latchwire)

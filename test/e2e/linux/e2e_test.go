@@ -565,7 +565,39 @@ func journalOwners(t *testing.T) []string {
 	return out
 }
 
-// assertClean checks that no tunnel left anything behind in lwc.
+// srcValidMark reads lwc's net.ipv4.conf.all.src_valid_mark, which a full
+// tunnel sets to 1 and its undo restores.
+func srcValidMark(t *testing.T) string {
+	t.Helper()
+	out, err := run("ip", "netns", "exec", "lwc", "sysctl", "-n", "net.ipv4.conf.all.src_valid_mark")
+	if err != nil {
+		t.Fatalf("sysctl src_valid_mark: %v", err)
+	}
+	return strings.TrimSpace(out)
+}
+
+// baseSrcValidMark is lwc's src_valid_mark before any tunnel (baseline).
+var baseSrcValidMark string
+
+// table51820 returns lwc's routes in the full tunnel's table ("" when it is
+// empty or does not exist).
+func table51820(t *testing.T) string {
+	t.Helper()
+	out, err := run("ip", "-n", "lwc", "route", "show", "table", "51820")
+	if err != nil && !strings.Contains(out, "does not exist") {
+		t.Fatalf("ip route show table 51820: %v", err)
+	}
+	if strings.Contains(out, "does not exist") {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}
+
+// assertClean checks that no tunnel left anything behind in lwc: no tunnel
+// interface, policy rule, route in the full tunnel's table or nft table;
+// the original DNS (only the router) in resolv.conf; src_valid_mark as it
+// was; an empty journal; and the outside and the tunnel server's network
+// reached through the physical interface.
 func assertClean(t *testing.T) {
 	t.Helper()
 	for _, n := range []string{"lwsplit", "lwfull", "lwmulti"} {
@@ -576,21 +608,27 @@ func assertClean(t *testing.T) {
 	if r := ourRules(t); len(r) > 0 {
 		t.Errorf("policy rules left: %q", r)
 	}
+	if r := table51820(t); r != "" {
+		t.Errorf("routes left in table 51820: %q", r)
+	}
 	if nftTable() {
 		t.Errorf("nft table inet latchwire still present")
 	}
-	for _, ns := range nameservers(t) {
-		if ns == tunnelDNS {
-			t.Errorf("resolv.conf still lists the tunnel's DNS:\n%s", resolvConf(t))
-		}
+	if ns := nameservers(t); len(ns) != 1 || ns[0] != gateway {
+		t.Errorf("resolv.conf nameservers %q, want only the original %s:\n%s", ns, gateway, resolvConf(t))
+	}
+	if v := srcValidMark(t); v != baseSrcValidMark {
+		t.Errorf("src_valid_mark %s, want %s as before any tunnel", v, baseSrcValidMark)
 	}
 	if o := journalOwners(t); len(o) > 0 {
 		t.Errorf("journal still has owners %q", o)
 	}
-	if dev := routeDev(t, outside); dev != "c0" {
-		t.Errorf("route to %s uses %s, want c0", outside, dev)
+	for _, addr := range []string{outside, inTunnel} {
+		if dev := routeDev(t, addr); dev != "c0" {
+			t.Errorf("route to %s uses %s, want c0", addr, dev)
+		}
+		reach(t, addr)
 	}
-	reach(t, outside)
 }
 
 func setCard(t *testing.T, present bool) {
@@ -613,7 +651,10 @@ func TestLinuxNetworkParity(t *testing.T) {
 		name string
 		fn   func(*testing.T)
 	}{
-		{"baseline", func(t *testing.T) { assertClean(t) }},
+		{"baseline", func(t *testing.T) {
+			baseSrcValidMark = srcValidMark(t)
+			assertClean(t)
+		}},
 		{"split_tunnel", testSplit},
 		{"dns_resolvconf", testDNS},
 		{"full_tunnel", testFull},
@@ -743,9 +784,15 @@ func testKillSwitchCard(t *testing.T) {
 	}
 	blocked(t, outside)
 	blocked(t, gateway)
-	if _, err := resolve(); err == nil {
-		t.Fatalf("names resolve while the kill switch blocks")
+	// The tunnel's DNS server is reachable outside the tunnel through the
+	// router (assertClean pings it via c0): while the kill switch blocks,
+	// it is not, so no query reaches it in cleartext. (A failing lookup
+	// would prove nothing here: the tunnel's DNS went with the tunnel, and
+	// the original server serves no DNS.)
+	if dev := routeDev(t, tunnelDNS); dev != "c0" {
+		t.Fatalf("card removed: route to %s uses %s, want c0", tunnelDNS, dev)
 	}
+	blocked(t, tunnelDNS)
 
 	// The card comes back: the tunnel reconnects, traffic flows again.
 	setCard(t, true)
@@ -796,8 +843,7 @@ func testCrash(t *testing.T) {
 	if slices.Contains(nameservers(t), tunnelDNS) {
 		t.Fatalf("after restart: tunnel DNS not cleaned:\n%s", resolvConf(t))
 	}
-	if out, _ := run("ip", "-n", "lwc", "route", "show", "table", "51820"); strings.TrimSpace(out) != "" &&
-		!strings.Contains(out, "does not exist") {
+	if out := table51820(t); out != "" {
 		t.Fatalf("after restart: table 51820 not empty: %q", out)
 	}
 	if !nftTable() {

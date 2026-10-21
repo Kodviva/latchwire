@@ -1,4 +1,4 @@
-//go:build linux
+//go:build e2e && linux
 
 // Command testagent is the Latchwire user agent with software keys instead
 // of a YubiKey. It exists only for the Linux end-to-end test
