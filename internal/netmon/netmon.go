@@ -120,17 +120,76 @@ func watch(ctx context.Context, src Source, debounce time.Duration, ignore func(
 	}
 }
 
-// ifaceNameByIndex returns the name of the interface with the given index,
-// or "" if there is none.
-func ifaceNameByIndex(index int) string {
+// maxCachedIfaces bounds the interface cache; it is cleared when exceeded.
+const maxCachedIfaces = 1024
+
+// ifaceCache maps interface indexes to names. The kernel reports an
+// interface that is already gone (our own tunnel being torn down) by index
+// only, and the system can no longer resolve it, so the names are remembered
+// from earlier: seeded at start, then updated on every successful lookup and
+// on every message that carries a name. It is used from one goroutine (the
+// source's Next) and needs no locking.
+type ifaceCache struct {
+	names   map[int]string
+	fresh   map[int]bool // indexes looked up live during this datagram
+	byIndex func(int) (string, error)
+}
+
+func newIfaceCache() *ifaceCache {
+	c := &ifaceCache{
+		names: map[int]string{},
+		fresh: map[int]bool{},
+		byIndex: func(i int) (string, error) {
+			ifc, err := net.InterfaceByIndex(i)
+			if err != nil {
+				return "", err
+			}
+			return ifc.Name, nil
+		},
+	}
+	if ifcs, err := net.Interfaces(); err == nil {
+		for _, ifc := range ifcs {
+			c.names[ifc.Index] = ifc.Name
+		}
+	}
+	return c
+}
+
+// begin starts a new datagram: live lookups are deduplicated within one.
+func (c *ifaceCache) begin() { clear(c.fresh) }
+
+// learn records a name the kernel gave for index.
+func (c *ifaceCache) learn(index int, name string) {
+	if index <= 0 || name == "" {
+		return
+	}
+	if len(c.names) >= maxCachedIfaces {
+		clear(c.names)
+	}
+	c.names[index] = name
+}
+
+// name returns the name of the interface with the given index, or "" if it
+// is unknown. Plain lookups use the cache and only ask the system on a miss.
+// With refresh (the interface itself changed, so its index may have been
+// reused) the system is asked, once per datagram. A system lookup that fails
+// (the interface vanished) falls back to the cache.
+func (c *ifaceCache) name(index int, refresh bool) string {
 	if index <= 0 {
 		return ""
 	}
-	ifc, err := net.InterfaceByIndex(index)
-	if err != nil {
-		return ""
+	cached, ok := c.names[index]
+	if ok && !refresh {
+		return cached
 	}
-	return ifc.Name
+	if !c.fresh[index] {
+		c.fresh[index] = true
+		if n, err := c.byIndex(index); err == nil {
+			c.learn(index, n)
+			return n
+		}
+	}
+	return cached
 }
 
 // commonIface returns the interface name that all of names agree on, or ""

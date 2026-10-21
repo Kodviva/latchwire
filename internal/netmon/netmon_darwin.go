@@ -1,6 +1,7 @@
 package netmon
 
 import (
+	"encoding/binary"
 	"fmt"
 	"syscall"
 
@@ -20,15 +21,68 @@ func NewSource() (Source, error) {
 	if err != nil {
 		return nil, fmt.Errorf("netmon: route socket: %w", err)
 	}
-	return newSockSource(fd, "route", parseRoute)
+	cache := newIfaceCache()
+	return newSockSource(fd, "route", func(b []byte) (string, bool) { return parseRoute(b, cache) })
 }
 
-func parseRoute(b []byte) (string, bool) {
-	msgs, err := route.ParseRIB(route.RIBTypeRoute, b)
-	if err != nil {
-		return "", true // cannot tell what it is: assume a change
+// Header offsets of struct if_msghdr and if_msghdr2 (net/if.h) that matter.
+const (
+	rtmHdrLen   = 4  // msglen (u16), version, type
+	ifmIndexOff = 12 // ifm_index (u16)
+	ifmMinLen   = 14
+)
+
+// parseRoute reads one datagram of routing messages. RTM_IFINFO is read from
+// its raw header: route.ParseRIB drops it unless the message carries an
+// RTA_IFP address, and the kernel sends none (ifm_addrs is 0), so a link
+// going up or down would otherwise never be seen. Messages ParseRIB cannot
+// make sense of count as an unnamed change.
+func parseRoute(b []byte, cache *ifaceCache) (string, bool) {
+	cache.begin()
+	var names []string
+	for len(b) > 0 {
+		if len(b) < rtmHdrLen {
+			names = append(names, "")
+			break
+		}
+		l := int(binary.NativeEndian.Uint16(b[0:]))
+		if l < rtmHdrLen || l > len(b) {
+			names = append(names, "")
+			break
+		}
+		msg := b[:l]
+		b = b[l:]
+		if msg[2] != syscall.RTM_VERSION {
+			continue
+		}
+		switch int(msg[3]) {
+		case syscall.RTM_IFINFO, syscall.RTM_IFINFO2:
+			name := ""
+			if l >= ifmMinLen {
+				name = cache.name(int(binary.NativeEndian.Uint16(msg[ifmIndexOff:])), true)
+			}
+			names = append(names, name)
+			continue
+		}
+		msgs, err := route.ParseRIB(route.RIBTypeRoute, msg)
+		if err != nil || len(msgs) == 0 {
+			// Unparseable or of a type ParseRIB does not know.
+			names = append(names, "")
+			continue
+		}
+		for _, m := range msgs {
+			if im, ok := m.(*route.InterfaceMessage); ok {
+				cache.learn(im.Index, im.Name)
+			}
+		}
+		if name, ok := classifyRoute(msgs, func(i int) string { return cache.name(i, false) }); ok {
+			names = append(names, name)
+		}
 	}
-	return classifyRoute(msgs, ifaceNameByIndex)
+	if len(names) == 0 {
+		return "", false
+	}
+	return commonIface(names), true
 }
 
 // routeNoise are route flags of entries the kernel creates and expires by

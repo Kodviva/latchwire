@@ -24,17 +24,10 @@ func NewSource() (Source, error) {
 		unix.Close(fd)
 		return nil, fmt.Errorf("netmon: netlink bind: %w", err)
 	}
-	return newSockSource(fd, "netlink", parseLinux)
+	cache := newIfaceCache()
+	return newSockSource(fd, "netlink", func(b []byte) (string, bool) { return parseLinux(b, cache) })
 }
 
-func parseLinux(b []byte) (string, bool) {
-	idx := parseNetlink(b)
-	if len(idx) == 0 {
-		return "", false
-	}
-	names := make([]string, len(idx))
-	for i, n := range idx {
-		names[i] = ifaceNameByIndex(n)
-	}
-	return commonIface(names), true
+func parseLinux(b []byte, cache *ifaceCache) (string, bool) {
+	return resolveChanges(parseNetlink(b), cache)
 }

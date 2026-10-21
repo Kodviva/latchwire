@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"syscall"
 	"time"
@@ -53,6 +54,11 @@ func (s *sockSource) Next(ctx context.Context) (string, error) {
 		if err != nil {
 			if ctx.Err() != nil {
 				return "", ctx.Err()
+			}
+			if errors.Is(err, io.EOF) {
+				// A zero-length datagram (os.File reports it as EOF) is
+				// not the end of the socket.
+				continue
 			}
 			if errors.Is(err, syscall.ENOBUFS) {
 				// The kernel dropped notifications: something changed.

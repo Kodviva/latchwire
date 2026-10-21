@@ -296,17 +296,17 @@ func TestNetworkIDNone(t *testing.T) {
 	r := &scriptedRunner{errs: map[string]error{
 		"route -n get default": errors.New("exit status 1: route: writing to routing socket: not in table"),
 	}}
-	if id, err := networkID(ctx, r, "darwin"); err != nil || id != "none" {
+	if id, err := networkID(ctx, r, "darwin"); err != nil || id != NoNetwork {
 		t.Errorf("darwin no route: %q, %v", id, err)
 	}
 	// Linux: no default route prints nothing.
 	r = &scriptedRunner{out: map[string]string{"ip route show default": ""}}
-	if id, err := networkID(ctx, r, "linux"); err != nil || id != "none" {
+	if id, err := networkID(ctx, r, "linux"); err != nil || id != NoNetwork {
 		t.Errorf("linux no route: %q, %v", id, err)
 	}
 	// A default route without a gateway address (on-link, e.g. a tunnel).
 	r = &scriptedRunner{out: map[string]string{"ip route show default": "default dev wg0 scope link\n"}}
-	if id, err := networkID(ctx, r, "linux"); err != nil || id != "none" {
+	if id, err := networkID(ctx, r, "linux"); err != nil || id != NoNetwork {
 		t.Errorf("linux on-link route: %q, %v", id, err)
 	}
 	if len(r.cmds) != 1 {
@@ -321,16 +321,35 @@ func TestNetworkIDErrors(t *testing.T) {
 	if id, err := networkID(ctx, r, "linux"); err == nil {
 		t.Errorf("want error, got %q", id)
 	}
-	// An unknown MAC (no neighbour entry, or the lookup failing) falls back
-	// to the gateway address alone; the lookup failing is not fatal.
+	// An unknown MAC is never a gateway-address-only hash: the constant
+	// "unknown" cannot collide with any real network's ID.
 	r = &scriptedRunner{out: map[string]string{"ip route show default": linuxRoute}}
-	id1, err := networkID(ctx, r, "linux")
-	if err != nil || id1 == "none" || len(id1) != 16 {
-		t.Fatalf("no MAC: %q, %v", id1, err)
+	if id, err := networkID(ctx, r, "linux"); err != nil || id != UnknownNetwork {
+		t.Fatalf("no neighbour entry (lookup fails): %q, %v", id, err)
 	}
-	r.out["ip neigh show 192.168.1.1"] = "192.168.1.1 dev eth0  FAILED\n"
-	if id2, _ := networkID(ctx, r, "linux"); id2 != id1 {
-		t.Errorf("FAILED entry changed the ID: %q vs %q", id2, id1)
+	for _, neigh := range []string{
+		"", "192.168.1.1 dev eth0  FAILED\n", "192.168.1.1 dev eth0 INCOMPLETE\n",
+		"192.168.1.1 dev eth0 lladdr 00:00:00:00:00:00 STALE\n",
+	} {
+		r.out["ip neigh show 192.168.1.1"] = neigh
+		if id, err := networkID(ctx, r, "linux"); err != nil || id != UnknownNetwork {
+			t.Errorf("neighbour %q: %q, %v", neigh, id, err)
+		}
+	}
+	for _, arp := range []string{
+		"? (192.168.1.1) at (incomplete) on en0 ifscope [ethernet]\n",
+		"arp: no entry for 192.168.1.1\n", "",
+	} {
+		if id, err := networkID(ctx, darwinRunner(arp), "darwin"); err != nil || id != UnknownNetwork {
+			t.Errorf("arp %q: %q, %v", arp, id, err)
+		}
+	}
+	r = &scriptedRunner{out: map[string]string{"route -n get default": darwinRoute}}
+	if id, err := networkID(ctx, r, "darwin"); err != nil || id != UnknownNetwork {
+		t.Errorf("darwin arp failing: %q, %v", id, err)
+	}
+	if UnknownNetwork != "unknown" || NoNetwork != "none" {
+		t.Errorf("constants changed: %q %q", UnknownNetwork, NoNetwork)
 	}
 	// Cancelled context is reported.
 	cctx, cancel := context.WithCancel(ctx)

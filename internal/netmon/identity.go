@@ -13,23 +13,33 @@ import (
 	"github.com/Kodviva/latchwire/internal/netcfg"
 )
 
-// noNetwork is the identity of a machine without a usable default route.
-const noNetwork = "none"
+const (
+	// NoNetwork is the identity of a machine without a usable default route.
+	NoNetwork = "none"
+	// UnknownNetwork is the identity when there is a default gateway but its
+	// MAC address cannot be read. It names no particular network, so it
+	// must never match a trusted network.
+	UnknownNetwork = "unknown"
+)
 
 // NetworkID names the network the machine is on: the first 16 hex digits of
 // SHA-256 over "<gateway IP>|<gateway MAC>", for the default gateway of the
 // primary interface. The SSID is not used (a root service cannot read it on
 // macOS).
 //
-// The result is "none" when there is no default route, or when it has no
-// gateway address (an on-link route, such as a point-to-point tunnel). Only
-// the IPv4 default route is consulted on macOS; Linux uses the preferred
-// (lowest metric) default route of either family. If the gateway's MAC
-// address is unknown (not in the neighbour table yet, or unresolvable) the
-// gateway address alone is hashed, so the same network can have two
-// identities depending on whether the neighbour entry was present.
+// The result is NoNetwork ("none") when there is no default route, or when
+// it has no gateway address (an on-link route, such as a point-to-point
+// tunnel). It is UnknownNetwork ("unknown") when the gateway's MAC address
+// cannot be read (no neighbour entry yet, an incomplete or failed entry, or
+// the lookup failing). It is never a hash of the gateway address alone,
+// because 192.168.1.1 is the gateway of countless home and hotspot networks.
+// Callers must treat NoNetwork and UnknownNetwork as untrusted. Only the
+// IPv4 default route is consulted on macOS; Linux uses the preferred (lowest
+// metric) default route of either family.
 //
-// An error means the system could not be queried; it is never "none".
+// The identity is a convenience, not an authentication: anyone who controls
+// a network can reuse its gateway's IP and MAC address and be recognised as
+// that network. An error means the system could not be queried.
 func NetworkID(ctx context.Context, r netcfg.Runner) (string, error) {
 	return networkID(ctx, r, runtime.GOOS)
 }
@@ -47,7 +57,7 @@ func networkID(ctx context.Context, r netcfg.Runner, goos string) (string, error
 		out, err := r.Run(ctx, "route", []string{"-n", "get", "default"}, nil)
 		if err != nil {
 			if strings.Contains(err.Error(), "not in table") {
-				return noNetwork, nil
+				return NoNetwork, nil
 			}
 			return "", fmt.Errorf("netmon: route get default: %w", err)
 		}
@@ -64,7 +74,7 @@ func networkID(ctx context.Context, r netcfg.Runner, goos string) (string, error
 		return "", fmt.Errorf("netmon: network identity on %s: %w", goos, errUnsupported)
 	}
 	if !gw.IsValid() {
-		return noNetwork, nil
+		return NoNetwork, nil
 	}
 
 	if goos == "darwin" {
@@ -72,15 +82,16 @@ func networkID(ctx context.Context, r netcfg.Runner, goos string) (string, error
 	} else {
 		neighArgs = []string{"neigh", "show", gw.String()}
 	}
-	mac := ""
 	out, err := r.Run(ctx, neighCmd, neighArgs, nil)
 	if err != nil {
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
-		// No MAC: fall back to the gateway address alone.
-	} else {
-		mac = macFromNeighbours(string(out), neighField, iface)
+		return UnknownNetwork, nil
+	}
+	mac := macFromNeighbours(string(out), neighField, iface)
+	if mac == "" {
+		return UnknownNetwork, nil
 	}
 	sum := sha256.Sum256([]byte(gw.String() + "|" + mac))
 	return hex.EncodeToString(sum[:])[:16], nil
