@@ -892,3 +892,31 @@ func TestStartupCorruptJournalReleasesPlatformObjects(t *testing.T) {
 		t.Fatalf("startup ran %q, want %q", cmds, want)
 	}
 }
+
+// A Linux full tunnel reconnecting behind its own blocking kill switch
+// (card back after card_removed) lets its mark pass before it looks up its
+// endpoint, so the marked lookup gets through instead of relying on the
+// endpoint cache.
+func TestBlockedReconnectMarkPassesBeforeLookup(t *testing.T) {
+	fe := newFullTunnelEnvTable(t, true)
+	fe.connect()
+	fe.b.setPresent(serialA, false)
+	fe.waitState(StateCardRemoved, 3*time.Second)
+	fe.fw.waitLast(t, "blocking", func(s killswitch.State) bool { return s.Block && s.FwMark == 0 })
+	fe.mu.Lock()
+	n := len(fe.atResolve)
+	fe.mu.Unlock()
+	fe.b.setPresent(serialA, true)
+	fe.waitState(StateConnected, 5*time.Second)
+	fe.mu.Lock()
+	defer fe.mu.Unlock()
+	if len(fe.atResolve) <= n {
+		t.Fatal("the reconnect looked nothing up")
+	}
+	if s := fe.atResolve[n]; !s.Block || s.FwMark != 51820 {
+		t.Errorf("kill switch at the reconnect's lookup %+v, want blocking with FwMark 51820 passing", s)
+	}
+	if fe.marks[n] != 51820 {
+		t.Errorf("lookup mark %d, want 51820", fe.marks[n])
+	}
+}

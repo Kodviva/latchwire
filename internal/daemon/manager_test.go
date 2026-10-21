@@ -35,6 +35,7 @@ import (
 	"github.com/Kodviva/latchwire/internal/keyprovider"
 	"github.com/Kodviva/latchwire/internal/keyprovider/softkey"
 	"github.com/Kodviva/latchwire/internal/keyref"
+	"github.com/Kodviva/latchwire/internal/killswitch"
 	"github.com/Kodviva/latchwire/internal/netcfg"
 	"github.com/Kodviva/latchwire/internal/netmon"
 )
@@ -2050,6 +2051,9 @@ type fullTunnelEnv struct {
 	mu    sync.Mutex
 	uapis []string
 	marks []uint32
+	// atResolve is the kill switch state last set when each lookup
+	// started.
+	atResolve []killswitch.State
 }
 
 func newFullTunnelEnv(t *testing.T, supported bool) *fullTunnelEnv {
@@ -2084,10 +2088,16 @@ func newFullTunnelEnvOpts(t *testing.T, supported, table bool, o envOpts) *fullT
 		if table {
 			m.pickTable = func(context.Context) (uint32, error) { return 51820, nil }
 		}
+		fw, _ := m.fw.(*fakeFirewall)
 		m.resolve = func(_ context.Context, host string, mark uint32) ([]netip.Addr, error) {
+			var ks killswitch.State
+			if fw != nil {
+				ks, _ = fw.last()
+			}
 			fe.mu.Lock()
 			defer fe.mu.Unlock()
 			fe.marks = append(fe.marks, mark)
+			fe.atResolve = append(fe.atResolve, ks)
 			return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
 		}
 		real := m.ops.ipcSet

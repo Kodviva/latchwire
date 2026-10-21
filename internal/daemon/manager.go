@@ -1705,8 +1705,9 @@ type devInfo struct {
 //
 // The kill switch follows the connecting state only once the endpoints are
 // resolved, so a first connect can still look up a name; a tunnel that was
-// blocking already (card_removed, error) resolves behind it, with the mark
-// (Linux full tunnel) or from the endpoint cache. From then on the
+// blocking already (card_removed, error) resolves behind it: a Linux full
+// tunnel's mark is put in place first, so its marked lookup passes, and the
+// endpoint cache stands in when a lookup fails. From then on the
 // connecting tunnel's endpoints pass outbound (replies only come back), so
 // the first handshake is not rejected. A tunnel whose kill switch is on is
 // refused when the kill switch cannot block.
@@ -1739,7 +1740,15 @@ func (m *Manager) build(attempt, life context.Context, cfg *config.Tunnel, c can
 		t.mark = mark
 	}
 	m.mu.Unlock()
-	rt, err := m.resolveTunnel(attempt, cfg, mark, m.ksBlocking.Load())
+	blocked := m.ksBlocking.Load()
+	if blocked && mark != 0 {
+		// Behind a kill switch that blocks already, the marked lookup
+		// passes once the mark is in place; the cache is the fallback. (A
+		// kill switch not blocking yet is left alone: it follows the
+		// connecting state only after the lookup, see above.)
+		m.syncKillSwitch()
+	}
+	rt, err := m.resolveTunnel(attempt, cfg, mark, blocked)
 	if err != nil {
 		return nil, nil, devInfo{}, err
 	}
