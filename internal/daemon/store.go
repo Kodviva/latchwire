@@ -61,8 +61,10 @@ func (s *store) ensureDir() error {
 	return os.Chmod(s.dir, 0o700)
 }
 
-// load parses every stored tunnel. A file that no longer parses is logged
-// and skipped so one bad file does not take the others down.
+// load parses every stored tunnel. A file that no longer parses (for
+// example a Plan 1 configuration whose MTU is outside 1280-9000) is logged
+// as not loaded and skipped, so one bad file does not take the others
+// down.
 func (s *store) load() (map[string]*config.Tunnel, error) {
 	if err := s.ensureDir(); err != nil {
 		return nil, err
@@ -85,7 +87,7 @@ func (s *store) load() (map[string]*config.Tunnel, error) {
 		t, err := config.Parse(name, f)
 		f.Close()
 		if err != nil {
-			log.Printf("daemon: store: %s: %v", e.Name(), err)
+			log.Printf("daemon: WARNING: tunnel %s is not loaded: %s: %v; fix the file, or remove the tunnel and add it again", name, filepath.Join(s.dir, e.Name()), err)
 			continue
 		}
 		out[name] = t

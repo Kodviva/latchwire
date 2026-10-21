@@ -2,8 +2,11 @@ package daemon
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -817,5 +820,44 @@ func TestFailedTunnelDownByItsUser(t *testing.T) {
 	}
 	if st, err := fe.m.requestDisconnect(uidAdmin, tunName); err != nil || st.State != StateDisconnected {
 		t.Fatalf("administrator's down: %+v, %v", st, err)
+	}
+}
+
+// Upgrading from Plan 1: a stored tunnel without a policy file loads
+// admin-only, and says how to give a user access back; a stored
+// configuration that no longer parses (an MTU outside 1280-9000) is not
+// loaded, and the log names it and why.
+func TestLoadLogsPlan1Leftovers(t *testing.T) {
+	logs := &syncBuffer{}
+	log.SetOutput(logs)
+	defer log.SetOutput(io.Discard)
+	dir := t.TempDir()
+	writeFullTunnelNamed(t, dir, "old", [32]byte{1})
+	var peer [32]byte
+	peer[0] = 9
+	bad := fmt.Sprintf("[Interface]\nMTU = 1000\n[Identity]\nKeyRef = %s\nPublicKey = %s\nAddress = 10.0.0.2/32\n"+
+		"[Peer]\nPublicKey = %s\nEndpoint = 192.0.2.1:51820\nAllowedIPs = 10.1.0.0/16\n",
+		refA, base64.StdEncoding.EncodeToString(peer[:]), base64.StdEncoding.EncodeToString(peer[:]))
+	if err := (&store{dir: dir}).writeAtomic("tiny.conf", bad); err != nil {
+		t.Fatal(err)
+	}
+	m := NewManager(Options{StoreDir: dir})
+	if err := m.load(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.tunnels["tiny"]; ok {
+		t.Error("a configuration with MTU 1000 was loaded")
+	}
+	if tn := m.tunnels["old"]; tn == nil || len(tn.policy.AllowedUsers) != 0 {
+		t.Fatalf("tunnel without a policy file: %+v", tn)
+	}
+	l := logs.String()
+	for _, want := range []string{
+		"tunnel old has no policy file: only administrators may connect it; allow a user with: sudo latchwire policy old --allow-user NAME",
+		"WARNING: tunnel tiny is not loaded: " + filepath.Join(dir, "tiny.conf") + ": line 2: " + msg.ConfigMTURange,
+	} {
+		if !strings.Contains(l, want) {
+			t.Errorf("log lacks %q:\n%s", want, l)
+		}
 	}
 }

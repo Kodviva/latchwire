@@ -99,6 +99,28 @@ Remove:
     sudo rm /etc/systemd/user/latchwire-agent.service /etc/systemd/system/latchwire-daemon.service
     sudo systemctl daemon-reload
 
+## Upgrading from an earlier version (Plan 1)
+
+Two things change for tunnels stored by a version without tunnel policies
+(`/Library/Application Support/Latchwire/tunnels` on macOS,
+`/etc/latchwire/tunnels` on Linux):
+
+- **A tunnel without a policy file is for administrators only.** Its
+  policy has no allowed users, so only an administrator (`sudo latchwire
+  up`) can connect it. The daemon logs this for each such tunnel at start.
+  Give a user access back with:
+
+      sudo latchwire policy <tunnel> --allow-user NAME
+
+  Tunnels added from now on get the user who ran `sudo latchwire add` as
+  their allowed user.
+- **A stored configuration whose `MTU` is outside 1280-9000 is not
+  loaded** (`0` or no `MTU` line means automatic). The daemon logs a
+  warning naming the file and the reason, and the tunnel is missing from
+  `latchwire status`. Fix the `MTU` line in the file and restart the
+  daemon, or remove the tunnel and add it again with a valid
+  configuration.
+
 ## Manual checks of the PIN dialogs
 
 These need a real desktop session and a YubiKey (see

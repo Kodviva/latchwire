@@ -368,6 +368,10 @@ func (m *Manager) load() error {
 	pols := make(map[string]Policy, len(ts))
 	for name := range ts {
 		pols[name] = m.store.policyFor(name)
+		if !m.store.hasPolicy(name) {
+			// A tunnel added before policies existed (Plan 1).
+			log.Printf("daemon: tunnel %s has no policy file: only administrators may connect it; allow a user with: sudo latchwire policy %s --allow-user NAME", name, name)
+		}
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -182,6 +182,12 @@ func (s *store) savePolicy(name string, p Policy) error {
 	return s.writeAtomic(name+policyExt, string(b))
 }
 
+// hasPolicy reports whether name has a policy file (of whatever content).
+func (s *store) hasPolicy(name string) bool {
+	_, err := os.Lstat(filepath.Join(s.dir, name+policyExt))
+	return !errors.Is(err, os.ErrNotExist)
+}
+
 // policyFor reads name's policy; one that cannot be used is logged and
 // replaced by the fail-closed policy.
 func (s *store) policyFor(name string) Policy {
