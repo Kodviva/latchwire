@@ -1,0 +1,39 @@
+package killswitch
+
+import (
+	"errors"
+	"runtime"
+	"testing"
+)
+
+func TestNewPlatform(t *testing.T) {
+	r := &recorder{}
+	f, err := New(r, newJournal(t))
+	if runtime.GOOS != "linux" {
+		if !errors.Is(err, ErrUnsupported) || f != nil {
+			t.Fatalf("New on %s: %v, %v; want ErrUnsupported", runtime.GOOS, f, err)
+		}
+		return
+	}
+	if err != nil || f == nil {
+		t.Fatalf("New: %v", err)
+	}
+	r.missing = true
+	if _, err := New(r, nil); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("New without nft: %v, want ErrUnsupported", err)
+	}
+}
+
+// The journal owner can never be a tunnel's interface name, so Cleanup and
+// the configurers never confuse the kill switch with a tunnel.
+func TestJournalOwnerIsNoInterfaceName(t *testing.T) {
+	ok := false
+	for _, c := range JournalOwner {
+		if c == ':' || c == '/' {
+			ok = true
+		}
+	}
+	if !ok {
+		t.Fatalf("JournalOwner %q could be an interface name", JournalOwner)
+	}
+}

@@ -1188,6 +1188,10 @@ func TestEndpointHostnameResolvedAtConnect(t *testing.T) {
 	if err := e.call(ipc.MethodTunnelDisconnect, ipc.TunnelName{Name: tunName}, nil); err != nil {
 		t.Fatal(err)
 	}
+	// Without a usable endpoint cache a failed lookup fails the connect.
+	if err := os.Remove(filepath.Join(e.store, tunName+".endpoints")); err != nil {
+		t.Fatal(err)
+	}
 	err := e.call(ipc.MethodTunnelConnect, ipc.TunnelName{Name: tunName}, nil)
 	assertCode(t, err, ipc.CodeUnavailable)
 	if !strings.Contains(err.Error(), "vpn.example.test") {
@@ -1195,6 +1199,105 @@ func TestEndpointHostnameResolvedAtConnect(t *testing.T) {
 	}
 	if n := e.f.count(); n != 2 {
 		t.Errorf("%d devices, want no new device after a failed lookup", n)
+	}
+}
+
+// A reconnect whose endpoint lookup fails uses the address the last
+// successful lookup found: under the kill switch the resolver may not reach
+// any DNS server while the tunnel is down. The cache is the store's
+// <name>.endpoints (0600); remove deletes it.
+func TestReconnectUsesCachedEndpointUnderKillSwitch(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		lookups int
+		fail    bool
+	)
+	hook := func(m *Manager) {
+		m.resolve = func(ctx context.Context, host string, mark uint32) ([]netip.Addr, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			lookups++
+			if fail {
+				return nil, errors.New("no such host")
+			}
+			return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
+		}
+	}
+	e := newEnv(t, envOpts{present: []uint32{serialA}, hook: hook})
+	srv := newServer(t, e.b.pub(serialA), "10.0.0.2")
+	ep := fmt.Sprintf("vpn.example.test:%d", srv.port)
+	e.add(e.config([]keyref.Ref{refA}, []string{"10.0.0.2"}, srv, ep))
+	e.waitCard(serialA, true)
+	e.connect()
+
+	cache := filepath.Join(e.store, tunName+".endpoints")
+	fi, err := os.Stat(cache)
+	if err != nil {
+		t.Fatalf("no endpoint cache after a successful lookup: %v", err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Errorf("cache mode %v, want 0600", fi.Mode().Perm())
+	}
+	b, err := os.ReadFile(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c struct {
+		Version int `json:"version"`
+		Peers   map[string]struct {
+			Endpoint string `json:"endpoint"`
+			Addr     string `json:"addr"`
+		} `json:"peers"`
+	}
+	if err := json.Unmarshal(b, &c); err != nil {
+		t.Fatalf("cache %s: %v", b, err)
+	}
+	pk := hex.EncodeToString(srv.pub[:])
+	if p := c.Peers[pk]; c.Version != 1 || len(c.Peers) != 1 || p.Endpoint != ep || p.Addr != fmt.Sprintf("127.0.0.1:%d", srv.port) {
+		t.Fatalf("cache %s, want peer %s → 127.0.0.1:%d", b, pk, srv.port)
+	}
+
+	// The card goes and comes back; the lookup now fails.
+	mu.Lock()
+	fail = true
+	mu.Unlock()
+	e.b.setPresent(serialA, false)
+	e.waitState(StateCardRemoved, 3*time.Second)
+	e.b.setPresent(serialA, true)
+	e.waitState(StateConnected, 5*time.Second)
+	tnet, _ := e.f.last()
+	if err := get(tnet, 5*time.Second); err != nil {
+		t.Fatalf("GET via the cached endpoint: %v", err)
+	}
+	mu.Lock()
+	n := lookups
+	mu.Unlock()
+	if n != 2 {
+		t.Errorf("%d lookups, want 2 (the name is still resolved first, R11)", n)
+	}
+
+	// A cache that does not validate is ignored.
+	for _, bad := range []string{
+		"garbage",
+		`{"version":1,"peers":{"` + pk + `":{"endpoint":"` + ep + `","addr":"127.0.0.1:0"}}}`,
+		`{"version":1,"peers":{"` + pk + `":{"endpoint":"other.example.test:1","addr":"127.0.0.1:` + strconv.Itoa(srv.port) + `"}}}`,
+		`{"version":2,"peers":{"` + pk + `":{"endpoint":"` + ep + `","addr":"127.0.0.1:` + strconv.Itoa(srv.port) + `"}}}`,
+		`{"version":1,"peers":{"` + pk + `":{"endpoint":"` + ep + `","addr":"127.0.0.1:` + strconv.Itoa(srv.port) + `","x":1}}}`,
+	} {
+		if err := e.call(ipc.MethodTunnelDisconnect, ipc.TunnelName{Name: tunName}, nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(cache, []byte(bad), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		assertCode(t, e.call(ipc.MethodTunnelConnect, ipc.TunnelName{Name: tunName}, nil), ipc.CodeUnavailable)
+	}
+
+	if err := e.call(ipc.MethodTunnelRemove, ipc.TunnelName{Name: tunName}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(cache); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("endpoint cache still on disk after remove: %v", err)
 	}
 }
 

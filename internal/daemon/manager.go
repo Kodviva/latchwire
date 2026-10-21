@@ -16,6 +16,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -598,6 +599,9 @@ func (m *Manager) remove(name string) error {
 		return errNotFound
 	}
 	m.teardown(t, StateDisconnected, nil)
+	if err := m.store.removeEndpoints(name); err != nil {
+		log.Printf("daemon: store remove %s endpoint cache: %v", name, err)
+	}
 	if err := m.store.remove(name); err != nil {
 		log.Printf("daemon: store remove %s: %v", name, err)
 		return &ipc.Error{Code: ipc.CodeInternal, Message: fmt.Sprintf(msg.DaemonStoreFailedFmt, err)}
@@ -1201,10 +1205,17 @@ func resolvedEndpoints(rt *config.Tunnel) []netip.AddrPort {
 
 // resolveTunnel returns a copy of cfg whose endpoints are literal IP:port.
 // Names are resolved at every connect, with mark (see Manager.resolve); IPv4
-// is preferred.
+// is preferred. The addresses found are written to the tunnel's endpoint
+// cache; when a lookup fails (and ctx has not ended), the cached address of
+// that peer is used if its configured endpoint is unchanged.
 func (m *Manager) resolveTunnel(ctx context.Context, cfg *config.Tunnel, mark uint32) (*config.Tunnel, error) {
 	rt := *cfg
 	rt.Peers = slices.Clone(cfg.Peers)
+	var (
+		found  = map[string]cachedEndpoint{} // what this connect resolved
+		cache  map[string]cachedEndpoint     // read on the first failure
+		loaded bool
+	)
 	for i := range rt.Peers {
 		ep := rt.Peers[i].Endpoint
 		if ep == "" {
@@ -1219,22 +1230,48 @@ func (m *Manager) resolveTunnel(ctx context.Context, cfg *config.Tunnel, mark ui
 			return nil, err
 		}
 		addr, err := netip.ParseAddr(host)
-		if err != nil {
-			rctx, cancel := context.WithTimeout(ctx, resolveTimeout)
-			addrs, lerr := m.resolve(rctx, host, mark)
-			cancel()
-			if lerr != nil || len(addrs) == 0 {
-				return nil, &ipc.Error{Code: ipc.CodeUnavailable, Message: fmt.Sprintf(msg.DaemonResolveFmt, host)}
-			}
-			addr = addrs[0]
-			for _, a := range addrs {
-				if a.Unmap().Is4() {
-					addr = a
-					break
+		if err == nil {
+			rt.Peers[i].Endpoint = netip.AddrPortFrom(addr.Unmap(), uint16(port)).String()
+			continue
+		}
+		key := hex.EncodeToString(rt.Peers[i].PublicKey[:])
+		rctx, cancel := context.WithTimeout(ctx, resolveTimeout)
+		addrs, lerr := m.resolve(rctx, host, mark)
+		cancel()
+		if lerr != nil || len(addrs) == 0 {
+			if !loaded && ctx.Err() == nil {
+				loaded = true
+				if cache, err = m.store.loadEndpoints(cfg.Name); err != nil {
+					log.Printf("daemon: %s: ignoring the endpoint cache: %v", cfg.Name, err)
 				}
 			}
+			c, ok := cache[key]
+			ap, perr := netip.ParseAddrPort(c.Addr)
+			if ctx.Err() != nil || !ok || c.Endpoint != ep || perr != nil || ap.Port() != uint16(port) {
+				return nil, &ipc.Error{Code: ipc.CodeUnavailable, Message: fmt.Sprintf(msg.DaemonResolveFmt, host)}
+			}
+			log.Printf("daemon: %s: cannot resolve %s (%v); using the cached address %s", cfg.Name, host, lerr, ap)
+			found[key] = c
+			rt.Peers[i].Endpoint = ap.String()
+			continue
 		}
-		rt.Peers[i].Endpoint = netip.AddrPortFrom(addr.Unmap(), uint16(port)).String()
+		addr = addrs[0]
+		for _, a := range addrs {
+			if a.Unmap().Is4() {
+				addr = a
+				break
+			}
+		}
+		ap := netip.AddrPortFrom(addr.Unmap(), uint16(port))
+		rt.Peers[i].Endpoint = ap.String()
+		found[key] = cachedEndpoint{Endpoint: ep, Addr: ap.String()}
+	}
+	// An attempt that ended (a teardown, a remove) writes nothing: remove
+	// deletes the cache once the attempt has let go of the tunnel.
+	if len(found) > 0 && ctx.Err() == nil {
+		if err := m.store.saveEndpoints(cfg.Name, found); err != nil {
+			log.Printf("daemon: %s: writing the endpoint cache: %v", cfg.Name, err)
+		}
 	}
 	return &rt, nil
 }

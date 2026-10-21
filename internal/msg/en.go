@@ -72,6 +72,11 @@ const (
 	AgentUntrustedDaemonFmt = "refusing the service socket: it is served by uid %d, not by root or this user"
 )
 
+// Kill switch.
+const (
+	KillSwitchUnsupported = "the kill switch is not available on this system (on Linux it needs the nft command from nftables); install nftables, or turn the kill switch off in the tunnel's policy"
+)
+
 // Network configuration.
 const (
 	NetFullTunnelUnsupported = "routing all traffic through the tunnel (AllowedIPs 0.0.0.0/0 or ::/0) is not supported yet; list the networks to reach instead"
