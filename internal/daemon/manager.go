@@ -227,6 +227,11 @@ type tunnel struct {
 	endpoints  []netip.AddrPort
 	listenPort uint16
 	mark       uint32
+	// dnsRole is the part the tunnel's DNS servers were given when it
+	// last started connecting (dnsRoleLocked); applied is what the
+	// Configurer of dev put in place (zero without dev).
+	dnsRole netcfg.DNSRole
+	applied netcfg.Applied
 	// abort is cancelled by every teardown: a connect still proving an
 	// agent (and maybe waiting for a PIN) then gives up.
 	abort       context.Context
@@ -698,13 +703,24 @@ func (m *Manager) statuses(name string) ([]ipc.TunnelStatus, error) {
 // status reads the device (IpcGet takes device locks) outside Manager.mu.
 func (m *Manager) status(t *tunnel) ipc.TunnelStatus {
 	m.mu.Lock()
-	st := ipc.TunnelStatus{Name: t.name, State: t.state}
+	st := ipc.TunnelStatus{Name: t.name, State: t.state, FullTunnel: routesAll(t.cfg), KillSwitch: killSwitchStatus(t)}
 	if t.hasRef {
 		st.Identity = t.ref.String()
 	}
 	var dev *device.Device
-	if t.state == StateConnected {
+	if t.state == StateConnected && t.dev != nil {
 		dev = t.dev
+		st.Interface, st.MTU = t.iface, t.applied.MTU
+		var warns []string
+		var w string
+		if st.DNS, w = dnsStatus(t.dnsRole, len(t.cfg.DNS) > 0, t.applied.DNS); w != "" {
+			warns = append(warns, w)
+		}
+		// P3: a Linux full tunnel (it has a table) without nft.
+		if t.applied.FullTunnel && t.applied.Table != 0 && !t.applied.RPFilter {
+			warns = append(warns, msg.DaemonWarnNoRPFilter)
+		}
+		st.Warning = strings.Join(warns, "; ")
 	}
 	m.mu.Unlock()
 	if dev != nil {
@@ -1015,6 +1031,13 @@ func (m *Manager) connect(caller context.Context, name string, uid uint32, admin
 		m.mu.Unlock()
 		return m.status(t), nil
 	}
+	// Refused before the agent is asked (no PIN for nothing); checked
+	// again when the tunnel is reserved below.
+	if err := m.conflictLocked(t); err != nil {
+		m.mu.Unlock()
+		log.Printf("daemon: tunnel %s: connect: %v", name, err)
+		return ipc.TunnelStatus{}, err
+	}
 	cands := m.candidatesLocked(t.cfg, uid, admin)
 	cfg, gen0, abort := t.cfg, t.gen, t.abort
 	m.mu.Unlock()
@@ -1052,6 +1075,16 @@ func (m *Manager) connect(caller context.Context, name string, uid uint32, admin
 		m.mu.Unlock()
 		return ipc.TunnelStatus{}, errAborted // disconnected or card removed meanwhile
 	}
+	// The check and the reservation (state connecting) are one step under
+	// Manager.mu, so of two conflicting connects only one gets past it; the
+	// DNS role is chosen in the same step.
+	if err := m.conflictLocked(t); err != nil {
+		m.mu.Unlock()
+		log.Printf("daemon: tunnel %s: connect: %v", name, err)
+		return ipc.TunnelStatus{}, err
+	}
+	t.dnsRole = m.dnsRoleLocked(t)
+	role := t.dnsRole
 	t.gen++
 	gen := t.gen
 	t.state = StateConnecting
@@ -1068,14 +1101,14 @@ func (m *Manager) connect(caller context.Context, name string, uid uint32, admin
 	defer t.op.Unlock()
 	m.reap(t)
 
-	dev, cfgr, info, err := m.build(attempt, life, cfg, c, t, gen)
+	dev, cfgr, info, err := m.build(attempt, life, cfg, c, t, gen, role)
 	m.mu.Lock()
 	if t.gen != gen {
 		err = errAborted // disconnected, removed or card removed meanwhile
 	}
 	if err == nil {
 		t.dev, t.cfgr, t.iface, t.devGen = dev, cfgr, info.iface, gen
-		t.endpoints, t.listenPort = info.endpoints, info.listenPort
+		t.endpoints, t.listenPort, t.applied = info.endpoints, info.listenPort, info.applied
 		t.state = StateConnected
 		m.mu.Unlock()
 		log.Printf("daemon: tunnel %s connected with %s (uid %d)", name, c.id.Ref, c.uid)
@@ -1177,18 +1210,21 @@ func (m *Manager) proveOne(ctx context.Context, c candidate) error {
 	return nil
 }
 
-// devInfo is what build reports about the device for the kill switch.
+// devInfo is what build reports about the device for the kill switch and
+// the status.
 type devInfo struct {
 	iface      string
 	endpoints  []netip.AddrPort
 	listenPort uint16
+	applied    netcfg.Applied
 }
 
 // build makes the device for one connect attempt (generation gen of t)
 // after the agent proved its key: resolve endpoints, put the kill switch in
 // place, then NewDevice, SetStaticKey (once, before Up), IpcSet, addresses
 // and routes, Up. life bounds the key's calls for the device's whole
-// lifetime; attempt only this connect.
+// lifetime; attempt only this connect. role is the part the tunnel's DNS
+// servers take (dnsRoleLocked).
 //
 // The kill switch follows the connecting state only once the endpoints are
 // resolved, so a first connect can still look up a name; a tunnel that was
@@ -1202,7 +1238,7 @@ type devInfo struct {
 // routing table T first: its endpoint lookups and its WireGuard socket carry the
 // mark T (fwmark=T leads the UAPI text, a device key that must precede the
 // first peer), and its routes go through table T.
-func (m *Manager) build(attempt, life context.Context, cfg *config.Tunnel, c candidate, t *tunnel, gen uint64) (*device.Device, netcfg.Configurer, devInfo, error) {
+func (m *Manager) build(attempt, life context.Context, cfg *config.Tunnel, c candidate, t *tunnel, gen uint64, role netcfg.DNSRole) (*device.Device, netcfg.Configurer, devInfo, error) {
 	id := c.id
 	var routes []netip.Prefix
 	for _, peer := range cfg.Peers {
@@ -1275,8 +1311,9 @@ func (m *Manager) build(attempt, life context.Context, cfg *config.Tunnel, c can
 	}
 	plan := netcfg.Plan{Iface: iface, Addresses: id.Addresses, Routes: routes, MTU: mtu,
 		MTUAuto: cfg.MTU == 0, Endpoints: resolvedEndpoints(rt), FwMark: mark,
-		DNS: cfg.DNS, DNSSearch: cfg.DNSSearch, DNSRole: dnsRole(cfg)}
-	if _, err := cfgr.Apply(attempt, plan); err != nil {
+		DNS: cfg.DNS, DNSSearch: cfg.DNSSearch, DNSRole: role}
+	applied, err := cfgr.Apply(attempt, plan)
+	if err != nil {
 		return fail(err)
 	}
 	if err := m.ops.up(dev); err != nil {
@@ -1288,7 +1325,7 @@ func (m *Manager) build(attempt, life context.Context, cfg *config.Tunnel, c can
 	if port == 0 {
 		return fail(errors.New("the device reports no listen port"))
 	}
-	return dev, cfgr, devInfo{iface: iface, endpoints: resolvedEndpoints(rt), listenPort: port}, nil
+	return dev, cfgr, devInfo{iface: iface, endpoints: resolvedEndpoints(rt), listenPort: port, applied: applied}, nil
 }
 
 // listenPort reads the UDP port dev is bound to (0: unknown).
@@ -1309,13 +1346,159 @@ func listenPort(dev *device.Device) uint16 {
 	return 0
 }
 
-// dnsRole is how cfg's DNS servers take part in name resolution. Until
-// split DNS arrives they answer every name.
-func dnsRole(cfg *config.Tunnel) netcfg.DNSRole {
-	if len(cfg.DNS) == 0 {
+// ---- several tunnels ----
+
+// routesAll reports whether cfg is a full tunnel: some peer's AllowedIPs
+// hold 0.0.0.0/0 or ::/0.
+func routesAll(cfg *config.Tunnel) bool {
+	for _, p := range cfg.Peers {
+		if slices.ContainsFunc(p.AllowedIPs, func(r netip.Prefix) bool { return r.Bits() == 0 }) {
+			return true
+		}
+	}
+	return false
+}
+
+// active reports whether t holds what it needs from the system: it is
+// connecting or connected.
+func (t *tunnel) active() bool {
+	return t.state == StateConnecting || t.state == StateConnected
+}
+
+// othersLocked returns the active tunnels other than t, in name order.
+// Manager.mu is held.
+func (m *Manager) othersLocked(t *tunnel) []*tunnel {
+	var out []*tunnel
+	for _, o := range m.tunnels {
+		if o != t && o.active() {
+			out = append(out, o)
+		}
+	}
+	slices.SortFunc(out, func(a, b *tunnel) int { return cmp.Compare(a.name, b.name) })
+	return out
+}
+
+// conflictLocked returns why t may not connect next to the tunnels that
+// are connecting or connected (nil: it may): a second full tunnel; an
+// AllowedIPs prefix that overlaps one of another tunnel's (the default
+// routes left out: a split tunnel's more specific routes beside a full
+// tunnel are meant to win); the ListenPort another tunnel has configured
+// or is bound to. Manager.mu is held.
+func (m *Manager) conflictLocked(t *tunnel) error {
+	refuse := func(format string, args ...any) error {
+		return &ipc.Error{Code: ipc.CodeBadRequest, Message: fmt.Sprintf(format, args...)}
+	}
+	others := m.othersLocked(t)
+	if routesAll(t.cfg) {
+		for _, o := range others {
+			if routesAll(o.cfg) {
+				return refuse(msg.DaemonConflictFullFmt, o.name)
+			}
+		}
+	}
+	for _, p := range t.cfg.Peers {
+		for _, a := range p.AllowedIPs {
+			if a.Bits() == 0 {
+				continue
+			}
+			for _, o := range others {
+				for _, op := range o.cfg.Peers {
+					for _, b := range op.AllowedIPs {
+						if b.Bits() != 0 && a.Overlaps(b) {
+							return refuse(msg.DaemonConflictAllowedIPsFmt, a, b, o.name)
+						}
+					}
+				}
+			}
+		}
+	}
+	if port := t.cfg.ListenPort; port != 0 {
+		for _, o := range others {
+			if o.cfg.ListenPort == port || int(o.listenPort) == port {
+				return refuse(msg.DaemonConflictListenPortFmt, port, o.name)
+			}
+		}
+	}
+	return nil
+}
+
+// dnsRoleLocked chooses the part t's DNS servers take as it starts
+// connecting. A full tunnel's answer every name (DNSPrimary); so do a split
+// tunnel's when no other connecting or connected tunnel's do. Otherwise
+// they answer t's search domains only (DNSScoped), or, without search
+// domains, are not applied (DNSNone; status "ignored").
+//
+// The owner leaving promotes nobody: the tunnels already up keep what they
+// have until they reconnect, and the next tunnel to connect may take it.
+// A full tunnel asks for DNSPrimary even when a split tunnel holds it;
+// netcfg then reports it busy and leaves the DNS as it is (status "busy",
+// with a warning). Manager.mu is held.
+func (m *Manager) dnsRoleLocked(t *tunnel) netcfg.DNSRole {
+	switch {
+	case len(t.cfg.DNS) == 0:
 		return netcfg.DNSNone
+	case routesAll(t.cfg):
+		return netcfg.DNSPrimary
+	}
+	for _, o := range m.othersLocked(t) {
+		if o.dnsRole == netcfg.DNSPrimary {
+			if len(t.cfg.DNSSearch) > 0 {
+				return netcfg.DNSScoped
+			}
+			return netcfg.DNSNone
+		}
 	}
 	return netcfg.DNSPrimary
+}
+
+// dnsStatus maps the DNS role a tunnel was given, whether it has DNS
+// servers, and the netcfg outcome of its Apply to TunnelStatus.DNS and a
+// warning ("": none):
+//
+//	role     servers  outcome                    DNS         warning
+//	none     no       any                        none
+//	none     yes      any                        ignored
+//	primary  yes      primary-busy               busy        DaemonWarnDNSBusy
+//	primary  yes      resolvconf-shared          shared      DaemonWarnDNSShared
+//	primary  yes      scutil-primary-overridden  overridden  DaemonWarnDNSOverridden
+//	primary  yes      any other                  primary
+//	scoped   yes      scoped-unsupported         ignored
+//	scoped   yes      any other                  scoped
+func dnsStatus(role netcfg.DNSRole, servers bool, outcome string) (string, string) {
+	switch {
+	case !servers:
+		return ipc.DNSStatusNone, ""
+	case role == netcfg.DNSPrimary:
+		switch outcome {
+		case netcfg.DNSOutcomePrimaryBusy:
+			return ipc.DNSStatusBusy, msg.DaemonWarnDNSBusy
+		case netcfg.DNSOutcomeResolvconfShared:
+			return ipc.DNSStatusShared, msg.DaemonWarnDNSShared
+		case netcfg.DNSOutcomeScutilPrimaryOverridden:
+			return ipc.DNSStatusOverridden, msg.DaemonWarnDNSOverridden
+		}
+		return ipc.DNSStatusPrimary, ""
+	case role == netcfg.DNSScoped && outcome != netcfg.DNSOutcomeScopedUnsupported:
+		return ipc.DNSStatusScoped, ""
+	}
+	return ipc.DNSStatusIgnored, ""
+}
+
+// killSwitchStatus is TunnelStatus.KillSwitch for t: off when t's kill
+// switch is not on or t is disconnected, armed while t is connected, and
+// blocking while it is connecting, waiting for its card or failed (the kill
+// switch is fail-closed, see killSwitchState). Manager.mu is held.
+func killSwitchStatus(t *tunnel) string {
+	if !t.policy.armed(t.cfg) {
+		return ipc.KillSwitchStatusOff
+	}
+	switch t.state {
+	case StateConnected:
+		return ipc.KillSwitchStatusArmed
+	case StateConnecting, StateCardRemoved, StateError:
+		return ipc.KillSwitchStatusBlocking
+	}
+	return ipc.KillSwitchStatusOff
 }
 
 // resolvedEndpoints returns the endpoints of a tunnel from resolveTunnel.
@@ -1455,7 +1638,7 @@ func (m *Manager) reap(t *tunnel) {
 		return
 	}
 	dev, cfgr := t.dev, t.cfgr
-	t.dev, t.cfgr, t.iface = nil, nil, ""
+	t.dev, t.cfgr, t.iface, t.applied = nil, nil, "", netcfg.Applied{}
 	t.endpoints, t.listenPort, t.mark = nil, 0, 0
 	m.mu.Unlock()
 	m.closeDevice(dev, cfgr)

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"text/tabwriter"
 
 	"github.com/Kodviva/latchwire/internal/daemon"
@@ -138,15 +139,33 @@ func cmdStatus(ctx context.Context, e *env, args []string) error {
 		w := tabwriter.NewWriter(e.stdout, 0, 4, 2, ' ', 0)
 		fmt.Fprintln(w, msg.StatusHeader)
 		for _, st := range sts {
-			id, hs := st.Identity, st.LastHandshake
-			if id == "" {
-				id = msg.StatusDash
+			mtu := ""
+			if st.MTU != 0 {
+				mtu = strconv.Itoa(st.MTU)
 			}
-			if hs == "" {
-				hs = msg.StatusDash
+			routes := msg.StatusSplit
+			if st.FullTunnel {
+				routes = msg.StatusFull
 			}
-			fmt.Fprintf(w, msg.StatusRowFmt+"\n", st.Name, st.State, id, hs)
+			fmt.Fprintf(w, msg.StatusRowFmt+"\n", st.Name, st.State, orDash(st.Identity), orDash(st.LastHandshake),
+				orDash(st.Interface), orDash(mtu), routes, orDash(st.DNS), orDash(st.KillSwitch))
 		}
-		return w.Flush()
+		if err := w.Flush(); err != nil {
+			return err
+		}
+		for _, st := range sts {
+			if st.Warning != "" {
+				fmt.Fprintf(e.stdout, msg.StatusWarningFmt+"\n", st.Name, st.Warning)
+			}
+		}
+		return nil
 	})
+}
+
+// orDash is s, or a dash for a value the daemon did not report.
+func orDash(s string) string {
+	if s == "" {
+		return msg.StatusDash
+	}
+	return s
 }

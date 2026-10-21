@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -190,8 +191,9 @@ func TestStatusTable(t *testing.T) {
 	rpc := &fakeRPC{replies: map[string]func(any, any) error{
 		ipc.MethodTunnelStatus: func(_, r any) error {
 			setResult(t, r, []ipc.TunnelStatus{
-				{Name: "office", State: "connected", Identity: "piv://7/82", LastHandshake: "2026-10-20T10:00:00Z"},
-				{Name: "lab", State: "disconnected"},
+				{Name: "office", State: "connected", Identity: "piv://7/82", LastHandshake: "2026-10-20T10:00:00Z",
+					Interface: "utun7", MTU: 1380, FullTunnel: true, DNS: "shared", KillSwitch: "armed", Warning: msg.DaemonWarnDNSShared},
+				{Name: "lab", State: "disconnected", KillSwitch: "off"},
 			})
 			return nil
 		},
@@ -201,10 +203,38 @@ func TestStatusTable(t *testing.T) {
 		t.Fatalf("exit %d: %s", code, te.errOut)
 	}
 	out := te.out.String()
-	for _, want := range []string{"NAME", "office", "connected", "piv://7/82", "2026-10-20T10:00:00Z", "lab", "disconnected"} {
+	for _, want := range []string{"NAME", "office", "connected", "piv://7/82", "2026-10-20T10:00:00Z", "lab", "disconnected",
+		"INTERFACE", "utun7", "1380", msg.StatusFull, "shared", "armed",
+		fmt.Sprintf(msg.StatusWarningFmt, "office", msg.DaemonWarnDNSShared)} {
 		if !strings.Contains(out, want) {
 			t.Errorf("stdout lacks %q:\n%s", want, out)
 		}
+	}
+	// The disconnected tunnel shows dashes, not zeros, and no warning.
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "lab") && (strings.Contains(line, " 0 ") || !strings.Contains(line, msg.StatusSplit)) {
+			t.Errorf("lab row %q", line)
+		}
+	}
+	if n := strings.Count(out, "warning"); n != 1 {
+		t.Errorf("%d warnings, want 1:\n%s", n, out)
+	}
+}
+
+// An older daemon's answer, without the network fields, still prints.
+func TestStatusOlderDaemon(t *testing.T) {
+	te := newTestEnv(nil)
+	rpc := &fakeRPC{replies: map[string]func(any, any) error{
+		ipc.MethodTunnelStatus: func(_, r any) error {
+			return json.Unmarshal([]byte(`[{"name":"office","state":"connected","identity":"piv://7/82","lastHandshake":""}]`), r)
+		},
+	}}
+	withRPC(te, rpc)
+	if code := run(context.Background(), te.env, []string{"status"}); code != 0 {
+		t.Fatalf("exit %d: %s", code, te.errOut)
+	}
+	if out := te.out.String(); !strings.Contains(out, "office") || !strings.Contains(out, "connected") {
+		t.Errorf("stdout:\n%s", out)
 	}
 }
 

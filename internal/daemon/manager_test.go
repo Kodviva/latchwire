@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -207,8 +208,14 @@ type recCfg struct {
 	dnsSrch  []string
 	dnsRole  netcfg.DNSRole
 	applied  bool
+	applies  int
 	removed  int
 	onRemove func()
+	// outcome, when set, is the Applied.DNS reported for a tunnel with
+	// DNS servers (default: resolved); noRPFilter reports a full tunnel
+	// with a table but without its reverse-path filter (no nft).
+	outcome    string
+	noRPFilter bool
 
 	refreshes  int
 	refreshErr error
@@ -220,7 +227,20 @@ func (c *recCfg) Apply(_ context.Context, p netcfg.Plan) (netcfg.Applied, error)
 	defer c.mu.Unlock()
 	c.iface, c.addrs, c.routes, c.fwmark, c.mtuAuto, c.applied = p.Iface, p.Addresses, p.Routes, p.FwMark, p.MTUAuto, true
 	c.dns, c.dnsSrch, c.dnsRole = p.DNS, p.DNSSearch, p.DNSRole
-	return netcfg.Applied{MTU: p.MTU, FullTunnel: p.FwMark != 0, Table: p.FwMark, RPFilter: p.FwMark != 0}, nil
+	c.applies++
+	full := slices.ContainsFunc(p.Routes, func(r netip.Prefix) bool { return r.Bits() == 0 })
+	res := netcfg.Applied{MTU: p.MTU, FullTunnel: full, Table: p.FwMark, RPFilter: p.FwMark != 0 && !c.noRPFilter, DNS: netcfg.DNSOutcomeNone}
+	if p.DNSRole != netcfg.DNSNone && len(p.DNS) > 0 {
+		res.DNS = cmp.Or(c.outcome, netcfg.DNSOutcomeResolved)
+	}
+	return res, nil
+}
+
+// calls is how often the Configurer was called in any way.
+func (c *recCfg) calls() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.applies + c.removed + c.refreshes
 }
 
 func (c *recCfg) Refresh(context.Context) error {
@@ -248,10 +268,14 @@ type netFactory struct {
 	addrs    []netip.Addr
 	onRemove func() // given to every Configurer
 
-	mu   sync.Mutex
-	nets []*netstack.Net
-	cfgs []*recCfg
-	mtus []int
+	mu    sync.Mutex
+	nets  []*netstack.Net
+	cfgs  []*recCfg
+	mtus  []int
+	names []string
+	// outcome and noRPFilter are given to every new Configurer.
+	outcome    string
+	noRPFilter bool
 }
 
 func (f *netFactory) make(name string, mtu int) (tun.Device, netcfg.Configurer, error) {
@@ -259,11 +283,12 @@ func (f *netFactory) make(name string, mtu int) (tun.Device, netcfg.Configurer, 
 	if err != nil {
 		return nil, nil, err
 	}
-	c := &recCfg{onRemove: f.onRemove}
 	f.mu.Lock()
+	c := &recCfg{onRemove: f.onRemove, outcome: f.outcome, noRPFilter: f.noRPFilter}
 	f.nets = append(f.nets, tnet)
 	f.cfgs = append(f.cfgs, c)
 	f.mtus = append(f.mtus, mtu)
+	f.names = append(f.names, name)
 	f.mu.Unlock()
 	return tdev, c, nil
 }

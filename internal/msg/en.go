@@ -135,6 +135,19 @@ const (
 	// DaemonKillSwitchRefusedFmt takes the error that kept the kill switch
 	// from blocking.
 	DaemonKillSwitchRefusedFmt = "not connecting: this tunnel's kill switch is on and could not block traffic outside the tunnel: %v"
+	// DaemonConflictFullFmt takes the name of the connected full tunnel.
+	DaemonConflictFullFmt = "not connecting: tunnel %s already routes all traffic, and only one such tunnel can be connected at a time; disconnect it first"
+	// DaemonConflictAllowedIPsFmt takes this tunnel's AllowedIPs prefix,
+	// the other tunnel's prefix it overlaps, and the other tunnel's name.
+	DaemonConflictAllowedIPsFmt = "not connecting: AllowedIPs %s overlaps %s of tunnel %s, which is connected; disconnect it first or change the AllowedIPs"
+	// DaemonConflictListenPortFmt takes the port and the other tunnel's
+	// name.
+	DaemonConflictListenPortFmt = "not connecting: ListenPort %d is in use by tunnel %s; disconnect it first or change the ListenPort"
+	// Status warnings (ipc.TunnelStatus.Warning).
+	DaemonWarnDNSShared     = "DNS is not exclusive: the classic resolvconf keeps the other interfaces' DNS servers next to this tunnel's, so names may be sent outside the tunnel; install openresolv or systemd-resolved, or turn the kill switch on"
+	DaemonWarnDNSOverridden = "DNS servers set by hand for the active network (System Settings) take precedence over this tunnel's, so names may be sent outside the tunnel; remove them, or turn the kill switch on"
+	DaemonWarnDNSBusy       = "this tunnel's DNS servers are not applied: those of another tunnel already answer every name, and only one tunnel's can; disconnect that tunnel, then reconnect this one"
+	DaemonWarnNoRPFilter    = "this full tunnel runs without its reverse-path filter because nft is not installed; install nftables to enable it"
 )
 
 // Command line. None of these formats take a PIN, PUK or key; the ones that
@@ -234,9 +247,13 @@ are never tried automatically.`
 	DownAlreadyFmt = "tunnel %s is already disconnected"
 	DownDoneFmt    = "tunnel %s disconnected"
 	StatusNone     = "no tunnels configured"
-	StatusHeader   = "NAME\tSTATE\tIDENTITY\tLAST HANDSHAKE"
-	StatusRowFmt   = "%s\t%s\t%s\t%s"
+	StatusHeader   = "NAME\tSTATE\tIDENTITY\tLAST HANDSHAKE\tINTERFACE\tMTU\tROUTES\tDNS\tKILL SWITCH"
+	StatusRowFmt   = "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s"
 	StatusDash     = "-"
+	StatusFull     = "all"   // ROUTES of a full tunnel
+	StatusSplit    = "split" // ROUTES of any other tunnel
+	// StatusWarningFmt takes the tunnel name and the warning.
+	StatusWarningFmt = "warning: %s: %s"
 	// CLIUntrustedDaemonFmt takes the uid of the socket's owner process.
 	CLIUntrustedDaemonFmt = "refusing the service socket: it is served by uid %d, not by root or this user"
 )

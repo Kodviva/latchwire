@@ -86,10 +86,45 @@ type TunnelName struct {
 	Name string `json:"name"`
 }
 
-// TunnelStatus is one element of the tunnel.status result.
+// TunnelStatus is one element of the tunnel.status result. The fields after
+// LastHandshake were added later and are omitted when empty, so an older
+// CLI or daemon reads the answer as before.
+//
+// Interface, MTU and DNS describe the applied network configuration and are
+// set only while the tunnel is connected. DNS is one of the TunnelDNS
+// values. FullTunnel says whether the configuration routes everything
+// (0.0.0.0/0 or ::/0). KillSwitch is one of the KillSwitch values. Warning,
+// when set, is something about the applied configuration that the user
+// should act on (shared or overridden DNS, DNS not applied, no reverse-path
+// filter); several are joined with "; ".
 type TunnelStatus struct {
 	Name          string `json:"name"`
 	State         string `json:"state"`
 	Identity      string `json:"identity"`
 	LastHandshake string `json:"lastHandshake"`
+	Interface     string `json:"interface,omitempty"`
+	MTU           int    `json:"mtu,omitempty"`
+	FullTunnel    bool   `json:"fullTunnel,omitempty"`
+	DNS           string `json:"dns,omitempty"`
+	KillSwitch    string `json:"killSwitch,omitempty"`
+	Warning       string `json:"warning,omitempty"`
 }
+
+// TunnelStatus.DNS values: how the tunnel's DNS servers take part in name
+// resolution.
+const (
+	DNSStatusPrimary    = "primary"    // they answer every name
+	DNSStatusScoped     = "scoped"     // they answer the search domains only
+	DNSStatusNone       = "none"       // the tunnel has no DNS servers
+	DNSStatusIgnored    = "ignored"    // it has some, but another tunnel's answer (or scoping is unsupported)
+	DNSStatusShared     = "shared"     // primary, but other interfaces' servers stay in the list (classic resolvconf)
+	DNSStatusOverridden = "overridden" // primary, but servers set by hand take precedence (macOS)
+	DNSStatusBusy       = "busy"       // primary wanted, but another tunnel holds it: not applied
+)
+
+// TunnelStatus.KillSwitch values.
+const (
+	KillSwitchStatusOff      = "off"      // not on for this tunnel, or the tunnel is down
+	KillSwitchStatusArmed    = "armed"    // connected: only the tunnels' traffic passes
+	KillSwitchStatusBlocking = "blocking" // not connected (connecting, card removed, error): everything is blocked
+)
