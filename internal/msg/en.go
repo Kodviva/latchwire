@@ -307,6 +307,8 @@ are never tried automatically.`
 	// PolicyKillSwitchPendingFmt takes the tunnel name, the kill switch
 	// setting it runs with and the policy's.
 	PolicyKillSwitchPendingFmt = "note: tunnel %s still runs with kill switch %s; %s applies when it next connects"
+	// PolicyRevokedBlockingFmt takes the tunnel name.
+	PolicyRevokedBlockingFmt = "note: tunnel %[1]s was taken from a user who is no longer allowed and stays blocked by its kill switch; run sudo latchwire down %[1]s to lift it"
 	// CLIUntrustedDaemonFmt takes the uid of the socket's owner process.
 	CLIUntrustedDaemonFmt = "refusing the service socket: it is served by uid %d, not by root or this user"
 )

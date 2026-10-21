@@ -99,7 +99,9 @@ type TunnelName struct {
 // uids that may connect the tunnel besides the administrators.
 // KillSwitchInEffect, when set, is the kill switch setting the tunnel still
 // runs with (it is not disconnected): KillSwitch applies at its next
-// connect.
+// connect. RevokedBlocking (tunnel.policy.set) says that the change took
+// the tunnel from a user no longer allowed and its kill switch keeps
+// blocking until an administrator takes it down.
 type TunnelPolicy struct {
 	Name               string   `json:"name"`
 	KillSwitch         string   `json:"killSwitch"`
@@ -108,6 +110,7 @@ type TunnelPolicy struct {
 	TrustedNetworks    []string `json:"trustedNetworks,omitempty"`
 	AllowedUsers       []uint32 `json:"allowedUsers,omitempty"`
 	KillSwitchInEffect string   `json:"killSwitchInEffect,omitempty"`
+	RevokedBlocking    bool     `json:"revokedBlocking,omitempty"`
 }
 
 // TunnelPolicySet is the params of tunnel.policy.set: the changes to make

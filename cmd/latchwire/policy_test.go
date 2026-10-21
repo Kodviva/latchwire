@@ -116,6 +116,22 @@ func TestPolicyCLIParsesFlags(t *testing.T) {
 		t.Errorf("output lacks %q:\n%s", note, te.out)
 	}
 
+	// A deny that left the tunnel blocking.
+	te = newTestEnv(nil)
+	withUsers(te)
+	withRPC(te, &fakeRPC{replies: map[string]func(any, any) error{
+		ipc.MethodTunnelPolicySet: func(_, r any) error {
+			setResult(t, r, ipc.TunnelPolicy{Name: "office", KillSwitch: "on", RevokedBlocking: true})
+			return nil
+		},
+	}})
+	if code := run(context.Background(), te.env, []string{"policy", "office", "--deny-user", "bob"}); code != 0 {
+		t.Fatalf("exit %d: %s", code, te.errOut)
+	}
+	if note := fmt.Sprintf(msg.PolicyRevokedBlockingFmt, "office"); !strings.Contains(te.out.String(), note) {
+		t.Errorf("output lacks %q:\n%s", note, te.out)
+	}
+
 	// Mistakes never reach the daemon.
 	for _, tc := range []struct {
 		args []string

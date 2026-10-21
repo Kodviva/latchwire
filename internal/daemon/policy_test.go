@@ -13,6 +13,7 @@ import (
 
 	"github.com/Kodviva/latchwire/internal/ipc"
 	"github.com/Kodviva/latchwire/internal/keyref"
+	"github.com/Kodviva/latchwire/internal/killswitch"
 	"github.com/Kodviva/latchwire/internal/msg"
 )
 
@@ -404,8 +405,8 @@ func TestDenyRevokesUserBinding(t *testing.T) {
 	e.waitCard(serialA, true)
 	e.connect()
 
-	if _, err := e.m.setPolicy(ipc.TunnelPolicySet{Name: tunName, Deny: []uint32{uidA}}); err != nil {
-		t.Fatal(err)
+	if got, err := e.m.setPolicy(ipc.TunnelPolicySet{Name: tunName, Deny: []uint32{uidA}}); err != nil || got.RevokedBlocking {
+		t.Fatalf("deny: %+v, %v (no kill switch: nothing stays blocking)", got, err)
 	}
 	if st := e.status(); st.State != StateDisconnected {
 		t.Fatalf("state %q after denying the bound user, want disconnected", st.State)
@@ -530,5 +531,127 @@ func TestPolicyReportsKillSwitchInEffect(t *testing.T) {
 	}
 	if got, _ := e.m.getPolicy(tunName); got.KillSwitchInEffect != "" {
 		t.Fatalf("disconnected tunnel reports %q in effect", got.KillSwitchInEffect)
+	}
+}
+
+// A deny while the user's proof is in progress (the PIN being typed) is
+// seen when the tunnel is reserved: refused, nothing bound, no device. The
+// same for an auto-connect.
+func TestDenyDuringProofRefused(t *testing.T) {
+	for _, auto := range []bool{false, true} {
+		e := newEnv(t, envOpts{present: []uint32{}, admin: onlyAdmin})
+		srv := newServer(t, e.b.pub(serialA), "10.0.0.2")
+		if err := e.m.add(tunName, e.config([]keyref.Ref{refA}, []string{"10.0.0.2"}, srv, ""), uidB); err != nil {
+			t.Fatal(err)
+		}
+		if auto {
+			setAutoConnect(t, e.m)
+		}
+		gate := make(chan struct{})
+		fb := newLyingAgent(t, e, uidB, e.b.pub(serialA), e.b.cards[serialA].key, gate, serialA)
+		done := make(chan error, 1)
+		if !auto {
+			go func() {
+				_, err := e.m.requestConnect(context.Background(), uidB, tunName)
+				done <- err
+			}()
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for fb.x25519s.Load() == 0 {
+			if time.Now().After(deadline) {
+				t.Fatalf("auto %v: the proof never reached B's agent", auto)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		if _, err := e.m.setPolicy(ipc.TunnelPolicySet{Name: tunName, Deny: []uint32{uidB}}); err != nil {
+			t.Fatal(err)
+		}
+		close(gate)
+		if !auto {
+			select {
+			case err := <-done:
+				assertCode(t, err, ipc.CodeForbidden)
+				if want := fmt.Sprintf(msg.DaemonNotAllowedUserFmt, tunName); !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q, want %q", err, want)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("connect did not return")
+			}
+		} else {
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				e.m.mu.Lock()
+				pending := e.m.tunnels[tunName].autoPending
+				e.m.mu.Unlock()
+				if !pending {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("auto-connect did not end")
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+		}
+		e.unbound()
+		if n := e.f.count(); n != 0 {
+			t.Fatalf("auto %v: %d devices made for a denied user", auto, n)
+		}
+	}
+}
+
+// P21: denying the user of a tunnel whose kill switch is on leaves it
+// blocking but unbound (card_removed, no key, no user, also in the kill
+// switch record); the denied user's card reconnects nothing and that user
+// cannot take it down; an administrator's down lifts it.
+func TestRevokeArmedTunnelKeepsBlocking(t *testing.T) {
+	e := newEnv(t, envOpts{present: []uint32{serialA}, admin: onlyAdmin})
+	srv := newServer(t, e.b.pub(serialA), "10.0.0.2")
+	if err := e.m.add(tunName, e.config([]keyref.Ref{refA}, []string{"10.0.0.2"}, srv, ""), 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.m.setPolicy(ipc.TunnelPolicySet{Name: tunName, KillSwitch: KillSwitchOn, Allow: []uint32{uidA}}); err != nil {
+		t.Fatal(err)
+	}
+	e.waitCard(serialA, true)
+	e.connect()
+	e.fw.waitLast(t, "armed", func(s killswitch.State) bool { return s.Block && len(s.Tunnels) == 1 })
+
+	got, err := e.m.setPolicy(ipc.TunnelPolicySet{Name: tunName, Deny: []uint32{uidA}})
+	if err != nil || !got.RevokedBlocking {
+		t.Fatalf("deny: %+v, %v; want RevokedBlocking", got, err)
+	}
+	st := e.status()
+	if st.State != StateCardRemoved || st.Identity != "" || st.KillSwitch != ipc.KillSwitchStatusBlocking {
+		t.Fatalf("status %+v, want card_removed, unbound, blocking", st)
+	}
+	if tn := e.tunnel(); tn.hasRef || tn.adminBound || tn.dev != nil {
+		t.Fatalf("tunnel still bound or up: hasRef %v adminBound %v dev %v", tn.hasRef, tn.adminBound, tn.dev != nil)
+	}
+	e.fw.waitLast(t, "blocking, nothing passing", func(s killswitch.State) bool { return s.Block && len(s.Tunnels) == 0 })
+	rec, err := e.m.store.loadKillSwitchTunnels()
+	if err != nil || !reflect.DeepEqual(rec, []ksTunnel{{Name: tunName}}) {
+		t.Fatalf("kill switch record %+v, %v; want the tunnel unbound", rec, err)
+	}
+
+	prompts := e.p.count()
+	e.b.setPresent(serialA, false)
+	e.waitAgentCard(uidA, serialA, false)
+	e.b.setPresent(serialA, true)
+	e.waitAgentCard(uidA, serialA, true)
+	time.Sleep(300 * time.Millisecond)
+	if st := e.status(); st.State != StateCardRemoved {
+		t.Fatalf("state %q after the denied user's card came back", st.State)
+	}
+	if n := e.p.count(); n != prompts {
+		t.Fatalf("denied user asked for its PIN %d times", n-prompts)
+	}
+	assertCode(t, e.call(ipc.MethodTunnelDisconnect, ipc.TunnelName{Name: tunName}, nil), ipc.CodeForbidden)
+
+	if _, err := e.m.requestDisconnect(uidAdmin, tunName); err != nil {
+		t.Fatal(err)
+	}
+	e.fw.waitLast(t, "released", released)
+	if st := e.status(); st.State != StateDisconnected {
+		t.Fatalf("state %q after the administrator's down", st.State)
 	}
 }

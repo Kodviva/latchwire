@@ -166,6 +166,9 @@ func (e *env) printPolicy(p ipc.TunnelPolicy) {
 	if p.KillSwitchInEffect != "" {
 		fmt.Fprintf(e.stdout, msg.PolicyKillSwitchPendingFmt+"\n", p.Name, p.KillSwitchInEffect, p.KillSwitch)
 	}
+	if p.RevokedBlocking {
+		fmt.Fprintf(e.stdout, msg.PolicyRevokedBlockingFmt+"\n", p.Name)
+	}
 }
 
 // sudoUID is the user who ran this command through sudo (SUDO_UID), or 0.

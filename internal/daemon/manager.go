@@ -1166,10 +1166,12 @@ type connectOpts struct {
 // Unless admin, uid must be one of the tunnel's allowed users or an
 // administrator (P20): this is the one gate for a user's own connect, an
 // auto-connect and the reconnect when the card comes back. A reconnect of a
-// binding an administrator made (adminBound) is exempt. The policy decides
-// at the start (no PIN for a refusal) and again when the tunnel is
-// reserved, under polMu, so that a tunnel.policy.set that denies uid is
-// either seen there or finds the binding and revokes it.
+// binding an administrator made (adminBound) is exempt. Whether uid is an
+// administrator is looked up once; the policy file is read at the start (no
+// PIN for a refusal) and read again when the tunnel is reserved, under
+// polMu, where only that fresh read counts: a tunnel.policy.set that denies
+// uid (say while its PIN is typed) is either seen there or comes after the
+// binding and revokes it.
 //
 // Nothing about the tunnel changes until an agent has proved it holds the
 // configured key (R21), so a failed or stalled connect by another user can
@@ -1181,12 +1183,11 @@ func (m *Manager) connect(caller context.Context, name string, uid uint32, admin
 	if t == nil {
 		return ipc.TunnelStatus{}, errNotFound
 	}
-	// uidOK: uid may connect whatever AllowedUsers says (file I/O and the
-	// admin lookup stay outside Manager.mu).
-	uidOK := admin || m.store.policyFor(name).allows(uid)
-	if !uidOK {
-		uidOK = m.admin(uid)
-	}
+	// adminOK: uid may connect whatever AllowedUsers says. uidOK is the
+	// early answer, for the first step only. (File I/O and the admin lookup
+	// stay outside Manager.mu.)
+	adminOK := admin || m.admin(uid)
+	uidOK := adminOK || m.store.policyFor(name).allows(uid)
 	m.mu.Lock()
 	switch cur := m.tunnels[name]; {
 	case cur == nil:
@@ -1266,8 +1267,9 @@ func (m *Manager) connect(caller context.Context, name string, uid uint32, admin
 	case t.gen != gen0:
 		unlock()
 		return ipc.TunnelStatus{}, errAborted // disconnected or card removed meanwhile
-	case !uidOK && !exempt && !pol.allows(uid):
-		// The gen check above keeps exempt true: the binding is unchanged.
+	case !adminOK && !exempt && !pol.allows(uid):
+		// The gen check above keeps exempt as it was: the binding is
+		// unchanged.
 		unlock()
 		return ipc.TunnelStatus{}, notAllowed(name, uid)
 	}
@@ -1914,13 +1916,19 @@ func transientLookupErr(err error) bool {
 // teardown moves t to state and closes its device. cond, if set, is checked
 // under Manager.mu; teardown does nothing and returns false if it fails.
 func (m *Manager) teardown(t *tunnel, state string, cond func(*tunnel) bool) bool {
+	return m.teardownTo(t, &state, cond)
+}
+
+// teardownTo is teardown whose state is read after cond ran, so that cond
+// may choose it.
+func (m *Manager) teardownTo(t *tunnel, state *string, cond func(*tunnel) bool) bool {
 	m.mu.Lock()
 	if cond != nil && !cond(t) {
 		m.mu.Unlock()
 		return false
 	}
 	t.gen++
-	t.state = state
+	t.state = *state
 	if t.cancel != nil {
 		t.cancel()
 		t.cancel = nil
