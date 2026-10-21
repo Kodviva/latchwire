@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/Kodviva/latchwire/internal/msg"
 )
@@ -111,7 +112,8 @@ type configurer struct {
 	// carried are persistent undo steps an earlier configurer of the same
 	// owner could not run; they stay journaled ahead of this one's.
 	carried []Step
-	dn      darwinFollow // macOS: what Refresh follows
+	dn      darwinFollow     // macOS: what Refresh follows
+	now     func() time.Time // nil: time.Now
 }
 
 func newConfigurer(r Runner, j *Journal, p planner, full fullPlanner) *configurer {
@@ -178,8 +180,9 @@ func (c *configurer) recordLocked() error {
 }
 
 // applyStepLocked journals s's undo, then runs s and adds it to the applied
-// steps. A step skipped as allowed (a missing optional command, an existing
-// host route) reports ran false and leaves its undo out of the journal. On
+// steps. A step skipped as allowed (a missing optional command, a foreign
+// host route to the endpoint, see existingHostRoute) reports ran false and
+// leaves its undo out of the journal. On
 // failure the journal may still hold s's undo; the caller rolls back or
 // re-records.
 func (c *configurer) applyStepLocked(ctx context.Context, s step) (ran bool, err error) {
@@ -194,7 +197,17 @@ func (c *configurer) applyStepLocked(ctx context.Context, s step) (ran bool, err
 		case s.missing != "" && errors.Is(err, exec.ErrNotFound):
 			log.Print(s.missing)
 		case s.hostRoute && routeExists(err):
-			logExistingRoute(s.do)
+			retry, herr := existingHostRoute(ctx, c.run, s.do, c.dn.iface)
+			if herr != nil {
+				return false, herr
+			}
+			if retry {
+				if err := c.exec(ctx, s.do); err != nil {
+					return false, err
+				}
+				c.applied = append(c.applied, s)
+				return true, nil
+			}
 		default:
 			return false, err
 		}

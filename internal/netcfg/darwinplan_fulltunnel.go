@@ -9,6 +9,9 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/Kodviva/latchwire/internal/msg"
 )
 
 // A macOS full tunnel never replaces the default route: for each family with
@@ -117,10 +120,11 @@ func capturedEndpoints(eps []netip.AddrPort, v4, v6 bool) []netip.Addr {
 	return out
 }
 
-// routeInfo is what `route -n get` prints about the route it found.
+// routeInfo is what `route -n get` prints about the route it found. mask
+// is "" for a host route.
 type routeInfo struct {
-	dst, gateway, iface string
-	flags               []string
+	dst, mask, gateway, iface string
+	flags                     []string
 }
 
 // parseRouteGet reads `route -n get` output (C locale): "key: value" lines.
@@ -135,6 +139,8 @@ func parseRouteGet(out string) routeInfo {
 		switch strings.TrimSpace(k) {
 		case "destination":
 			ri.dst = v
+		case "mask":
+			ri.mask = v
 		case "gateway":
 			ri.gateway = v
 		case "interface":
@@ -147,6 +153,59 @@ func parseRouteGet(out string) routeInfo {
 		}
 	}
 	return ri
+}
+
+// prefix returns the destination of the route found as a prefix of the
+// family (v4 or not), or false when the output cannot be read as one.
+// route(8) prints the zero address as "default"; a missing mask means a
+// host route.
+func (ri routeInfo) prefix(v4 bool) (netip.Prefix, bool) {
+	zero := netip.IPv6Unspecified()
+	if v4 {
+		zero = netip.IPv4Unspecified()
+	}
+	addr := func(v string) (netip.Addr, bool) {
+		if v == "default" {
+			return zero, true
+		}
+		a, err := netip.ParseAddr(v)
+		return a, err == nil && a.Is4() == v4 && a.Zone() == ""
+	}
+	d, ok := addr(ri.dst)
+	if !ok {
+		return netip.Prefix{}, false
+	}
+	bits := d.BitLen()
+	if ri.mask != "" {
+		m, ok := addr(ri.mask)
+		if !ok {
+			return netip.Prefix{}, false
+		}
+		if bits, ok = maskBits(m); !ok {
+			return netip.Prefix{}, false
+		}
+	}
+	p, err := d.Prefix(bits)
+	return p, err == nil && p.Addr() == d
+}
+
+// maskBits returns the length of a contiguous netmask.
+func maskBits(m netip.Addr) (int, bool) {
+	n, ones := 0, true
+	for _, b := range m.AsSlice() {
+		for i := 7; i >= 0; i-- {
+			set := b&(1<<i) != 0
+			switch {
+			case set && !ones:
+				return 0, false
+			case set:
+				n++
+			default:
+				ones = false
+			}
+		}
+	}
+	return n, true
 }
 
 // gatewayAddr returns the route's gateway as an address of the family
@@ -232,8 +291,8 @@ func routeGet(ctx context.Context, r Runner, args []string) (routeInfo, bool, er
 }
 
 // hostRouteUndo recognises the undo of an endpoint host route and returns
-// the destination, the gateway it was added with and whether it is a
-// blackhole route.
+// the destination and the gateway it was added with (the loopback address
+// for a blackhole route).
 func hostRouteUndo(s Step) (dst, gw netip.Addr, ok bool) {
 	a := s.Args
 	if s.Name != "route" || len(a) != 7 || a[0] != "-q" || a[1] != "-n" || a[2] != "delete" {
@@ -254,36 +313,121 @@ func hostRouteUndo(s Step) (dst, gw netip.Addr, ok bool) {
 	return dst, gw, err == nil
 }
 
-// ownsHostRoute reports whether the route found for dst is the host route
-// to dst through gw (a blackhole route when blackhole is set).
-func ownsHostRoute(ri routeInfo, dst, gw netip.Addr, blackhole bool) bool {
-	d, err := netip.ParseAddr(ri.dst)
-	if err != nil || d != dst {
-		return false
+// ifaceRouteUndo recognises the undo of a route bound to an interface
+// (route -q -n delete -inet|-inet6 P -interface IFACE) and returns its
+// prefix and interface.
+func ifaceRouteUndo(s Step) (p netip.Prefix, iface string, ok bool) {
+	a := s.Args
+	if s.Name != "route" || len(a) != 7 || a[0] != "-q" || a[1] != "-n" || a[2] != "delete" || a[5] != "-interface" {
+		return
 	}
-	g, err := netip.ParseAddr(ri.gateway)
-	return err == nil && g == gw && slices.Contains(ri.flags, "BLACKHOLE") == blackhole
+	p, err := netip.ParsePrefix(a[4])
+	if err != nil || family(p) != a[3] || p != p.Masked() {
+		return netip.Prefix{}, "", false
+	}
+	return p, a[6], true
 }
 
-// runUndo runs one undo step. An undo whose target is already gone
-// succeeded (see alreadyUndone). Before deleting an endpoint host route it
-// checks that the route is still the one that was added: macOS matches a
-// delete by destination only, so the delete alone could remove a route that
-// somebody else has put there since; such a route is left alone.
-func runUndo(ctx context.Context, r Runner, s Step) error {
+// undoTargetOurs reports whether the route an undo step deletes is still
+// the one Latchwire added. macOS matches a route delete by destination
+// only (the -gateway and -interface arguments do not narrow it), so a bare
+// delete could remove a route that somebody else has put there since, such
+// as another VPN's 0.0.0.0/1 after a crash. The route found by `route -n
+// get` must have the same prefix and, for an endpoint host route, the same
+// gateway (and blackhole flag) or, for an interface route, the same
+// interface. A different prefix means ours is gone; output that cannot be
+// read leaves the route in place: a leak is safer than deleting another
+// tool's route. Other steps are not checked.
+func undoTargetOurs(ctx context.Context, r Runner, s Step) (bool, error) {
+	var (
+		want  netip.Prefix
+		query string
+		match func(routeInfo) bool
+	)
 	if dst, gw, ok := hostRouteUndo(s); ok {
-		ri, found, err := routeGet(ctx, r, []string{"-n", "get", addrFamily(dst), dst.String()})
-		if err != nil {
-			return fmt.Errorf("route -n get %s: %w", dst, err)
+		want, query = netip.PrefixFrom(dst, dst.BitLen()), dst.String()
+		blackhole := slices.Contains(s.Args, "-blackhole")
+		match = func(ri routeInfo) bool {
+			g, err := netip.ParseAddr(ri.gateway)
+			return err == nil && g == gw && slices.Contains(ri.flags, "BLACKHOLE") == blackhole
 		}
-		if !found || !ownsHostRoute(ri, dst, gw, slices.Contains(s.Args, "-blackhole")) {
-			return nil
-		}
+	} else if p, iface, ok := ifaceRouteUndo(s); ok {
+		want, query = p, p.String()
+		match = func(ri routeInfo) bool { return ri.iface == iface }
+	} else {
+		return true, nil
+	}
+	ri, found, err := routeGet(ctx, r, []string{"-n", "get", family(want), query})
+	if err != nil {
+		return false, fmt.Errorf("route -n get %s: %w", query, err)
+	}
+	if !found {
+		return false, nil
+	}
+	got, ok := ri.prefix(want.Addr().Is4())
+	switch {
+	case !ok:
+		log.Printf("netcfg: %s: cannot read the route in place for %s; leaving it alone", s, query)
+		return false, nil
+	case got != want:
+		return false, nil // gone: a covering route answered
+	case !match(ri):
+		log.Printf("netcfg: %s: the route in place for %s is not the one Latchwire added; leaving it alone", s, query)
+		return false, nil
+	}
+	return true, nil
+}
+
+// runUndo runs one undo step. An undo whose target is already gone, or is
+// no longer ours (undoTargetOurs), succeeded (see also alreadyUndone).
+func runUndo(ctx context.Context, r Runner, s Step) error {
+	ours, err := undoTargetOurs(ctx, r, s)
+	if err != nil {
+		return err
+	}
+	if !ours {
+		return nil
 	}
 	if _, err := r.Run(ctx, s.Name, s.Args, s.Stdin); err != nil && !alreadyUndone(s, err) {
 		return fmt.Errorf("%s: %w", s, err)
 	}
 	return nil
+}
+
+// existingHostRoute decides what to do when adding the endpoint host route
+// do failed because a route to the endpoint exists already. A route into
+// the tunnel interface own would make the endpoint unreachable: that is an
+// error. A blackhole route to exactly the endpoint is stale (a lost
+// journal, a leaked undo): it is deleted and retry is set, so do runs
+// again and the route becomes ours. Anything else (another gateway,
+// another VPN's interface) belongs to somebody else and is left alone.
+func existingHostRoute(ctx context.Context, r Runner, do Step, own string) (retry bool, err error) {
+	dst, err := netip.ParseAddr(do.Args[4])
+	if err != nil {
+		return false, err
+	}
+	fam := addrFamily(dst)
+	ri, found, err := routeGet(ctx, r, []string{"-n", "get", fam, dst.String()})
+	if err != nil {
+		return false, fmt.Errorf("route -n get %s: %w", dst, err)
+	}
+	if !found {
+		return true, nil // gone meanwhile
+	}
+	p, ok := ri.prefix(dst.Is4())
+	switch {
+	case ri.iface == own:
+		return false, fmt.Errorf(msg.NetEndpointRouteLoopFmt, dst, own)
+	case ok && p.Bits() == dst.BitLen() && p.Addr() == dst && slices.Contains(ri.flags, "BLACKHOLE"):
+		del := command("route", "-q", "-n", "delete", fam, dst.String(), loopback(dst), "-blackhole")
+		log.Printf("netcfg: replacing a stale blackhole route to the endpoint %s", dst)
+		if _, err := r.Run(ctx, del.Name, del.Args, nil); err != nil && !alreadyUndone(del, err) {
+			return false, fmt.Errorf("%s: %w", del, err)
+		}
+		return true, nil
+	}
+	log.Printf("netcfg: %s: a route to the endpoint exists already (interface %s); leaving it alone", do, ri.iface)
+	return false, nil
 }
 
 // darwinFollow is what a macOS configurer keeps for Refresh.
@@ -297,6 +441,24 @@ type darwinFollow struct {
 	eps  [2][]netip.Addr
 	gw   [2]netip.Addr
 	phys [2]string
+	// failGW is the gateway a move to failed at failAt (failed set): it
+	// is not tried again before moveBackoff.
+	failed [2]bool
+	failGW [2]netip.Addr
+	failAt [2]time.Time
+}
+
+// moveBackoff is how long a failed move of the endpoint routes to one
+// gateway is not retried, unless the gateway changes again. Without it a
+// move that keeps failing would retry on every network event (P9).
+const moveBackoff = 30 * time.Second
+
+// gwString names a gateway for messages.
+func gwString(gw netip.Addr) string {
+	if !gw.IsValid() {
+		return "none (blackhole)"
+	}
+	return gw.String()
 }
 
 // darwinFullTunnel is the macOS fullPlanner: it reads the default route of
@@ -350,8 +512,17 @@ func (c *configurer) refreshDarwin(ctx context.Context) error {
 		if !ok || h.gw == d.gw[f] {
 			continue
 		}
+		now := c.clock()
+		if d.failed[f] && d.failGW[f] == h.gw && now.Sub(d.failAt[f]) < moveBackoff {
+			continue
+		}
 		if err := c.moveEndpointRoutesLocked(ctx, f, h.gw); err != nil {
+			d.failed[f], d.failGW[f], d.failAt[f] = true, h.gw, now
+			log.Printf("netcfg: %s: moving the endpoint routes to gateway %s failed (retried on the next network change after %v, or when the gateway changes): %v",
+				d.iface, gwString(h.gw), moveBackoff, err)
 			errs = append(errs, err)
+		} else {
+			d.failed[f] = false
 		}
 	}
 	if d.mtuAuto {
@@ -422,8 +593,10 @@ func mustHostRouteDst(s step) netip.Addr {
 	return a
 }
 
-// logExistingRoute says that an endpoint already had a host route, which is
-// then left as it is.
-func logExistingRoute(s Step) {
-	log.Printf("netcfg: %s: a route to the endpoint exists already; leaving it alone", s)
+// clock returns the current time (c.now in tests).
+func (c *configurer) clock() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
 }

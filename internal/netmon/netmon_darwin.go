@@ -92,8 +92,8 @@ const routeNoise = syscall.RTF_LLINFO | syscall.RTF_WASCLONED
 // classifyRoute decides whether the messages signal a network change, and
 // which interface (by name) they concern. Interface changes, address changes
 // and added, deleted or changed routes count; replies to route lookups
-// (RTM_GET), misses, redirects, multicast group changes and the kernel's own
-// neighbour and cloned routes do not. The name is "" unless every counted
+// (RTM_GET), failed route requests, misses, redirects, multicast group
+// changes and the kernel's own neighbour and cloned routes do not. The name is "" unless every counted
 // message names the same interface.
 func classifyRoute(msgs []route.Message, byIndex func(int) string) (iface string, ok bool) {
 	var names []string
@@ -113,7 +113,10 @@ func classifyRoute(msgs []route.Message, byIndex func(int) string) (iface string
 			default:
 				continue
 			}
-			if m.Flags&routeNoise != 0 {
+			// A failed request (rtm_errno set) is echoed to every
+			// routing socket but changed nothing; counting it would
+			// let a failing route change in Refresh trigger itself.
+			if m.Flags&routeNoise != 0 || m.Err != nil {
 				continue
 			}
 			names = append(names, byIndex(m.Index))

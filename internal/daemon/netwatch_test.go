@@ -1,8 +1,11 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
+	"os"
 	"runtime"
 	"strings"
 	"testing"
@@ -157,5 +160,31 @@ func TestFullTunnelWithoutTable(t *testing.T) {
 	defer cfg.mu.Unlock()
 	if cfg.fwmark != 0 || len(cfg.routes) != 1 || cfg.routes[0].Bits() != 0 || cfg.mtuAuto {
 		t.Errorf("plan FwMark %d routes %v MTUAuto %v, want 0, 0.0.0.0/0, false", cfg.fwmark, cfg.routes, cfg.mtuAuto)
+	}
+}
+
+type failingSource struct{}
+
+func (failingSource) Next(context.Context) (string, error) {
+	return "", errors.New("route socket closed")
+}
+
+// When the notifications stop for good the daemon says so: endpoint routes
+// and the MTU no longer follow the network.
+func TestWatchNetworkLogsSourceFailure(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+	m := NewManager(Options{})
+	m.netSource = func() (netmon.Source, error) { return failingSource{}, nil }
+	done := make(chan struct{})
+	go func() { m.watchNetwork(context.Background()); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("watchNetwork did not return after the source failed")
+	}
+	if !strings.Contains(buf.String(), "network change notifications stopped") {
+		t.Errorf("log %q does not report the stop", buf.String())
 	}
 }

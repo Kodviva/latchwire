@@ -106,12 +106,20 @@ func TestDarwinApplyIPv6AndRemove(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.cmds = nil
+	// The routes are still in place (route -n get shows them on utun3).
+	r.out = map[string]string{
+		"route -n get -inet 10.0.0.1/32": ifaceRoute("10.0.0.1", "", "utun3"),
+		"route -n get -inet6 fd00::/64":  ifaceRoute("fd00::", "ffff:ffff:ffff:ffff::", "utun3"),
+	}
 	if err := c.Remove(ctx); err != nil {
 		t.Fatal(err)
 	}
-	// Everything Apply did is undone in reverse order.
+	// Everything Apply did is undone in reverse order, each route after
+	// checking it is ours.
 	want := []string{
+		"route -n get -inet 10.0.0.1/32",
 		"route -q -n delete -inet 10.0.0.1/32 -interface utun3",
+		"route -n get -inet6 fd00::/64",
 		"route -q -n delete -inet6 fd00::/64 -interface utun3",
 		"ifconfig utun3 inet6 fd00::2 -alias",
 	}

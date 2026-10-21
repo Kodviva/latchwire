@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Errors as ExecRunner reports them (C locale, stderr appended).
@@ -298,12 +299,14 @@ func TestEndpointRouteFollowsGatewayChange(t *testing.T) {
 	}
 }
 
-// A failed move is retried by the next Refresh, and the journal never holds
+// A failed move is retried by a later Refresh, and the journal never holds
 // the undo of a route that was not added.
 func TestEndpointRouteMoveRetried(t *testing.T) {
 	j, _ := newJournal(t)
 	r := &recorder{out: map[string]string{"route -n get default": defaultVia("192.168.1.1", "en0")}}
-	c := newDarwin(r, j)
+	now := time.Unix(1_800_000_000, 0)
+	c := newDarwin(r, j).(*configurer)
+	c.now = func() time.Time { return now }
 	p := plan("utun7", pfx("10.0.0.2/32"), pfx("0.0.0.0/0"))
 	p.Endpoints = eps("203.0.113.5:51820")
 	if _, err := c.Apply(ctx, p); err != nil {
@@ -321,6 +324,7 @@ func TestEndpointRouteMoveRetried(t *testing.T) {
 	r.fail = nil
 	delete(r.out, "route -n get -inet 203.0.113.5")
 	r.fail = map[string]error{"route -n get -inet 203.0.113.5": errNotInTable}
+	now = now.Add(moveBackoff) // see TestEndpointRouteMoveBackoff
 	r.cmds = nil
 	if err := c.Refresh(ctx); err != nil {
 		t.Fatal(err)
@@ -543,5 +547,226 @@ func TestParseRouteGet(t *testing.T) {
 	}
 	if ri := parseRouteGet(""); ri.dst != "" || ri.gateway != "" || ri.iface != "" || ri.flags != nil {
 		t.Errorf("empty output parsed as %+v", ri)
+	}
+}
+
+// ifaceRoute is `route -n get` output for an interface route (no gateway)
+// to dst/mask ("" mask: a host route) on iface.
+func ifaceRoute(dst, mask, iface string) string {
+	m := ""
+	if mask != "" {
+		m = "       mask: " + mask + "\n"
+	}
+	return fmt.Sprintf("   route to: %s\ndestination: %s\n%s  interface: %s\n      flags: <UP,DONE,STATIC>\n", dst, dst, m, iface)
+}
+
+// An AllowedIPs entry that is exactly a full-tunnel endpoint would send the
+// endpoint's packets into the tunnel and collide with its host route; it is
+// left out (a wider prefix is harmless: the host route is more specific).
+func TestDarwinEndpointPrefixNotRoutedIntoTunnel(t *testing.T) {
+	r := &recorder{out: map[string]string{"route -n get default": defaultVia("192.168.1.1", "en0")}}
+	p := plan("utun7", pfx("10.0.0.2/32"), pfx("0.0.0.0/0", "203.0.113.5/32", "203.0.113.0/24", "198.51.100.1/32"))
+	p.Endpoints = eps("203.0.113.5:51820")
+	if _, err := newDarwin(r, nil).Apply(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []string{
+		"route -q -n add -inet 203.0.113.0/24 -interface utun7",
+		"route -q -n add -inet 198.51.100.1/32 -interface utun7",
+		"route -q -n add -inet 203.0.113.5 -gateway 192.168.1.1",
+	} {
+		if !slices.Contains(r.cmds, c) {
+			t.Errorf("%q not run: %q", c, r.cmds)
+		}
+	}
+	if slices.Contains(r.cmds, "route -q -n add -inet 203.0.113.5/32 -interface utun7") {
+		t.Errorf("endpoint routed into the tunnel: %q", r.cmds)
+	}
+	// A split tunnel keeps its routes as they are.
+	do, _ := render(planDarwin(Plan{Iface: "utun7", Routes: pfx("203.0.113.5/32"), Endpoints: eps("203.0.113.5:51820")}))
+	if want := []string{"route -q -n add -inet 203.0.113.5/32 -interface utun7"}; !reflect.DeepEqual(do, want) {
+		t.Errorf("split tunnel: %q, want %q", do, want)
+	}
+}
+
+// A route to the endpoint that is already in place is looked at: one into
+// the tunnel itself fails the connect, a stale blackhole is replaced, and
+// only a foreign gateway or interface route is left alone.
+func TestDarwinExistingEndpointRoute(t *testing.T) {
+	const (
+		add = "route -q -n add -inet 203.0.113.5 -gateway 192.168.1.1"
+		get = "route -n get -inet 203.0.113.5"
+		del = "route -q -n delete -inet 203.0.113.5 127.0.0.1 -blackhole"
+	)
+	apply := func(existing string) (*recorder, *Journal, error) {
+		j, _ := newJournal(t)
+		r := &recorder{
+			out:  map[string]string{"route -n get default": defaultVia("192.168.1.1", "en0"), get: existing},
+			fail: map[string]error{add: errExists},
+		}
+		r.onRun = func(c string) {
+			if c == del {
+				delete(r.fail, add) // the stale route is gone
+			}
+		}
+		p := plan("utun7", pfx("10.0.0.2/32"), pfx("0.0.0.0/0"))
+		p.Endpoints = eps("203.0.113.5:51820")
+		_, err := newDarwin(r, j).Apply(ctx, p)
+		return r, j, err
+	}
+
+	// Into our own tunnel.
+	r, j, err := apply(ifaceRoute("203.0.113.5", "", "utun7"))
+	if err == nil || !strings.Contains(err.Error(), "203.0.113.5") || !strings.Contains(err.Error(), "utun7") {
+		t.Errorf("own tunnel: err = %v, want the endpoint route error", err)
+	}
+	if len(j.Entries()) != 0 {
+		t.Errorf("own tunnel: journal %v after the failed Apply", j.Entries())
+	}
+
+	// A stale blackhole (a lost journal): replaced by ours, journaled.
+	r, j, err = apply(hostVia("203.0.113.5", "127.0.0.1", "lo0", "UP,GATEWAY,HOST,DONE,STATIC,BLACKHOLE"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := slices.Index(r.cmds, del)
+	if i < 0 || slices.Index(r.cmds[i:], add) < 0 {
+		t.Errorf("stale blackhole: commands %q, want the delete then the add", r.cmds)
+	}
+	if got, want := hostRouteUndos(j, "utun7"), []string{"P route -q -n delete -inet 203.0.113.5 -gateway 192.168.1.1"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("stale blackhole: journal %q, want %q", got, want)
+	}
+
+	// Foreign routes: another gateway, another VPN's interface.
+	for _, existing := range []string{
+		hostVia("203.0.113.5", "192.168.1.99", "en0", hostFlags),
+		ifaceRoute("203.0.113.5", "", "utun3"),
+	} {
+		r, j, err = apply(existing)
+		if err != nil {
+			t.Fatalf("foreign route: %v", err)
+		}
+		if slices.ContainsFunc(r.cmds, func(c string) bool { return strings.HasPrefix(c, "route -q -n delete") }) {
+			t.Errorf("foreign route touched: %q", r.cmds)
+		}
+		if got := hostRouteUndos(j, "utun7"); len(got) != 0 {
+			t.Errorf("foreign route journaled as ours: %q", got)
+		}
+	}
+}
+
+// P9: a gateway move that failed is not retried for the same gateway within
+// the back-off (each failure would otherwise cause the next event), but is
+// at once when the gateway changes again, and after the back-off.
+func TestEndpointRouteMoveBackoff(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	r := &recorder{out: map[string]string{"route -n get default": defaultVia("192.168.1.1", "en0")}}
+	c := newDarwin(r, nil).(*configurer)
+	c.now = func() time.Time { return now }
+	p := plan("utun7", pfx("10.0.0.2/32"), pfx("0.0.0.0/0"))
+	p.Endpoints = eps("203.0.113.5:51820")
+	if _, err := c.Apply(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	r.out["route -n get default"] = defaultVia("10.0.0.1", "en1")
+	r.fail = map[string]error{
+		"route -n get -inet 203.0.113.5":                       errNotInTable,
+		"route -q -n add -inet 203.0.113.5 -gateway 10.0.0.1":  errors.New("exit status 1: route: writing to routing socket: Network is unreachable"),
+		"route -q -n add -inet 203.0.113.5 -gateway 10.0.0.99": errors.New("exit status 1: route: writing to routing socket: Network is unreachable"),
+	}
+	if err := c.Refresh(ctx); err == nil {
+		t.Fatal("Refresh succeeded although the add failed")
+	}
+	moved := func() bool {
+		return slices.ContainsFunc(r.cmds, func(c string) bool { return strings.HasPrefix(c, "route -q -n add") })
+	}
+	now = now.Add(10 * time.Second)
+	r.cmds = nil
+	if err := c.Refresh(ctx); err != nil || moved() {
+		t.Fatalf("within the back-off: err=%v cmds=%q, want no attempt", err, r.cmds)
+	}
+	// Another gateway: tried at once.
+	r.out["route -n get default"] = defaultVia("10.0.0.99", "en1")
+	r.cmds = nil
+	if err := c.Refresh(ctx); err == nil || !moved() {
+		t.Fatalf("new gateway: err=%v cmds=%q, want an attempt", err, r.cmds)
+	}
+	// Back to the first gateway, which has its own back-off no more.
+	r.out["route -n get default"] = defaultVia("10.0.0.1", "en1")
+	delete(r.fail, "route -q -n add -inet 203.0.113.5 -gateway 10.0.0.1")
+	r.cmds = nil
+	if err := c.Refresh(ctx); err != nil || !moved() {
+		t.Fatalf("after another gateway: err=%v cmds=%q, want the move", err, r.cmds)
+	}
+
+	// The same gateway is retried once the back-off is over.
+	r.out["route -n get default"] = defaultVia("10.0.0.99", "en1")
+	r.fail["route -n get -inet 203.0.113.5"] = errNotInTable
+	if err := c.Refresh(ctx); err == nil {
+		t.Fatal("move to 10.0.0.99 succeeded")
+	}
+	now = now.Add(moveBackoff - time.Second)
+	r.cmds = nil
+	if c.Refresh(ctx); moved() {
+		t.Fatalf("before the back-off ends: %q", r.cmds)
+	}
+	now = now.Add(2 * time.Second)
+	r.cmds = nil
+	if c.Refresh(ctx); !moved() {
+		t.Fatalf("after the back-off: %q, want an attempt", r.cmds)
+	}
+}
+
+// Interface routes are deleted by destination on macOS too, so their undo
+// checks that the route in place is ours (same prefix, our interface): a
+// crash must not let the startup cleanup delete another VPN's 0/1 routes.
+func TestInterfaceRouteUndoTouchesOnlyOwnRoute(t *testing.T) {
+	const (
+		get = "route -n get -inet 0.0.0.0/1"
+		del = "route -q -n delete -inet 0.0.0.0/1 -interface utun7"
+	)
+	undo := undoOf("route", "-q", "-n", "delete", "-inet", "0.0.0.0/1", "-interface", "utun7")
+	for name, tc := range map[string]struct {
+		out     string
+		deleted bool
+	}{
+		"ours":           {ifaceRoute("default", "128.0.0.0", "utun7"), true},
+		"ours, dotted":   {ifaceRoute("0.0.0.0", "128.0.0.0", "utun7"), true},
+		"another VPN":    {ifaceRoute("default", "128.0.0.0", "utun9"), false},
+		"gone, covering": {defaultVia("192.168.1.1", "en0"), false},
+		"unrecognised":   {"route: something else\n", false},
+	} {
+		j, _ := newJournal(t)
+		if err := j.Record("utun7", []Step{*undo}); err != nil {
+			t.Fatal(err)
+		}
+		r := &recorder{out: map[string]string{get: tc.out}}
+		if err := Cleanup(ctx, r, j, nil); err != nil {
+			t.Errorf("%s: Cleanup: %v", name, err)
+		}
+		if got := slices.Contains(r.cmds, del); got != tc.deleted {
+			t.Errorf("%s: deleted = %v, want %v (commands %q)", name, got, tc.deleted, r.cmds)
+		}
+		if len(j.Entries()) != 0 {
+			t.Errorf("%s: journal %v, want forgotten", name, j.Entries())
+		}
+	}
+
+	// IPv6 and a host-length prefix (no mask line).
+	for _, tc := range []struct {
+		undo     *Step
+		get, out string
+	}{
+		{undoOf("route", "-q", "-n", "delete", "-inet6", "8000::/1", "-interface", "utun7"),
+			"route -n get -inet6 8000::/1", ifaceRoute("8000::", "8000::", "utun7")},
+		{undoOf("route", "-q", "-n", "delete", "-inet", "10.0.0.1/32", "-interface", "utun7"),
+			"route -n get -inet 10.0.0.1/32", ifaceRoute("10.0.0.1", "", "utun7")},
+		{undoOf("route", "-q", "-n", "delete", "-inet", "10.0.0.1/32", "-interface", "utun7"),
+			"route -n get -inet 10.0.0.1/32", ifaceRoute("10.0.0.1", "255.255.255.255", "utun7")},
+	} {
+		r := &recorder{out: map[string]string{tc.get: tc.out}}
+		if err := runUndo(ctx, r, *tc.undo); err != nil || !slices.Contains(r.cmds, tc.undo.String()) {
+			t.Errorf("%s: err=%v cmds=%q, want deleted", tc.undo, err, r.cmds)
+		}
 	}
 }

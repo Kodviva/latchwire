@@ -334,6 +334,9 @@ func (m *Manager) watchNetwork(ctx context.Context) {
 	for range netmon.Watch(ctx, src, m.netDebounce, m.ownIface) {
 		m.refreshAll(ctx)
 	}
+	if ctx.Err() == nil {
+		log.Print("daemon: network change notifications stopped (the source failed); endpoint routes and the MTU no longer follow the network until restart")
+	}
 }
 
 // ownIface reports whether name is the interface of one of the tunnels.

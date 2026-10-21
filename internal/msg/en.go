@@ -76,6 +76,9 @@ const (
 const (
 	NetFullTunnelUnsupported = "routing all traffic through the tunnel (AllowedIPs 0.0.0.0/0 or ::/0) is not supported yet; list the networks to reach instead"
 	NetAlreadyApplied        = "network configuration is already applied to this interface"
+	// NetEndpointRouteLoopFmt takes the endpoint address and the tunnel
+	// interface.
+	NetEndpointRouteLoopFmt = "a route to the endpoint %s already leads into the tunnel interface %s, so the tunnel could not reach its peer; remove the route or keep the endpoint address out of AllowedIPs"
 	// NetNoRPFilterFmt takes the interface name.
 	NetNoRPFilterFmt = "nft is not installed: the full tunnel on %s runs without its reverse-path filter (packets addressed to the tunnel that arrive on other interfaces are not dropped); install nftables to enable it"
 )

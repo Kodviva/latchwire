@@ -29,6 +29,8 @@ func TestClassifyRoute(t *testing.T) {
 		{"route miss is not a change", []route.Message{&route.RouteMessage{Type: syscall.RTM_MISS}}, "", false},
 		{"multicast address is not a change", []route.Message{&route.InterfaceMulticastAddrMessage{Type: syscall.RTM_NEWMADDR, Index: 4}}, "", false},
 		{"neighbour cache entry is not a change", []route.Message{&route.RouteMessage{Type: syscall.RTM_ADD, Index: 4, Flags: syscall.RTF_LLINFO}}, "", false},
+		{"failed route add is not a change", []route.Message{&route.RouteMessage{Type: syscall.RTM_ADD, Index: 4, Err: syscall.EEXIST}}, "", false},
+		{"failed route delete is not a change", []route.Message{&route.RouteMessage{Type: syscall.RTM_DELETE, Index: 4, Err: syscall.ESRCH}}, "", false},
 		{"cloned host route is not a change", []route.Message{&route.RouteMessage{Type: syscall.RTM_DELETE, Index: 4, Flags: syscall.RTF_WASCLONED}}, "", false},
 		{"unknown index", []route.Message{&route.RouteMessage{Type: syscall.RTM_ADD, Index: 99}}, "", true},
 		{"nothing parsed", nil, "", false},
