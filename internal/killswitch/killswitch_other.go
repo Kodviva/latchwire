@@ -1,11 +1,10 @@
-//go:build !linux
+//go:build !linux && !darwin
 
 package killswitch
 
 import "github.com/Kodviva/latchwire/internal/netcfg"
 
-// newPlatform: no kill switch here yet (macOS pf comes later; Windows has
-// none).
+// newPlatform: no kill switch here (Windows has none yet).
 func newPlatform(netcfg.Runner, *netcfg.Journal) (Firewall, error) {
 	return nil, ErrUnsupported
 }

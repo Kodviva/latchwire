@@ -41,6 +41,7 @@ import (
 	"github.com/Kodviva/latchwire/internal/keyprovider"
 	"github.com/Kodviva/latchwire/internal/keyprovider/wgadapter"
 	"github.com/Kodviva/latchwire/internal/keyref"
+	"github.com/Kodviva/latchwire/internal/killswitch"
 	"github.com/Kodviva/latchwire/internal/msg"
 	"github.com/Kodviva/latchwire/internal/netcfg"
 	"github.com/Kodviva/latchwire/internal/netmon"
@@ -71,6 +72,10 @@ const (
 	// it, every tunnel of that user whose card no agent reports is torn down
 	// to card_removed (spec §5.5).
 	agentGrace = 10 * time.Second
+
+	// killSwitchTimeout bounds one Firewall.Set (pf runs up to four
+	// commands).
+	killSwitchTimeout = 45 * time.Second
 )
 
 // TUNFactory creates the TUN device for a tunnel and the Configurer for its
@@ -94,6 +99,9 @@ type Options struct {
 	// configuration is checked when nothing signals a network change;
 	// 0 = 30 s.
 	VerifyEvery time.Duration
+	// Firewall is the kill switch; nil = killswitch.New(Runner, journal),
+	// made the first time the kill switch is needed.
+	Firewall killswitch.Firewall
 }
 
 // DefaultTUN returns the factory that creates kernel TUN devices (utunN on
@@ -153,6 +161,17 @@ type Manager struct {
 	ops         devOps
 	// agentGrace is the agentGrace constant; tests shorten it.
 	agentGrace time.Duration
+	journal    *netcfg.Journal // set by Serve
+
+	// The kill switch. ksMu serializes Firewall.Set calls (and orders
+	// them: the state set is computed inside); it is never taken with mu
+	// held. fw is Options.Firewall or made on first use (fwErr: the
+	// platform has none). ksLast is the state in place (nil: unknown,
+	// the next sync sets it whatever it is).
+	ksMu   sync.Mutex
+	fw     killswitch.Firewall
+	fwErr  error
+	ksLast *killswitch.State
 
 	mu      sync.Mutex
 	ctx     context.Context // Serve's ctx; tunnel lifetimes derive from it
@@ -193,14 +212,22 @@ type tunnel struct {
 	cfgr   netcfg.Configurer
 	iface  string // the device's interface (utunN on macOS)
 	devGen uint64
+	// policy is the tunnel's policy, read at load, add and every connect.
+	policy Policy
+	// What the kill switch passes for the device: the resolved endpoints,
+	// the UDP port the device is bound to, and the mark of its socket and
+	// endpoint lookups (Linux full tunnel; set while connecting).
+	endpoints  []netip.AddrPort
+	listenPort uint16
+	mark       uint32
 	// abort is cancelled by every teardown: a connect still proving an
 	// agent (and maybe waiting for a PIN) then gives up.
 	abort       context.Context
 	abortCancel context.CancelFunc
 }
 
-func newTunnel(name string, cfg *config.Tunnel) *tunnel {
-	t := &tunnel{name: name, cfg: cfg, state: StateDisconnected}
+func newTunnel(name string, cfg *config.Tunnel, pol Policy) *tunnel {
+	t := &tunnel{name: name, cfg: cfg, state: StateDisconnected, policy: pol}
 	t.abort, t.abortCancel = context.WithCancel(context.Background())
 	return t
 }
@@ -225,6 +252,8 @@ func NewManager(o Options) *Manager {
 		netSource:   netmon.NewSource,
 		netDebounce: netDebounce,
 		verifyEvery: o.VerifyEvery,
+		fw:          o.Firewall,
+		ksLast:      &killswitch.State{}, // Serve finds out what a crash left
 	}
 	if m.verifyEvery <= 0 {
 		m.verifyEvery = verifyEvery
@@ -259,10 +288,14 @@ func (m *Manager) load() error {
 	if err != nil {
 		return err
 	}
+	pols := make(map[string]Policy, len(ts))
+	for name := range ts {
+		pols[name] = m.store.policyFor(name)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for name, cfg := range ts {
-		m.tunnels[name] = newTunnel(name, cfg)
+		m.tunnels[name] = newTunnel(name, cfg, pols[name])
 	}
 	return nil
 }
@@ -273,12 +306,17 @@ func (m *Manager) Serve(ctx context.Context) error {
 	m.mu.Lock()
 	m.ctx = ctx
 	m.mu.Unlock()
-	// Undo what a crashed run left in the system before anything is loaded.
+	// Undo what a crashed run left in the system before anything is
+	// loaded, except an active kill switch: it keeps blocking (fail
+	// closed) until its tunnels are taken down.
 	j, err := netcfg.OpenJournal(m.jpath)
 	if err != nil {
 		return err
 	}
-	if err := netcfg.Cleanup(ctx, m.runner, j, nil); err != nil {
+	m.journal = j
+	ksHeld := len(j.Entries()[killswitch.JournalOwner]) > 0
+	keep := func(owner string) bool { return owner == killswitch.JournalOwner }
+	if err := netcfg.Cleanup(ctx, m.runner, j, keep); err != nil {
 		log.Printf("daemon: cleaning up after the previous run: %v", err)
 	}
 	if m.tun == nil {
@@ -287,6 +325,7 @@ func (m *Manager) Serve(ctx context.Context) error {
 	if err := m.load(); err != nil {
 		return err
 	}
+	m.startKillSwitch(ksHeld, j.RecoveredFromCorruption())
 	l, err := ipc.Listen(m.socket)
 	if err != nil {
 		return err
@@ -585,7 +624,7 @@ func (m *Manager) add(name, text string) error {
 		log.Printf("daemon: store %s: %v", name, err)
 		return &ipc.Error{Code: ipc.CodeInternal, Message: fmt.Sprintf(msg.DaemonStoreFailedFmt, err)}
 	}
-	m.tunnels[name] = newTunnel(name, cfg)
+	m.tunnels[name] = newTunnel(name, cfg, m.store.policyFor(name))
 	log.Printf("daemon: tunnel %s added", name)
 	return nil
 }
@@ -601,6 +640,9 @@ func (m *Manager) remove(name string) error {
 	m.teardown(t, StateDisconnected, nil)
 	if err := m.store.removeEndpoints(name); err != nil {
 		log.Printf("daemon: store remove %s endpoint cache: %v", name, err)
+	}
+	if err := m.store.removePolicy(name); err != nil {
+		log.Printf("daemon: store remove %s policy: %v", name, err)
 	}
 	if err := m.store.remove(name); err != nil {
 		log.Printf("daemon: store remove %s: %v", name, err)
@@ -794,8 +836,18 @@ func (m *Manager) reconcile(uid uint32) {
 			m.agentForLocked(t.ref.Serial, uid) == nil
 	}
 	for _, t := range m.matching(cond) {
-		if m.teardown(t, StateCardRemoved, cond) {
-			log.Printf("daemon: tunnel %s: YubiKey %d removed, tunnel down", t.name, t.ref.Serial)
+		// t.ref may change once Manager.mu is released (a reconnect):
+		// the serial is read with the check.
+		var serial uint32
+		check := func(t *tunnel) bool {
+			if !cond(t) {
+				return false
+			}
+			serial = t.ref.Serial
+			return true
+		}
+		if m.teardown(t, StateCardRemoved, check) {
+			log.Printf("daemon: tunnel %s: YubiKey %d removed, tunnel down", t.name, serial)
 		}
 	}
 }
@@ -963,6 +1015,8 @@ func (m *Manager) connect(caller context.Context, name string, uid uint32, admin
 		m.failUnbound(t, uid, gen0)
 		return ipc.TunnelStatus{}, errNoCard
 	}
+	// The policy is read again, so a changed file applies at this connect.
+	pol := m.store.policyFor(name)
 	proving, cancelProving := context.WithCancel(m.ctx)
 	defer cancelProving()
 	defer context.AfterFunc(caller, cancelProving)()
@@ -994,6 +1048,7 @@ func (m *Manager) connect(caller context.Context, name string, uid uint32, admin
 	gen := t.gen
 	t.state = StateConnecting
 	t.ref, t.hasRef, t.uid = c.id.Ref, true, c.uid
+	t.policy, t.mark = pol, 0
 	life, cancelLife := context.WithCancel(m.ctx)
 	attempt, cancelAttempt := context.WithCancel(life)
 	t.cancel = cancelLife
@@ -1005,26 +1060,30 @@ func (m *Manager) connect(caller context.Context, name string, uid uint32, admin
 	defer t.op.Unlock()
 	m.reap(t)
 
-	dev, cfgr, iface, err := m.build(attempt, life, cfg, c)
+	dev, cfgr, info, err := m.build(attempt, life, cfg, c, t, gen)
 	m.mu.Lock()
 	if t.gen != gen {
 		err = errAborted // disconnected, removed or card removed meanwhile
 	}
 	if err == nil {
-		t.dev, t.cfgr, t.iface, t.devGen = dev, cfgr, iface, gen
+		t.dev, t.cfgr, t.iface, t.devGen = dev, cfgr, info.iface, gen
+		t.endpoints, t.listenPort = info.endpoints, info.listenPort
 		t.state = StateConnected
 		m.mu.Unlock()
 		log.Printf("daemon: tunnel %s connected with %s (uid %d)", name, c.id.Ref, c.uid)
+		// Its interface and endpoint pass the kill switch from here.
+		m.syncKillSwitch()
 		return m.status(t), nil
 	}
 	if t.gen == gen {
-		t.state, t.cancel = StateError, nil
+		t.state, t.cancel, t.mark = StateError, nil, 0
 	}
 	m.mu.Unlock()
 	cancelLife()
 	if dev != nil {
 		m.closeDevice(dev, cfgr)
 	}
+	m.syncKillSwitch()
 	log.Printf("daemon: tunnel %s: connect: %v", name, err)
 	return ipc.TunnelStatus{}, userErr(err)
 }
@@ -1034,9 +1093,13 @@ func (m *Manager) connect(caller context.Context, name string, uid uint32, admin
 // state; anybody else's failure leaves the tunnel as it was.
 func (m *Manager) failUnbound(t *tunnel, uid uint32, gen0 uint64) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if t.gen == gen0 && t.state == StateCardRemoved && t.uid == uid {
+	changed := t.gen == gen0 && t.state == StateCardRemoved && t.uid == uid
+	if changed {
 		t.state = StateError
+	}
+	m.mu.Unlock()
+	if changed {
+		m.syncKillSwitch()
 	}
 }
 
@@ -1106,16 +1169,30 @@ func (m *Manager) proveOne(ctx context.Context, c candidate) error {
 	return nil
 }
 
-// build makes the device for one connect attempt after the agent proved its
-// key: resolve endpoints, then NewDevice, SetStaticKey (once, before Up),
-// IpcSet, addresses and routes, Up. life bounds the key's calls for the
-// device's whole lifetime; attempt only this connect.
+// devInfo is what build reports about the device for the kill switch.
+type devInfo struct {
+	iface      string
+	endpoints  []netip.AddrPort
+	listenPort uint16
+}
+
+// build makes the device for one connect attempt (generation gen of t)
+// after the agent proved its key: resolve endpoints, put the kill switch in
+// place, then NewDevice, SetStaticKey (once, before Up), IpcSet, addresses
+// and routes, Up. life bounds the key's calls for the device's whole
+// lifetime; attempt only this connect.
+//
+// The kill switch follows the connecting state only once the endpoints are
+// resolved, so a first connect can still look up a name; a tunnel that was
+// blocking already (card_removed, error) resolves behind it, with the mark
+// (Linux full tunnel) or from the endpoint cache. A tunnel whose kill
+// switch is on is refused when the kill switch cannot block.
 //
 // A full tunnel (a default route in some peer's AllowedIPs) on Linux gets a
 // routing table T first: its endpoint lookups and its WireGuard socket carry the
 // mark T (fwmark=T leads the UAPI text, a device key that must precede the
 // first peer), and its routes go through table T.
-func (m *Manager) build(attempt, life context.Context, cfg *config.Tunnel, c candidate) (*device.Device, netcfg.Configurer, string, error) {
+func (m *Manager) build(attempt, life context.Context, cfg *config.Tunnel, c candidate, t *tunnel, gen uint64) (*device.Device, netcfg.Configurer, devInfo, error) {
 	id := c.id
 	var routes []netip.Prefix
 	for _, peer := range cfg.Peers {
@@ -1124,22 +1201,30 @@ func (m *Manager) build(attempt, life context.Context, cfg *config.Tunnel, c can
 	var mark uint32
 	if slices.ContainsFunc(routes, func(r netip.Prefix) bool { return r.Bits() == 0 }) {
 		if !m.fullTunnel {
-			return nil, nil, "", netcfg.ErrFullTunnelUnsupported
+			return nil, nil, devInfo{}, netcfg.ErrFullTunnelUnsupported
 		}
 		if m.pickTable != nil {
-			t, err := m.pickTable(attempt)
+			table, err := m.pickTable(attempt)
 			if err != nil {
-				return nil, nil, "", err
+				return nil, nil, devInfo{}, err
 			}
-			mark = t
+			mark = table
 		}
 	}
+	m.mu.Lock()
+	if t.gen == gen {
+		t.mark = mark
+	}
+	m.mu.Unlock()
 	rt, err := m.resolveTunnel(attempt, cfg, mark)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, devInfo{}, err
 	}
 	if err := attempt.Err(); err != nil {
-		return nil, nil, "", err
+		return nil, nil, devInfo{}, err
+	}
+	if err := m.armKillSwitch(t); err != nil {
+		return nil, nil, devInfo{}, err
 	}
 	key := &remoteKey{ref: id.Ref, pub: id.PublicKey, uid: c.uid, find: m.agentFor, life: life}
 
@@ -1149,17 +1234,17 @@ func (m *Manager) build(attempt, life context.Context, cfg *config.Tunnel, c can
 	}
 	tdev, cfgr, err := m.tun(cfg.Name, mtu)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, devInfo{}, err
 	}
 	iface, err := tdev.Name()
 	if err != nil {
 		tdev.Close()
-		return nil, nil, "", err
+		return nil, nil, devInfo{}, err
 	}
 	dev := device.NewDevice(tdev, m.bind(), device.NewLogger(device.LogLevelError, fmt.Sprintf("latchwire(%s): ", cfg.Name)))
-	fail := func(err error) (*device.Device, netcfg.Configurer, string, error) {
+	fail := func(err error) (*device.Device, netcfg.Configurer, devInfo, error) {
 		m.closeDevice(dev, cfgr)
-		return nil, nil, "", err
+		return nil, nil, devInfo{}, err
 	}
 	if err := m.ops.setStaticKey(dev, wgadapter.New(key, wgadapter.DefaultLimits)); err != nil {
 		return fail(err)
@@ -1180,7 +1265,31 @@ func (m *Manager) build(attempt, life context.Context, cfg *config.Tunnel, c can
 	if err := m.ops.up(dev); err != nil {
 		return fail(err)
 	}
-	return dev, cfgr, iface, nil
+	// The kill switch lets the endpoints in only to the port the device
+	// is bound to: the configured ListenPort, or the one the system chose.
+	port := listenPort(dev)
+	if port == 0 {
+		return fail(errors.New("the device reports no listen port"))
+	}
+	return dev, cfgr, devInfo{iface: iface, endpoints: resolvedEndpoints(rt), listenPort: port}, nil
+}
+
+// listenPort reads the UDP port dev is bound to (0: unknown).
+func listenPort(dev *device.Device) uint16 {
+	s, err := dev.IpcGet()
+	if err != nil {
+		return 0
+	}
+	for line := range strings.Lines(s) {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "listen_port="); ok {
+			n, err := strconv.ParseUint(v, 10, 16)
+			if err != nil {
+				return 0
+			}
+			return uint16(n)
+		}
+	}
+	return 0
 }
 
 // dnsRole is how cfg's DNS servers take part in name resolution. Until
@@ -1314,6 +1423,7 @@ func (m *Manager) teardown(t *tunnel, state string, cond func(*tunnel) bool) boo
 	t.op.Lock()
 	m.reap(t)
 	t.op.Unlock()
+	m.syncKillSwitch()
 	return true
 }
 
@@ -1326,6 +1436,7 @@ func (m *Manager) reap(t *tunnel) {
 	}
 	dev, cfgr := t.dev, t.cfgr
 	t.dev, t.cfgr, t.iface = nil, nil, ""
+	t.endpoints, t.listenPort, t.mark = nil, 0, 0
 	m.mu.Unlock()
 	m.closeDevice(dev, cfgr)
 }
@@ -1366,4 +1477,177 @@ func userErr(err error) error {
 		return &ipc.Error{Code: ipc.CodeUnavailable, Message: err.Error()}
 	}
 	return &ipc.Error{Code: ipc.CodeInternal, Message: fmt.Sprintf(msg.DaemonConnectFailedFmt, err)}
+}
+
+// ---- kill switch ----
+
+// killSwitchState is the kill switch the tunnels' states call for. It
+// blocks while any tunnel whose kill switch is on (Policy.armed) is
+// connecting, connected, waiting for its card (card_removed) or failed
+// (error): it is fail-closed, and only down, remove and a graceful shutdown
+// (all to disconnected) end it. While blocking, every connected tunnel's
+// interface, resolved endpoints and listen port pass, and so do the
+// packets with a full tunnel's mark (Linux), connected or connecting.
+func (m *Manager) killSwitchState() killswitch.State {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	names := make([]string, 0, len(m.tunnels))
+	for n := range m.tunnels {
+		names = append(names, n)
+	}
+	slices.Sort(names)
+	var s killswitch.State
+	for _, n := range names {
+		t := m.tunnels[n]
+		switch t.state {
+		case StateConnecting, StateConnected, StateCardRemoved, StateError:
+			if t.policy.armed(t.cfg) {
+				s.Block = true
+			}
+		}
+	}
+	if !s.Block {
+		return killswitch.State{}
+	}
+	for _, n := range names {
+		t := m.tunnels[n]
+		switch t.state {
+		case StateConnected:
+			if t.iface != "" {
+				s.Tunnels = append(s.Tunnels, killswitch.TunnelRule{Iface: t.iface, Endpoints: slices.Clone(t.endpoints), ListenPort: t.listenPort})
+			}
+			if t.mark != 0 {
+				s.FwMark = t.mark
+			}
+		case StateConnecting:
+			if t.mark != 0 && s.FwMark == 0 {
+				s.FwMark = t.mark
+			}
+		}
+	}
+	return s
+}
+
+// statesEqual reports whether two kill switch states are the same.
+func statesEqual(a, b killswitch.State) bool {
+	return a.Block == b.Block && a.FwMark == b.FwMark && slices.EqualFunc(a.Tunnels, b.Tunnels, func(x, y killswitch.TunnelRule) bool {
+		return x.Iface == y.Iface && x.ListenPort == y.ListenPort && slices.Equal(x.Endpoints, y.Endpoints)
+	})
+}
+
+// syncKillSwitch puts killSwitchState in place unless it is in place
+// already. It runs outside Manager.mu (Set runs commands) and logs and
+// returns Set's error; the next sync tries again.
+func (m *Manager) syncKillSwitch() error {
+	return m.setKillSwitch(false)
+}
+
+// setKillSwitch is syncKillSwitch; force sets the state even when it is
+// believed in place.
+func (m *Manager) setKillSwitch(force bool) error {
+	m.ksMu.Lock()
+	defer m.ksMu.Unlock()
+	s := m.killSwitchState()
+	if !force && m.ksLast != nil && statesEqual(*m.ksLast, s) {
+		return nil
+	}
+	fw, err := m.firewallLocked()
+	if err != nil {
+		if !s.Block && errors.Is(err, killswitch.ErrUnsupported) {
+			// No firewall here: nothing can be blocking.
+			m.ksLast = &s
+			return nil
+		}
+		m.ksLast = nil
+		log.Printf("daemon: kill switch: %v", err)
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), killSwitchTimeout)
+	defer cancel()
+	if err := fw.Set(ctx, s); err != nil {
+		m.ksLast = nil
+		log.Printf("daemon: kill switch (block %v): %v", s.Block, err)
+		return err
+	}
+	m.ksLast = &s
+	return nil
+}
+
+// firewallLocked returns the kill switch's firewall, made on first use.
+// That the platform has none (ErrUnsupported) is remembered; other errors
+// are retried at the next use. m.ksMu is held.
+func (m *Manager) firewallLocked() (killswitch.Firewall, error) {
+	if m.fw != nil || m.fwErr != nil {
+		return m.fw, m.fwErr
+	}
+	fw, err := killswitch.New(m.runner, m.journal)
+	if errors.Is(err, killswitch.ErrUnsupported) {
+		m.fwErr = err
+	}
+	if err != nil {
+		return nil, err
+	}
+	m.fw = fw
+	return fw, nil
+}
+
+// armKillSwitch puts the kill switch in place for t, which is connecting.
+// When t's kill switch is on and that fails, the connect is refused (P3: no
+// tunnel runs without the kill switch it asks for).
+func (m *Manager) armKillSwitch(t *tunnel) error {
+	err := m.syncKillSwitch()
+	m.mu.Lock()
+	armed := t.policy.armed(t.cfg)
+	m.mu.Unlock()
+	if err == nil || !armed {
+		return nil
+	}
+	code := ipc.CodeInternal
+	if errors.Is(err, killswitch.ErrUnsupported) {
+		code = ipc.CodeBadRequest
+	}
+	return &ipc.Error{Code: code, Message: fmt.Sprintf(msg.DaemonKillSwitchRefusedFmt, err)}
+}
+
+// startKillSwitch settles the kill switch at startup, after the cleanup
+// and the load. held says that the journal holds an active kill switch (a
+// crash, or a stop that could not remove it): the tunnels whose kill
+// switch is on are loaded as card_removed, so it keeps blocking until they
+// are taken down (or reconnected). recovered says that the journal was
+// unreadable (P6): what it held is unknown, so the kill switch's
+// well-known objects (the pf anchor, the nft table) are removed: on a
+// corrupt journal the kill switch fails open, which is logged.
+func (m *Manager) startKillSwitch(held, recovered bool) {
+	switch {
+	case recovered:
+		log.Printf("daemon: WARNING: the journal was unreadable; removing any kill switch a previous run left in place: traffic is NOT blocked until a tunnel with the kill switch connects")
+		m.ksMu.Lock()
+		m.ksLast = nil
+		m.ksMu.Unlock()
+		if err := m.setKillSwitch(true); err != nil {
+			log.Printf("daemon: removing the kill switch after an unreadable journal: %v", err)
+		}
+	case held:
+		m.mu.Lock()
+		var names []string
+		for n, t := range m.tunnels {
+			if t.policy.armed(t.cfg) {
+				t.state = StateCardRemoved
+				names = append(names, n)
+			}
+		}
+		m.mu.Unlock()
+		slices.Sort(names)
+		if len(names) > 0 {
+			log.Printf("daemon: the kill switch of the previous run is still on: blocking for %v until they are taken down or connected", names)
+		} else {
+			log.Printf("daemon: removing the kill switch of the previous run: no tunnel has its kill switch on")
+		}
+		m.ksMu.Lock()
+		m.ksLast = nil
+		m.ksMu.Unlock()
+		if err := m.syncKillSwitch(); err != nil {
+			log.Printf("daemon: restoring the kill switch: %v", err)
+		}
+	}
 }

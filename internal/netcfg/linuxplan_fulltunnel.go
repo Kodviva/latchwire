@@ -244,7 +244,8 @@ func rpScript(iface, name, mark string, addrs []netip.Prefix) []byte {
 // "ip rule del" of a rule that does not exist (ENOENT), or macOS "route
 // delete" of a route that does not exist ("not in table", ESRCH), or an
 // scutil remove of a key that does not exist ("No such key"). Such an
-// undo succeeded. (The nft undo is idempotent by itself.)
+// undo succeeded. (The nft undo is idempotent by itself.) The kill switch's
+// pfctl undo steps: see pfctlUndone.
 func alreadyUndone(s Step, err error) bool {
 	switch s.Name {
 	case "ip":
@@ -257,6 +258,13 @@ func alreadyUndone(s Step, err error) bool {
 	case scutilCmd:
 		u, ok := parseScutilUndo(s.Stdin)
 		return ok && u.remove && strings.Contains(err.Error(), "No such key")
+	case pfctlCmd:
+		return pfctlUndone(s, err)
 	}
 	return false
 }
+
+// AlreadyUndone reports whether err, from running the undo step s, only
+// says that what s removes is not there (see alreadyUndone); such an undo
+// succeeded. The kill switch uses it for its own steps.
+func AlreadyUndone(s Step, err error) bool { return alreadyUndone(s, err) }

@@ -9,7 +9,15 @@ import (
 func TestNewPlatform(t *testing.T) {
 	r := &recorder{}
 	f, err := New(r, newJournal(t))
-	if runtime.GOOS != "linux" {
+	switch runtime.GOOS {
+	case "darwin":
+		// pf: nothing runs until a Set.
+		if _, ok := f.(*pfFirewall); err != nil || !ok || len(r.cmds) != 0 {
+			t.Fatalf("New on darwin: %T, %v, ran %q; want the pf firewall", f, err, r.cmds)
+		}
+		return
+	case "linux":
+	default:
 		if !errors.Is(err, ErrUnsupported) || f != nil {
 			t.Fatalf("New on %s: %v, %v; want ErrUnsupported", runtime.GOOS, f, err)
 		}

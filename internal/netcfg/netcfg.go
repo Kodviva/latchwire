@@ -34,6 +34,13 @@ type Runner interface {
 	Run(ctx context.Context, name string, args []string, stdin []byte) ([]byte, error)
 }
 
+// CombinedRunner is a Runner that can also return a command's standard
+// error with its output, for commands that report a result there (pfctl -E
+// prints its token on stderr). ExecRunner's runner is one.
+type CombinedRunner interface {
+	RunCombined(ctx context.Context, name string, args []string, stdin []byte) ([]byte, error)
+}
+
 // DNSRole says how a tunnel's DNS servers take part in name resolution.
 type DNSRole int
 

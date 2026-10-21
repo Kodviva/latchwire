@@ -116,3 +116,25 @@ echo started`)
 		t.Fatalf("Run took %v, want it bounded by the wait delay", el)
 	}
 }
+
+// RunCombined returns what a command writes to stdout and stderr (pfctl -E
+// reports its token on stderr); failures carry the output like Run's.
+func TestExecRunnerRunCombined(t *testing.T) {
+	d := t.TempDir()
+	writeTool(t, d, "tool", `echo out; echo "Token : 42" >&2`)
+	var r CombinedRunner = execRunner{dirs: []string{d}}
+	out, err := r.RunCombined(ctx, "tool", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "out") || !strings.Contains(string(out), "Token : 42") {
+		t.Fatalf("RunCombined = %q, want stdout and stderr", out)
+	}
+	writeTool(t, d, "bad", `echo oops >&2; exit 2`)
+	if _, err := r.RunCombined(ctx, "bad", nil, nil); err == nil || !strings.Contains(err.Error(), "oops") {
+		t.Fatalf("err = %v, want the output in the error", err)
+	}
+	if _, err := r.RunCombined(ctx, "missing", nil, nil); !errors.Is(err, exec.ErrNotFound) {
+		t.Fatalf("err = %v, want exec.ErrNotFound", err)
+	}
+}

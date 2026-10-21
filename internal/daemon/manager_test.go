@@ -379,6 +379,10 @@ type env struct {
 	cli    *ipc.Conn
 	poll   time.Duration
 	admin  func(uint32) bool
+	// fw records the kill switch states (never the host's firewall).
+	fw *fakeFirewall
+	// stop ends Serve and waits for it (graceful shutdown); idempotent.
+	stop func()
 
 	agentMu     sync.Mutex
 	agentCancel context.CancelFunc
@@ -417,7 +421,7 @@ func newEnv(t *testing.T, o envOpts) *env {
 
 	e := &env{t: t, socket: filepath.Join(dir, "s"), store: filepath.Join(dir, "tunnels"),
 		b: newFakeBackend(t, o.present...), p: &fakePrompter{pin: o.pin}, f: &netFactory{},
-		poll: o.poll, admin: o.admin}
+		poll: o.poll, admin: o.admin, fw: &fakeFirewall{}}
 	if e.admin == nil {
 		all := !o.notAdmin
 		e.admin = func(uint32) bool { return all }
@@ -433,6 +437,7 @@ func newEnv(t *testing.T, o envOpts) *env {
 		JournalPath: filepath.Join(dir, "journal.json"),
 		IsAdmin:     func(uid uint32) (bool, error) { return e.admin(uid), nil },
 		VerifyEvery: o.verifyEvery,
+		Firewall:    e.fw,
 	})
 	// No host network notifications: tests that need them inject theirs.
 	e.m.netSource = func() (netmon.Source, error) { return make(chanSource), nil }
@@ -443,15 +448,19 @@ func newEnv(t *testing.T, o envOpts) *env {
 	ctx, cancel := context.WithCancel(context.Background())
 	served := make(chan error, 1)
 	go func() { served <- e.m.Serve(ctx) }()
-	t.Cleanup(func() {
-		e.stopAgent()
-		cancel()
-		select {
-		case <-served:
-		case <-time.After(10 * time.Second):
-			t.Error("Serve did not return")
-		}
-	})
+	var stopOnce sync.Once
+	e.stop = func() {
+		stopOnce.Do(func() {
+			e.stopAgent()
+			cancel()
+			select {
+			case <-served:
+			case <-time.After(10 * time.Second):
+				t.Error("Serve did not return")
+			}
+		})
+	}
+	t.Cleanup(func() { e.stop() })
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {

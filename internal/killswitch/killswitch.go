@@ -1,8 +1,10 @@
 // Package killswitch blocks the traffic that would leave outside the
 // tunnels: while a kill switch is on, only the tunnel interfaces, loopback,
 // the tunnels' endpoints and what a link needs to come up (DHCP, IPv6
-// neighbour discovery and MLD) pass; DNS goes through the tunnels only. Linux uses one nftables table
-// (inet latchwire); other platforms have no implementation yet.
+// neighbour discovery and MLD) pass; DNS goes through the tunnels only.
+// Linux uses one nftables table (inet latchwire), macOS one pf anchor
+// (com.apple/250.latchwire) and an enable reference of its own; other
+// platforms have none.
 //
 // Every change is journaled (owner JournalOwner) before it is made, so a
 // crash leaves the command that removes the rules; whether startup keeps or
@@ -20,9 +22,17 @@ import (
 
 // ErrUnsupported is returned by New when this system has no firewall the
 // kill switch can use (Linux without nft), and by Set when the firewall
-// command has gone missing since. There is no fallback (no iptables): a
+// command has gone missing since or (macOS) the main pf ruleset lacks the
+// com.apple anchor point. There is no fallback (no iptables): a
 // tunnel that needs the kill switch is refused.
 var ErrUnsupported = errors.New(msg.KillSwitchUnsupported)
+
+// unsupportedError is ErrUnsupported (errors.Is) with a platform's own
+// explanation.
+type unsupportedError string
+
+func (e unsupportedError) Error() string        { return string(e) }
+func (e unsupportedError) Is(target error) bool { return target == ErrUnsupported }
 
 // JournalOwner is the journal owner of the kill switch's rules. It holds a
 // ':', which no interface name may contain, so it never collides with a

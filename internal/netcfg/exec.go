@@ -48,6 +48,17 @@ type execRunner struct {
 func ExecRunner() Runner { return execRunner{dirs: commandDirs} }
 
 func (e execRunner) Run(ctx context.Context, name string, args []string, stdin []byte) ([]byte, error) {
+	return e.run(ctx, name, args, stdin, false)
+}
+
+// RunCombined is Run with the command's standard error added to the output
+// it returns (one stream, in the order written), for commands that report a
+// result there (pfctl -E). The output is capped like stderr.
+func (e execRunner) RunCombined(ctx context.Context, name string, args []string, stdin []byte) ([]byte, error) {
+	return e.run(ctx, name, args, stdin, true)
+}
+
+func (e execRunner) run(ctx context.Context, name string, args []string, stdin []byte, combined bool) ([]byte, error) {
 	if name == "" || strings.ContainsRune(name, filepath.Separator) {
 		return nil, fmt.Errorf("%s: %w", name, exec.ErrNotFound)
 	}
@@ -68,6 +79,10 @@ func (e execRunner) Run(ctx context.Context, name string, args []string, stdin [
 	stderr := &capBuffer{max: maxStderr}
 	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Stdout, cmd.Stderr = &stdout, stderr
+	if combined {
+		// One writer for both: exec shares it, so the order is kept.
+		cmd.Stdout = stderr
+	}
 	// A minimal environment: no inherited variables, a fixed locale and the
 	// fixed directories as PATH (for tools that run other tools).
 	cmd.Env = []string{"LC_ALL=C", "PATH=" + strings.Join(e.dirs, ":")}
@@ -75,11 +90,15 @@ func (e execRunner) Run(ctx context.Context, name string, args []string, stdin [
 	if len(stdin) > 0 {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
+	out := stdout.Bytes
+	if combined {
+		out = stderr.buf.Bytes
+	}
 	if err := cmd.Run(); err != nil {
 		if s := strings.TrimSpace(stderr.buf.String()); s != "" {
-			return stdout.Bytes(), fmt.Errorf("%w: %s", err, s)
+			return out(), fmt.Errorf("%w: %s", err, s)
 		}
-		return stdout.Bytes(), err
+		return out(), err
 	}
-	return stdout.Bytes(), nil
+	return out(), nil
 }

@@ -75,6 +75,11 @@ const (
 // Kill switch.
 const (
 	KillSwitchUnsupported = "the kill switch is not available on this system (on Linux it needs the nft command from nftables); install nftables, or turn the kill switch off in the tunnel's policy"
+	// KillSwitchPfNoAnchor: macOS with a main pf ruleset that lacks the
+	// stock anchor point.
+	KillSwitchPfNoAnchor = "the kill switch is not available: the main pf ruleset has no anchor \"com.apple/*\" (a custom /etc/pf.conf?), so its rules would never be evaluated; restore the anchor lines of the stock /etc/pf.conf, or turn the kill switch off in the tunnel's policy"
+	// KillSwitchPfMissing: macOS without pfctl.
+	KillSwitchPfMissing = "the kill switch is not available: pfctl was not found in /sbin or /usr/sbin; turn the kill switch off in the tunnel's policy"
 )
 
 // Network configuration.
@@ -127,6 +132,9 @@ const (
 	// DaemonConnectFailedFmt and DaemonStoreFailedFmt take an error.
 	DaemonConnectFailedFmt = "could not bring the tunnel up: %v"
 	DaemonStoreFailedFmt   = "could not save the tunnel configuration: %v"
+	// DaemonKillSwitchRefusedFmt takes the error that kept the kill switch
+	// from blocking.
+	DaemonKillSwitchRefusedFmt = "not connecting: this tunnel's kill switch is on and could not block traffic outside the tunnel: %v"
 )
 
 // Command line. None of these formats take a PIN, PUK or key; the ones that
