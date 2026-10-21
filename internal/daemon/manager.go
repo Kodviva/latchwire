@@ -173,6 +173,9 @@ type Manager struct {
 	odRecheck time.Duration
 	odKick    chan struct{}
 	odErr     string
+	// leftErr is the last error retryLeftovers logged (used by
+	// watchNetwork only).
+	leftErr string
 
 	// The kill switch. ksMu serializes Firewall.Set calls (and orders
 	// them: the state set is computed inside); it is never taken with mu
@@ -487,6 +490,7 @@ func (m *Manager) watchNetwork(ctx context.Context) {
 			m.kickOnDemand()
 		case <-tick.C:
 			m.refreshAll(ctx)
+			m.retryLeftovers(ctx)
 			m.verifyKillSwitch(ctx)
 			m.kickOnDemand()
 		case <-ctx.Done():
@@ -535,6 +539,84 @@ func (m *Manager) refreshAll(ctx context.Context) {
 		}
 		if err := t.cfgr.Refresh(ctx); err != nil {
 			debugf("daemon: tunnel %s: refreshing the network configuration: %v", t.name, err)
+		}
+	}
+}
+
+// retryLeftovers runs at the verification tick. What tunnels that went
+// down could not undo (a persistent undo that failed, such as a DNS
+// restore; P7) is retried from the journal (netcfg.Cleanup: the records of
+// tunnels that are up and the kill switch's are left alone), whatever
+// interface it was on: a tunnel back on another utunN does not retry its
+// old one's record itself. Once a DNS undo ran, netcfg releases the
+// DNSPrimary ownership it kept (P13), and the roles that waited for it are
+// applied: a DNSPrimary tunnel that got primary-busy takes it (retakeDNS),
+// a split tunnel that yielded to a full tunnel gets it back (promoteDNS).
+// A failure is logged when it differs from the last one.
+func (m *Manager) retryLeftovers(ctx context.Context) {
+	if m.journal != nil {
+		keep := func(owner string) bool { return owner == killswitch.JournalOwner }
+		err := netcfg.Cleanup(ctx, m.runner, m.journal, keep)
+		if ctx.Err() != nil {
+			return
+		}
+		var text string
+		if err != nil {
+			text = err.Error()
+		}
+		switch {
+		case text == m.leftErr:
+		case err != nil:
+			log.Printf("daemon: undoing what tunnels that went down left in the system (retried every %v): %v", m.verifyEvery, err)
+		default:
+			log.Printf("daemon: what tunnels that went down left in the system is undone")
+		}
+		m.leftErr = text
+	}
+	m.retakeDNS(ctx)
+	m.promoteDNS()
+}
+
+// retakeDNS applies the DNS of the connected DNSPrimary tunnels that got
+// primary-busy (the ownership was kept for a DNS undo still pending, P13)
+// once netcfg lets them have it (SetDNSRole). Like demote, it holds each
+// tunnel's op. A failure that undid nothing is retried at the next tick.
+func (m *Manager) retakeDNS(ctx context.Context) {
+	busy := func(t *tunnel) bool { // under Manager.mu
+		return t.state == StateConnected && t.dnsRole == netcfg.DNSPrimary && t.applied.DNS == netcfg.DNSOutcomePrimaryBusy &&
+			t.dev != nil && t.devGen == t.gen && t.cfgr != nil
+	}
+	ts := m.matching(busy)
+	slices.SortFunc(ts, func(a, b *tunnel) int { return cmp.Compare(a.name, b.name) })
+	for _, t := range ts {
+		if ctx.Err() != nil {
+			return
+		}
+		t.op.Lock()
+		m.mu.Lock()
+		ok, cfgr := busy(t), t.cfgr
+		m.mu.Unlock()
+		if !ok {
+			t.op.Unlock()
+			continue
+		}
+		how, err := cfgr.SetDNSRole(ctx, netcfg.DNSPrimary)
+		m.mu.Lock()
+		changed := t.cfgr == cfgr && how != t.applied.DNS
+		if changed {
+			t.applied.DNS = how
+			if err != nil {
+				// The new DNS failed and was undone: none applied.
+				t.dnsRole, t.dnsYielded = netcfg.DNSNone, true
+			}
+		}
+		m.mu.Unlock()
+		t.op.Unlock()
+		switch {
+		case err != nil:
+			log.Printf("daemon: tunnel %s: applying its DNS servers now that they are free: %v", t.name, err)
+		case changed:
+			log.Printf("daemon: tunnel %s: its DNS servers answer every name now (%s)", t.name, how)
 		}
 	}
 }

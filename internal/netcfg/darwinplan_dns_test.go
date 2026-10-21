@@ -348,7 +348,7 @@ func TestDarwinDNSPrimaryUndoLeavesForeignDict(t *testing.T) {
 func TestDarwinDNSPrimaryNoOriginalRemoves(t *testing.T) {
 	f := newFakeStore(t)
 	f.setPrimary(svc1)
-	j, _ := newJournal(t)
+	j, path := newJournal(t)
 	c := newDarwin(f, j)
 	if _, err := c.Apply(ctx, darwinDNSPlan(DNSPrimary)); err != nil {
 		t.Fatal(err)
@@ -363,7 +363,15 @@ func TestDarwinDNSPrimaryNoOriginalRemoves(t *testing.T) {
 	if got := scutilUndos(j, "utun7"); !reflect.DeepEqual(got, []string{wantUndo}) {
 		t.Fatalf("journal:\n%q\nwant:\n%q", got, []string{wantUndo})
 	}
-	// A crash: the next start's Cleanup removes the key.
+	// A crash: the next start's Cleanup removes the key. (In this
+	// process c still uses the record: Cleanup leaves it alone.)
+	if err := Cleanup(ctx, f, j, nil); err != nil || len(scutilUndos(j, "utun7")) != 1 {
+		t.Fatalf("Cleanup of a live tunnel's record: %v, journal %v", err, j.Entries())
+	}
+	j, err := OpenJournal(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := Cleanup(ctx, f, j, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -981,5 +989,87 @@ func TestDarwinDNSOwnershipHeldOnCancelledRemove(t *testing.T) {
 	}
 	if res, err := b.Apply(ctx, otherPrimary()); err != nil || res.DNS != DNSOutcomeScutilPrimary {
 		t.Fatalf("after the retry: %+v %v", res, err)
+	}
+}
+
+// A DNS undo that failed when its tunnel went down is retried by Cleanup
+// while the daemon runs (its verification tick), not only at the next start:
+// a failing retry keeps it journaled and the ownership held; once a retry
+// succeeds the ownership is released and a DNSPrimary tunnel that got
+// primary-busy takes it (SetDNSRole). The tunnel reconnecting on another
+// utun meanwhile does not strand the record of its old one, and the record
+// of a tunnel that is still up is left alone.
+func TestDarwinDNSFailedUndoRetriedMidProcess(t *testing.T) {
+	f := newFakeStore(t)
+	f.setPrimary(svc1)
+	orig := fdict{"ServerAddresses": arr("192.168.1.1")}
+	f.keys[dnsKey(svc1)] = maps2(orig)
+	j, _ := newJournal(t)
+	a := newDarwin(f, j)
+	if _, err := a.Apply(ctx, darwinDNSPlan(DNSPrimary)); err != nil {
+		t.Fatal(err)
+	}
+	f.setErr = "  set: Permission denied"
+	if err := a.Remove(ctx); err == nil {
+		t.Fatal("failing undo: no error")
+	}
+	// The same tunnel back on utun9, without DNS of its own, and another
+	// DNSPrimary tunnel: busy.
+	a2 := newDarwin(f, j)
+	p9 := plan("utun9", pfx("10.0.0.2/32"), nil)
+	if _, err := a2.Apply(ctx, p9); err != nil {
+		t.Fatal(err)
+	}
+	f.setErr = ""
+	b := newDarwin(f, j)
+	if res, err := b.Apply(ctx, otherPrimary()); err != nil || res.DNS != DNSOutcomePrimaryBusy {
+		t.Fatalf("while the undo is pending: %+v %v", res, err)
+	}
+	if len(scutilUndos(j, "utun7")) != 1 {
+		t.Fatalf("the reconnect on utun9 touched utun7's record: %v", j.Entries())
+	}
+
+	// A tick whose retry fails again: kept, still held.
+	f.setErr = "  set: Permission denied"
+	if err := Cleanup(ctx, f, j, nil); err == nil {
+		t.Fatal("failing retry: no error")
+	}
+	if len(scutilUndos(j, "utun7")) != 1 {
+		t.Fatalf("failed retry forgot the DNS undo: %v", j.Entries())
+	}
+	if how, err := b.SetDNSRole(ctx, DNSPrimary); err != nil || how != DNSOutcomePrimaryBusy {
+		t.Fatalf("while the retry fails: %q %v", how, err)
+	}
+
+	// The next tick's retry succeeds.
+	f.setErr = ""
+	if err := Cleanup(ctx, f, j, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(f.keys[dnsKey(svc1)], orig) {
+		t.Errorf("restored %v, want %v", f.keys[dnsKey(svc1)], orig)
+	}
+	if _, ok := j.Entries()["utun7"]; ok {
+		t.Errorf("utun7 still journaled: %v", j.Entries())
+	}
+	for _, live := range []string{"utun8", "utun9"} {
+		if _, ok := j.Entries()[live]; !ok {
+			t.Errorf("Cleanup took the record of %s, which is up: %v", live, j.Entries())
+		}
+	}
+	if how, err := b.SetDNSRole(ctx, DNSPrimary); err != nil || how != DNSOutcomeScutilPrimary {
+		t.Fatalf("after the retry: %q %v", how, err)
+	}
+	if got := f.keys[dnsKey(svc1)]["ServerAddresses"]; !reflect.DeepEqual(got, arr("10.9.0.1")) {
+		t.Errorf("primary DNS %v, want the second tunnel's", got)
+	}
+	if len(scutilUndos(j, "utun8")) != 1 {
+		t.Errorf("the second tunnel's DNS undo not journaled: %v", j.Entries())
+	}
+	if err := b.Remove(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(f.keys[dnsKey(svc1)], orig) {
+		t.Errorf("after the second tunnel: %v, want %v", f.keys[dnsKey(svc1)], orig)
 	}
 }

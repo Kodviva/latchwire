@@ -140,6 +140,10 @@ type configurer struct {
 	// DNSRole) and dnsHow its Applied.DNS, for SetDNSRole.
 	dnsPlan Plan
 	dnsHow  string
+	// live says that c uses its owner's journal record (liveAs) as far
+	// as Cleanup is concerned (see Journal.live).
+	live   bool
+	liveAs string
 }
 
 func newConfigurer(r Runner, j *Journal, p planner, full fullPlanner) *configurer {
@@ -158,6 +162,12 @@ func (c *configurer) Apply(ctx context.Context, p Plan) (Applied, error) {
 		return Applied{}, errors.New(msg.NetAlreadyApplied)
 	}
 	c.owner = p.Iface
+	c.setLive(true)
+	defer func() {
+		if len(c.applied) == 0 {
+			c.setLive(false) // failed with nothing applied
+		}
+	}()
 	if err := c.retryLocked(ctx); err != nil {
 		return Applied{}, err
 	}
@@ -210,7 +220,9 @@ func (c *configurer) Apply(ctx context.Context, p Plan) (Applied, error) {
 }
 
 // SetDNSRole gives the applied DNS servers role (P18) and returns the new
-// Applied.DNS. The same role changes nothing. Otherwise the new role's
+// Applied.DNS. The same role changes nothing, except a DNSPrimary role that
+// got primary-busy: it is applied now if the ownership is free. Otherwise
+// the new role's
 // steps are planned first (its system reads, so an unsupported system
 // changes nothing), then the applied DNS steps are undone, newest first,
 // and the journal updated; a DNSPrimary ownership is released only once
@@ -228,8 +240,23 @@ func (c *configurer) SetDNSRole(ctx context.Context, role DNSRole) (string, erro
 		return "", errors.New(msg.NetNotApplied)
 	}
 	old := c.dnsPlan.DNSRole
-	if c.dns == nil || role == old {
+	if c.dns == nil {
 		return c.dnsHow, nil
+	}
+	if role == old {
+		// The same role changes nothing, except that a DNSPrimary role
+		// that got primary-busy (no DNS applied) is tried again: the
+		// owner may have let go (P13, after its DNS undo's retry).
+		if role != DNSPrimary || c.dnsHow != DNSOutcomePrimaryBusy {
+			return c.dnsHow, nil
+		}
+		primaryDNS.mu.Lock()
+		held := primaryDNS.owner != nil && primaryDNS.owner != c
+		primaryDNS.mu.Unlock()
+		if held {
+			return c.dnsHow, nil // still busy: nothing to log again
+		}
+		old = DNSNone // no DNS of the old role is applied
 	}
 	p := c.dnsPlan
 	p.DNSRole = role
@@ -459,6 +486,9 @@ func (c *configurer) rollbackLocked(ctx context.Context) {
 // failed, or nothing. When ctx ends it stops and leaves the journal as it
 // is: the failures of a cancelled run say nothing about the system.
 func (c *configurer) undoLocked(ctx context.Context) error {
+	// What is left goes to Cleanup's retries from here (the verification
+	// tick, the next start).
+	defer c.setLive(false)
 	all := c.undoListLocked()
 	c.applied, c.carried, c.dn = nil, nil, darwinFollow{}
 	var first error
@@ -510,7 +540,8 @@ func (c *configurer) undoLocked(ctx context.Context) error {
 // a Remove cut short by its context, leaves the undo journaled and the
 // ownership held, so no other tunnel writes the DNS while the original is
 // not back; the retry of that journaled undo (the owner's next Apply, or
-// Cleanup) releases it.
+// Cleanup, which the daemon also runs at its verification tick) releases
+// it.
 var primaryDNS struct {
 	mu    sync.Mutex
 	owner *configurer

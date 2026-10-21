@@ -7,12 +7,15 @@ import (
 	"log"
 	"os"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/Kodviva/latchwire/internal/ipc"
+	"github.com/Kodviva/latchwire/internal/killswitch"
+	"github.com/Kodviva/latchwire/internal/netcfg"
 	"github.com/Kodviva/latchwire/internal/netmon"
 )
 
@@ -230,5 +233,69 @@ func TestVerifyTickRefreshesWithoutNetworkChange(t *testing.T) {
 	waitRefreshes(t, cfg, 2)
 	if st := e.status(); st.State != StateConnected {
 		t.Fatalf("state %q, want connected", st.State)
+	}
+}
+
+// The verification tick retries what tunnels that went down left in the
+// journal (whatever interface it names; the records of tunnels that are up
+// and the kill switch's stay), and a DNSPrimary tunnel that got
+// primary-busy meanwhile gets its DNS once netcfg lets it have it.
+func TestVerifyTickRetriesLeftoversAndRetakesDNS(t *testing.T) {
+	r := &cmdRunner{}
+	e := newEnv(t, envOpts{present: []uint32{serialA}, verifyEvery: 20 * time.Millisecond, hook: func(m *Manager) { m.runner = r }})
+	e.waitCard(serialA, true)
+	e.f.mu.Lock()
+	e.f.outcome = netcfg.DNSOutcomePrimaryBusy
+	e.f.mu.Unlock()
+	e.addTunnel("split", "10.1.0.0/16", "DNS = 10.1.0.53\n")
+	e.mustConnect("split")
+	if st := e.statusOf("split"); st.DNS != ipc.DNSStatusBusy {
+		t.Fatalf("status %+v, want busy", st)
+	}
+	e.m.mu.Lock()
+	j := e.m.journal
+	e.m.mu.Unlock()
+	left := netcfg.Step{Name: "ip", Args: []string{"rule", "del", "left", "over"}, Persistent: true}
+	ks := netcfg.Step{Name: "nft", Args: []string{"delete", "table", "inet", "latchwire"}, Persistent: true}
+	if err := j.Record("utun5", []netcfg.Step{left}); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.Record(killswitch.JournalOwner, []netcfg.Step{ks}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, ok := j.Entries()["utun5"]; !ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the leftover was not retried: journal %v", j.Entries())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	r.mu.Lock()
+	cmds := slices.Clone(r.cmds)
+	r.mu.Unlock()
+	if !slices.Contains(cmds, "ip rule del left over") || slices.Contains(cmds, "nft delete table inet latchwire") {
+		t.Errorf("commands %q: want the leftover undone and the kill switch left alone", cmds)
+	}
+	if _, ok := j.Entries()[killswitch.JournalOwner]; !ok {
+		t.Error("the kill switch's record went")
+	}
+
+	// The DNS undo the ownership waited for ran: the busy tunnel takes it.
+	c := e.f.cfgFor("split")
+	c.mu.Lock()
+	c.outcome = ""
+	c.mu.Unlock()
+	deadline = time.Now().Add(5 * time.Second)
+	for e.statusOf("split").DNS != ipc.DNSStatusPrimary {
+		if time.Now().After(deadline) {
+			t.Fatalf("still %+v", e.statusOf("split"))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if role, sets := e.roleOf("split"); role != netcfg.DNSPrimary || len(sets) == 0 || sets[len(sets)-1] != netcfg.DNSPrimary {
+		t.Errorf("role %v, SetDNSRole %v", role, sets)
 	}
 }

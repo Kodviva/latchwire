@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -59,6 +60,14 @@ type Journal struct {
 
 	mu     sync.Mutex
 	owners map[string][]Step
+
+	// live counts, per owner, the Configurers of this process that use
+	// its record: from the start of an Apply until its undo finished (or
+	// the Apply failed with nothing applied). Cleanup leaves their
+	// records alone and holds liveMu throughout, so none starts or
+	// finishes meanwhile. liveMu is never taken with mu held.
+	liveMu sync.Mutex
+	live   map[string]int
 }
 
 type journalFile struct {
@@ -241,13 +250,23 @@ func (j *Journal) flushLocked() error {
 }
 
 // Cleanup undoes what the journal still holds for every owner keep does not
-// claim (keep nil: none is claimed), then forgets that owner. It runs at
-// service start, before tunnels load. Undo is best effort: the interface or
-// route is usually gone already, so a failing step does not stop the rest,
-// and the owner is forgotten either way. The errors are joined and returned.
-// When ctx ends, Cleanup stops at once and forgets nothing it did not finish:
-// the failures of a cancelled run say nothing about the system.
+// claim (keep nil: none is claimed) and no Configurer of this process uses
+// (from the start of its Apply until its undo has finished). It runs at
+// service start, before tunnels load, and again at the daemon's
+// verification tick for what a tunnel that went down could not undo (P13:
+// a failed DNS undo keeps the DNSPrimary ownership until it ran). Undo is
+// best effort: the interface or route is usually gone already, so a failing
+// step does not stop the rest. Persistent steps that fail stay journaled
+// for the next retry (P7); the rest of the owner's record is forgotten. A
+// DNSPrimary ownership kept for the owner is released once no DNS undo of
+// it is left. The errors are joined and returned. When ctx ends, Cleanup
+// stops at once and forgets nothing it did not finish: the failures of a
+// cancelled run say nothing about the system.
 func Cleanup(ctx context.Context, r Runner, j *Journal, keep func(owner string) bool) error {
+	// No Configurer starts or finishes using an owner meanwhile, so the
+	// steps undone here are never a live tunnel's.
+	j.liveMu.Lock()
+	defer j.liveMu.Unlock()
 	entries := j.Entries()
 	owners := make([]string, 0, len(entries))
 	for o := range entries {
@@ -256,27 +275,58 @@ func Cleanup(ctx context.Context, r Runner, j *Journal, keep func(owner string) 
 	sort.Strings(owners)
 	var errs []error
 	for _, o := range owners {
-		if keep != nil && keep(o) {
+		if keep != nil && keep(o) || j.live[o] > 0 {
 			continue
 		}
 		steps := entries[o]
-		var failed []Step
+		var kept []Step
 		for i := len(steps) - 1; i >= 0 && ctx.Err() == nil; i-- {
 			if err := runUndo(ctx, r, steps[i]); err != nil {
 				errs = append(errs, fmt.Errorf("cleanup %s: %w", o, err))
-				failed = append(failed, steps[i])
+				if steps[i].Persistent {
+					kept = append(kept, steps[i])
+				}
 			}
 		}
 		if err := ctx.Err(); err != nil {
 			return errors.Join(append(errs, err)...)
 		}
 		// A DNSPrimary ownership kept for o (its DNS undo failed in
-		// this process, P13) ends when the undo ran. (Cleanup runs at
-		// service start, before any tunnel: there is normally none.)
-		releasePrimaryDNSUnless(o, failed)
-		if err := j.Forget(o); err != nil {
+		// this process, P13) ends when the undo ran.
+		releasePrimaryDNSUnless(o, kept)
+		var err error
+		if len(kept) == 0 {
+			err = j.Forget(o)
+		} else {
+			slices.Reverse(kept)
+			err = j.Record(o, kept)
+		}
+		if err != nil {
 			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// setLive records whether c uses its owner's record in its journal (see
+// Journal.live). c.mu is held.
+func (c *configurer) setLive(on bool) {
+	if c.j == nil || c.live == on {
+		return
+	}
+	j := c.j
+	j.liveMu.Lock()
+	defer j.liveMu.Unlock()
+	if j.live == nil {
+		j.live = map[string]int{}
+	}
+	if on {
+		c.live, c.liveAs = true, c.owner
+		j.live[c.liveAs]++
+		return
+	}
+	c.live = false
+	if j.live[c.liveAs]--; j.live[c.liveAs] <= 0 {
+		delete(j.live, c.liveAs)
+	}
 }

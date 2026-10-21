@@ -725,3 +725,31 @@ func TestRefreshIsNoOp(t *testing.T) {
 		t.Fatalf("Refresh: err=%v cmds=%q", err, r.cmds)
 	}
 }
+
+// A persistent undo that fails in Cleanup stays journaled for the next
+// retry (P7); the owner's failing non-persistent steps and the ones that
+// ran are forgotten.
+func TestCleanupKeepsFailedPersistentSteps(t *testing.T) {
+	j, path := newJournal(t)
+	rule := Step{Name: "ip", Args: []string{"rule", "del", "x"}, Persistent: true}
+	j.Record("wg0", []Step{
+		rule,
+		{Name: "ip", Args: []string{"route", "del", "y"}},
+		{Name: "ip", Args: []string{"address", "del", "z"}, Persistent: true},
+	})
+	r := &recorder{fail: map[string]error{"ip rule del x": errors.New("exit status 2"), "ip route del y": errors.New("exit status 2")}}
+	if err := Cleanup(ctx, r, j, nil); err == nil {
+		t.Fatal("Cleanup error = nil, want the failures")
+	}
+	j2, err := OpenJournal(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e := j2.Entries(); !reflect.DeepEqual(e, map[string][]Step{"wg0": {rule}}) {
+		t.Fatalf("journal after Cleanup: %v, want only the failed persistent step", e)
+	}
+	// It succeeds next time: forgotten.
+	if err := Cleanup(ctx, &recorder{}, j, nil); err != nil || len(j.Entries()) != 0 {
+		t.Fatalf("retry: %v, journal %v", err, j.Entries())
+	}
+}
