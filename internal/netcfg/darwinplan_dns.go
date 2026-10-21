@@ -594,7 +594,7 @@ func (c *configurer) refreshDNSLocked(ctx context.Context) error {
 	}
 	if err := c.moveDNSLocked(ctx, svc, rewritten); err != nil {
 		d.dnsFailed, d.dnsFailSvc, d.dnsFailAt = true, svc, now
-		log.Printf("netcfg: %s: moving the DNS settings to network service %s failed (retried on the next network change after %v, or when the service changes): %v",
+		log.Printf("netcfg: %s: moving the DNS settings to network service %s failed (retried at the first network check after %v, which the daemon makes every 30 s and at network changes, or at once when the service changes): %v",
 			d.iface, svc, moveBackoff, err)
 		return err
 	}

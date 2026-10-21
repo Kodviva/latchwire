@@ -524,7 +524,7 @@ func (c *configurer) refreshDarwin(ctx context.Context) error {
 		}
 		if err := c.moveEndpointRoutesLocked(ctx, f, h.gw); err != nil {
 			d.failed[f], d.failGW[f], d.failAt[f] = true, h.gw, now
-			log.Printf("netcfg: %s: moving the endpoint routes to gateway %s failed (retried on the next network change after %v, or when the gateway changes): %v",
+			log.Printf("netcfg: %s: moving the endpoint routes to gateway %s failed (retried at the first network check after %v, which the daemon makes every 30 s and at network changes, or at once when the gateway changes): %v",
 				d.iface, gwString(h.gw), moveBackoff, err)
 			errs = append(errs, err)
 		} else {

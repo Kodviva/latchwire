@@ -506,6 +506,7 @@ func TestDarwinDNSRefreshPrimaryServiceChange(t *testing.T) {
 
 // A move that fails is not retried on every network event (P9).
 func TestDarwinDNSRefreshBacksOff(t *testing.T) {
+	logs := captureLog(t)
 	f := newFakeStore(t)
 	f.setPrimary(svc1)
 	c := newDarwin(f, nil).(*configurer)
@@ -535,6 +536,11 @@ func TestDarwinDNSRefreshBacksOff(t *testing.T) {
 	}
 	if want := (fdict{"ServerAddresses": arr("10.0.0.1", "fd00::1")}); !reflect.DeepEqual(f.keys[dnsKey(svc2)], want) {
 		t.Errorf("after the backoff %v", f.keys[dnsKey(svc2)])
+	}
+	// The retry comes from the daemon's periodic check, not only from a
+	// network change.
+	if l := logs.String(); !strings.Contains(l, "retried at the first network check after 30s, which the daemon makes every 30 s") {
+		t.Errorf("log does not say when the move is retried:\n%s", l)
 	}
 }
 

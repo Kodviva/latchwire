@@ -659,6 +659,7 @@ func TestDarwinExistingEndpointRoute(t *testing.T) {
 // the back-off (each failure would otherwise cause the next event), but is
 // at once when the gateway changes again, and after the back-off.
 func TestEndpointRouteMoveBackoff(t *testing.T) {
+	logs := captureLog(t)
 	now := time.Unix(1_800_000_000, 0)
 	r := &recorder{out: map[string]string{"route -n get default": defaultVia("192.168.1.1", "en0")}}
 	c := newDarwin(r, nil).(*configurer)
@@ -714,6 +715,11 @@ func TestEndpointRouteMoveBackoff(t *testing.T) {
 	r.cmds = nil
 	if c.Refresh(ctx); !moved() {
 		t.Fatalf("after the back-off: %q, want an attempt", r.cmds)
+	}
+	// The retry comes from the daemon's periodic check, not only from a
+	// network change.
+	if l := logs.String(); !strings.Contains(l, "retried at the first network check after 30s, which the daemon makes every 30 s") {
+		t.Errorf("log does not say when the move is retried:\n%s", l)
 	}
 }
 
