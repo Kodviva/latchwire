@@ -623,7 +623,11 @@ func notAllowed(name string, uid uint32) error {
 }
 
 // requestDisconnect is tunnel.disconnect from uid. An administrator may
-// disconnect any tunnel, a user one bound to its own uid. A user who is one
+// disconnect any tunnel, a user one bound to its own uid, and one whose
+// connect for that user failed (error, still recorded with that uid) while
+// the user is one of its allowed users (P23): fail-closed must not strand
+// the user who caused it. A tunnel a revoke left unbound stays an
+// administrator's to take down (P21). A user who is one
 // of the tunnel's allowed users may also abandon an automatic connect
 // (on-demand or AutoConnect) that runs for that user and still waits for
 // the PIN, before it binds the tunnel; an idle disconnected tunnel is no
@@ -655,6 +659,9 @@ func (m *Manager) requestDisconnect(uid uint32, name string) (ipc.TunnelStatus, 
 			return "admin"
 		case t.boundTo(uid):
 			return "bound"
+		case t.state == StateError && t.hasRef && t.uid == uid && pol.allows(uid):
+			// Its own failed connect (P23): a revoke left it unbound.
+			return "failed"
 		case t.state == StateDisconnected && (t.odPending || t.autoPending) && t.pendingUID == uid && pol.allows(uid):
 			return "pending"
 		}
@@ -675,6 +682,14 @@ func (m *Manager) requestDisconnect(uid uint32, name string) (ipc.TunnelStatus, 
 			odNet, od = m.downNetwork(), true
 			pol = m.store.policyFor(name) // a deny during the lookup counts
 		}
+	}
+	// A user's grounds rest on the policy: it is read again under polMu,
+	// held through the teardown, so a deny is either seen here or comes
+	// after the teardown (as for connect's reservation).
+	if !admin {
+		m.polMu.Lock()
+		defer m.polMu.Unlock()
+		pol = m.store.policyFor(name)
 	}
 	// Under Manager.mu, in the same step as the teardown: no automatic
 	// connect can slip in between.
@@ -1380,7 +1395,9 @@ func (m *Manager) connect(caller context.Context, name string, uid uint32, admin
 	defer context.AfterFunc(abort, cancelProving)()
 	c, err := m.prove(proving, name, cands)
 	if err != nil {
-		m.failUnbound(t, uid, gen0)
+		if caller.Err() == nil { // a requester who gave up changes nothing (P23)
+			m.failUnbound(t, uid, gen0)
+		}
 		log.Printf("daemon: tunnel %s: connect: %v", name, err)
 		return ipc.TunnelStatus{}, userErr(err)
 	}
@@ -1444,14 +1461,18 @@ func (m *Manager) connect(caller context.Context, name string, uid uint32, admin
 	// P18: a full tunnel takes the DNS from a split tunnel that answers
 	// every name, before anything of its own is built. When that fails it
 	// is refused and the reservation undone.
+	// restore undoes the reservation (Manager.mu held).
+	restore := func() {
+		if t.gen == gen {
+			t.state, t.ref, t.hasRef, t.uid, t.policy = prev.state, prev.ref, prev.hasRef, prev.uid, prev.policy
+			t.adminBound, t.odConnected = prev.adminBound, prev.odConnected
+			t.cancel, t.mark, t.endpoints = nil, 0, nil
+		}
+	}
 	if demote != nil {
 		if err := m.demote(attempt, demote); err != nil {
 			m.mu.Lock()
-			if t.gen == gen {
-				t.state, t.ref, t.hasRef, t.uid, t.policy = prev.state, prev.ref, prev.hasRef, prev.uid, prev.policy
-				t.adminBound, t.odConnected = prev.adminBound, prev.odConnected
-				t.cancel = nil
-			}
+			restore()
 			m.mu.Unlock()
 			cancelLife()
 			m.syncKillSwitch() // a no-op unless a sync saw the reservation
@@ -1480,7 +1501,14 @@ func (m *Manager) connect(caller context.Context, name string, uid uint32, admin
 		m.syncKillSwitch()
 		return m.status(t), nil
 	}
-	if t.gen == gen {
+	switch {
+	case t.gen != gen:
+	case caller.Err() != nil:
+		// The requester gave up (Ctrl-C during up, after the PIN): the
+		// tunnel goes back to what it was, as after a refused demotion,
+		// rather than failing into a state that may keep blocking (P23).
+		restore()
+	default:
 		t.state, t.cancel, t.mark, t.endpoints = StateError, nil, 0, nil
 	}
 	m.mu.Unlock()
@@ -1737,7 +1765,7 @@ func (t *tunnel) active() bool {
 }
 
 // reservation is what a connect changed when it reserved the tunnel, so
-// that a refused demotion can put it back.
+// that a refused demotion or a requester who gave up can put it back.
 type reservation struct {
 	state      string
 	ref        keyref.Ref

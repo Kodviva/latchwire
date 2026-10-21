@@ -401,8 +401,8 @@ func TestDownFailedTunnel(t *testing.T) {
 	}
 }
 
-// A user's down of a failed tunnel whose kill switch still blocks says that
-// only an administrator can lift it.
+// A refused down of a failed tunnel whose kill switch still blocks says who
+// can lift it: the user whose connect failed, or an administrator (P23).
 func TestDownFailedBlockingTunnelHint(t *testing.T) {
 	for _, ks := range []string{ipc.KillSwitchStatusBlocking, ipc.KillSwitchStatusOff} {
 		te := newTestEnv(nil)

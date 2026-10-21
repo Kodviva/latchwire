@@ -131,8 +131,9 @@ func cmdDown(ctx context.Context, e *env, args []string) error {
 			prev == daemon.StateError && refused:
 			fmt.Fprintf(e.stdout, msg.DownAlreadyFmt+"\n", name)
 			if prev == daemon.StateError && blocking {
-				// Only an administrator's down lifts a failed tunnel's
-				// kill switch (fail-closed).
+				// Only an administrator's down, or that of the user
+				// whose connect failed while still allowed (P23), lifts
+				// a failed tunnel's kill switch (fail-closed).
 				fmt.Fprintf(e.stdout, msg.DownStillBlockingFmt+"\n", name)
 			}
 			return nil

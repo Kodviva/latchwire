@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.zx2c4.com/wireguard/tun"
+
 	"github.com/Kodviva/latchwire/internal/ipc"
 	"github.com/Kodviva/latchwire/internal/keyref"
 	"github.com/Kodviva/latchwire/internal/killswitch"
@@ -723,5 +725,97 @@ func TestRevokeArmedErrorTunnelUnbinds(t *testing.T) {
 	m.mu.Unlock()
 	if state != StateCardRemoved || hasRef || uid != 0 {
 		t.Fatalf("after the restart: state %q hasRef %v uid %d; want card_removed, unbound", state, hasRef, uid)
+	}
+}
+
+// P23 (a): a user who gives up on its own connect after the tunnel was
+// reserved (Ctrl-C during up, after the PIN) leaves the tunnel as it was,
+// not failed: an armed tunnel that was disconnected stops blocking.
+func TestCancelledConnectRestoresPriorState(t *testing.T) {
+	var cancelCaller atomic.Pointer[context.CancelFunc]
+	hook := func(m *Manager) {
+		orig := m.tun
+		m.tun = func(name string, mtu int) (tun.Device, netcfg.Configurer, error) {
+			if c := cancelCaller.Load(); c != nil {
+				(*c)() // the requester leaves while the device is made
+				return nil, nil, context.Canceled
+			}
+			return orig(name, mtu)
+		}
+	}
+	var setup atomic.Bool // the test process adds the tunnel as an administrator
+	setup.Store(true)
+	fe := newFullTunnelEnvOpts(t, true, true, envOpts{admin: func(uid uint32) bool { return uid == uidAdmin || uid == uidA && setup.Load() }, hook: hook})
+	setup.Store(false)
+	fe.allow(uidA)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancelCaller.Store(&cancel)
+	if _, err := fe.m.requestConnect(ctx, uidA, tunName); err == nil {
+		t.Fatal("cancelled connect: no error")
+	}
+	if tn := fe.tunnel(); tn.state != StateDisconnected || tn.hasRef || tn.uid != 0 || tn.cancel != nil {
+		t.Fatalf("after the cancelled connect: state %q hasRef %v uid %d", tn.state, tn.hasRef, tn.uid)
+	}
+	if st := fe.status(); st.KillSwitch != ipc.KillSwitchStatusOff {
+		t.Fatalf("status %+v, want the kill switch off", st)
+	}
+	fe.fw.waitLast(t, "a release", released)
+
+	// The same failure without the requester leaving is an error (the kill
+	// switch keeps blocking, fail-closed).
+	cancelCaller.Store(nil)
+	fe.fw.setErr(errors.New("pfctl: /dev/pf: Permission denied"))
+	if _, err := fe.m.requestConnect(context.Background(), uidA, tunName); err == nil {
+		t.Fatal("failing connect: no error")
+	}
+	if tn := fe.tunnel(); tn.state != StateError {
+		t.Fatalf("failed connect: state %q, want error", tn.state)
+	}
+}
+
+// P23 (b): the user a failed connect was recorded for may take the failed
+// tunnel down (lifting its kill switch) while still an allowed user;
+// another allowed user may not, nor the same user once the policy file no
+// longer allows it; an administrator always may.
+func TestFailedTunnelDownByItsUser(t *testing.T) {
+	var setup atomic.Bool // the test process adds the tunnel as an administrator
+	setup.Store(true)
+	fe := newFullTunnelEnvOpts(t, true, true, envOpts{admin: func(uid uint32) bool { return uid == uidAdmin || uid == uidA && setup.Load() }})
+	setup.Store(false)
+	fe.allow(uidA, uidB)
+	newFakeAgent(t, fe.env, uidB, otherKey(t), serialB) // registered, other card
+	fail := func() {
+		t.Helper()
+		fe.fw.setErr(errors.New("pfctl: /dev/pf: Permission denied"))
+		if _, err := fe.m.requestConnect(context.Background(), uidA, tunName); err == nil {
+			t.Fatal("failing connect: no error")
+		}
+		fe.fw.setErr(nil)
+		if tn := fe.tunnel(); tn.state != StateError || !tn.hasRef || tn.uid != uidA {
+			t.Fatalf("failed connect: state %q hasRef %v uid %d", tn.state, tn.hasRef, tn.uid)
+		}
+		if st := fe.status(); st.KillSwitch != ipc.KillSwitchStatusBlocking {
+			t.Fatalf("failed armed tunnel: %+v, want blocking", st)
+		}
+	}
+	fail()
+	if _, err := fe.m.requestDisconnect(uidB, tunName); err == nil {
+		t.Fatal("another allowed user took the failed tunnel down")
+	}
+	if st, err := fe.m.requestDisconnect(uidA, tunName); err != nil || st.State != StateDisconnected {
+		t.Fatalf("its user's down: %+v, %v", st, err)
+	}
+	fe.fw.waitLast(t, "a release", released)
+
+	// The policy file no longer allows A (edited by hand: nothing revoked).
+	fail()
+	if err := os.WriteFile(filepath.Join(fe.store, tunName+".policy"), []byte(`{"allowed_users":[`+fmt.Sprint(uidB)+`]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fe.m.requestDisconnect(uidA, tunName); err == nil {
+		t.Fatal("a user no longer allowed took the failed tunnel down")
+	}
+	if st, err := fe.m.requestDisconnect(uidAdmin, tunName); err != nil || st.State != StateDisconnected {
+		t.Fatalf("administrator's down: %+v, %v", st, err)
 	}
 }

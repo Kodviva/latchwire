@@ -303,7 +303,7 @@ are never tried automatically.`
 	DownAlreadyFmt = "tunnel %s is already disconnected"
 	DownDoneFmt    = "tunnel %s disconnected"
 	// DownStillBlockingFmt takes the tunnel name.
-	DownStillBlockingFmt = "note: tunnel %[1]s failed and its kill switch still blocks traffic outside the tunnel; an administrator can lift it with: sudo latchwire down %[1]s"
+	DownStillBlockingFmt = "note: tunnel %[1]s failed and its kill switch still blocks traffic outside the tunnel; only the user whose connect failed (while still an allowed user) or an administrator can lift it: latchwire down %[1]s as that user, or sudo latchwire down %[1]s"
 	StatusNone           = "no tunnels configured"
 	StatusHeader         = "NAME\tSTATE\tIDENTITY\tLAST HANDSHAKE\tINTERFACE\tMTU\tROUTES\tDNS\tKILL SWITCH"
 	StatusRowFmt         = "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s"
