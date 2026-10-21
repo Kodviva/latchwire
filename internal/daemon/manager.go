@@ -72,7 +72,7 @@ type TUNFactory func(name string, mtu int) (tun.Device, netcfg.Configurer, error
 type Options struct {
 	Socket   string     // DefaultSocket
 	StoreDir string     // DefaultStoreDir()
-	TUN      TUNFactory // DefaultTUN
+	TUN      TUNFactory // nil = DefaultTUN(Runner, journal), made by Serve
 	Bind     func() conn.Bind
 	IsAdmin  func(uid uint32) (bool, error) // nil = ipc.IsAdmin
 	// JournalPath is the file that records system changes for cleanup after

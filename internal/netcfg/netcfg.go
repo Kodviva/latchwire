@@ -122,6 +122,12 @@ func (c *configurer) Apply(ctx context.Context, p Plan) (Applied, error) {
 // Refresh does nothing yet: split tunnels depend on no system state.
 func (c *configurer) Refresh(ctx context.Context) error { return nil }
 
+// Remove undoes the applied steps and always drops the owner's journal
+// record. Callers close the tunnel device first, which takes the interface,
+// its addresses and its routes with it, so the undo commands usually fail;
+// keeping the record would replay them at the next start, possibly against
+// an unrelated interface that reused the name (utunN on macOS). The errors
+// are still returned.
 func (c *configurer) Remove(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -129,8 +135,10 @@ func (c *configurer) Remove(ctx context.Context) error {
 		return nil
 	}
 	err := c.undoLocked(ctx)
-	if err == nil && c.j != nil {
-		err = c.j.Forget(c.owner)
+	if c.j != nil {
+		if ferr := c.j.Forget(c.owner); err == nil {
+			err = ferr
+		}
 	}
 	return err
 }

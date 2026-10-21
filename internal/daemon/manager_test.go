@@ -1689,3 +1689,40 @@ func TestServeCleansJournalAtStart(t *testing.T) {
 		t.Fatalf("journal after startup: %v, want empty", e)
 	}
 }
+
+// A damaged journal must not keep the daemon down: it is moved aside and
+// Serve starts.
+func TestServeStartsWithCorruptJournal(t *testing.T) {
+	dir := t.TempDir()
+	jpath := filepath.Join(dir, "journal.json")
+	if err := os.WriteFile(jpath, []byte("{garbage"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sock := filepath.Join(dir, "s")
+	m := NewManager(Options{Socket: sock, StoreDir: filepath.Join(dir, "tunnels"), JournalPath: jpath,
+		Runner: &cmdRunner{}, TUN: (&netFactory{}).make})
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() { served <- m.Serve(ctx) }()
+	t.Cleanup(func() { cancel(); <-served })
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c, err := ipc.Dial(sock)
+		if err == nil {
+			c.Close()
+			break
+		}
+		select {
+		case err := <-served:
+			t.Fatalf("Serve returned: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("daemon socket: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if aside, _ := filepath.Glob(jpath + ".corrupt-*"); len(aside) != 1 {
+		t.Fatalf("aside files %v, want one", aside)
+	}
+}

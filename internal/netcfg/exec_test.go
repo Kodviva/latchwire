@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeTool(t *testing.T, dir, name, script string) {
@@ -43,7 +44,7 @@ func TestExecRunnerUsesFixedDirs(t *testing.T) {
 
 func TestExecRunnerStdinStdoutStderr(t *testing.T) {
 	d := t.TempDir()
-	writeTool(t, d, "tool", `cat; echo oops >&2; exit 3`)
+	writeTool(t, d, "tool", `/bin/cat; echo oops >&2; exit 3`)
 	out, err := execRunner{dirs: []string{d}}.Run(ctx, "tool", []string{"secret-free-arg"}, []byte("from-stdin"))
 	if string(out) != "from-stdin" {
 		t.Errorf("stdout = %q", out)
@@ -65,5 +66,53 @@ func TestExecRunnerDefaultDirsAreFixed(t *testing.T) {
 	}
 	if len(r.dirs) == 0 {
 		t.Error("no command dirs")
+	}
+}
+
+func TestExecRunnerMinimalEnv(t *testing.T) {
+	d := t.TempDir()
+	writeTool(t, d, "tool", `/usr/bin/env | /usr/bin/sort`)
+	t.Setenv("LATCHWIRE_SECRET_TEST", "leak")
+	t.Setenv("LANG", "tr_TR.UTF-8")
+	out, err := execRunner{dirs: []string{d, "/other"}}.Run(ctx, "tool", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		switch {
+		case l == "LC_ALL=C", l == "PATH="+d+":/other":
+		case strings.HasPrefix(l, "PWD="), strings.HasPrefix(l, "SHLVL="), strings.HasPrefix(l, "_="), strings.HasPrefix(l, "OLDPWD="):
+			// set by the shell itself
+		default:
+			t.Errorf("unexpected environment entry %q", l)
+		}
+	}
+}
+
+func TestExecRunnerCapsStderr(t *testing.T) {
+	d := t.TempDir()
+	writeTool(t, d, "tool", `/usr/bin/head -c 100000 /dev/zero | /usr/bin/tr '\0' 'x' >&2; exit 1`)
+	_, err := execRunner{dirs: []string{d}}.Run(ctx, "tool", nil, nil)
+	if err == nil {
+		t.Fatal("want error")
+	}
+	if n := len(err.Error()); n > maxStderr+256 {
+		t.Fatalf("error is %d bytes, want it capped near %d", n, maxStderr)
+	}
+	if !strings.Contains(err.Error(), "xxxx") {
+		t.Fatalf("error lost the stderr text: %.80q", err)
+	}
+}
+
+// A background child that keeps the output pipes open must not hold Run
+// beyond the wait delay.
+func TestExecRunnerWaitDelay(t *testing.T) {
+	d := t.TempDir()
+	writeTool(t, d, "tool", `/bin/sleep 20 &
+echo started`)
+	start := time.Now()
+	execRunner{dirs: []string{d}}.Run(ctx, "tool", nil, nil)
+	if el := time.Since(start); el > 10*time.Second {
+		t.Fatalf("Run took %v, want it bounded by the wait delay", el)
 	}
 }

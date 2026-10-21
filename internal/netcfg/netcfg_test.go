@@ -425,11 +425,217 @@ func TestJournalFileMode(t *testing.T) {
 	}
 }
 
-func TestOpenJournalCorrupt(t *testing.T) {
+// Undo commands fail once the device is closed (the interface is gone); the
+// owner's record must go anyway, or the next start would replay them, maybe
+// against another VPN's reused utunN.
+func TestRemoveForgetsOwnerWhenUndoFails(t *testing.T) {
+	for name, f := range platforms {
+		j, path := newJournal(t)
+		r := &recorder{}
+		c := f(r, j)
+		if _, err := c.Apply(ctx, plan("X", pfx("10.0.0.2/32"), pfx("10.0.0.0/24"))); err != nil {
+			t.Fatal(err)
+		}
+		r.failOn = map[string]string{"darwin": "ifconfig", "linux": "ip "}[name]
+		if err := c.Remove(ctx); err == nil {
+			t.Errorf("%s: Remove error = nil, want the undo failure reported", name)
+		}
+		if e := j.Entries(); len(e) != 0 {
+			t.Errorf("%s: journal after Remove: %v, want empty", name, e)
+		}
+		j2, err := OpenJournal(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if e := j2.Entries(); len(e) != 0 {
+			t.Errorf("%s: journal file after Remove: %v, want empty", name, e)
+		}
+	}
+}
+
+func writeJournalFile(t *testing.T, content string) string {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "journal.json")
-	os.WriteFile(path, []byte("{nope"), 0o600)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func asideFiles(t *testing.T, path string) []string {
+	t.Helper()
+	m, err := filepath.Glob(path + ".corrupt-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+// A journal that cannot be parsed, or has another version, is moved aside and
+// the journal starts empty: the daemon must still start.
+func TestOpenJournalCorruptRecovers(t *testing.T) {
+	for name, content := range map[string]string{
+		"garbage":       "{nope",
+		"empty":         "",
+		"wrong version": `{"version":99,"owners":{"x":[{"name":"ip"}]}}`,
+		"no version":    `{"owners":{}}`,
+	} {
+		path := writeJournalFile(t, content)
+		j, err := OpenJournal(path)
+		if err != nil {
+			t.Errorf("%s: OpenJournal: %v, want recovery", name, err)
+			continue
+		}
+		if !j.RecoveredFromCorruption() {
+			t.Errorf("%s: RecoveredFromCorruption = false", name)
+		}
+		if e := j.Entries(); len(e) != 0 {
+			t.Errorf("%s: entries %v, want empty", name, e)
+		}
+		aside := asideFiles(t, path)
+		if len(aside) != 1 {
+			t.Errorf("%s: aside files %v, want one", name, aside)
+			continue
+		}
+		if b, _ := os.ReadFile(aside[0]); string(b) != content {
+			t.Errorf("%s: aside content %q, want the original %q", name, b, content)
+		}
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s: corrupt file still at the journal path (%v)", name, err)
+		}
+		// The recovered journal works.
+		if err := j.Record("a", []Step{{Name: "ip"}}); err != nil {
+			t.Errorf("%s: Record after recovery: %v", name, err)
+		}
+	}
+}
+
+func TestOpenJournalHealthyNotRecovered(t *testing.T) {
+	j, path := newJournal(t)
+	j.Record("a", []Step{{Name: "ip"}})
+	j2, err := OpenJournal(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j2.RecoveredFromCorruption() || len(asideFiles(t, path)) != 0 {
+		t.Fatal("healthy journal reported as recovered")
+	}
+	if j3, _ := OpenJournal(filepath.Join(t.TempDir(), "none.json")); j3.RecoveredFromCorruption() {
+		t.Fatal("missing journal reported as recovered")
+	}
+}
+
+// A plain read error is not corruption: it fails.
+func TestOpenJournalReadErrorFails(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads any file")
+	}
+	path := writeJournalFile(t, `{"version":1,"owners":{}}`)
+	if err := os.Chmod(path, 0); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := OpenJournal(path); err == nil {
-		t.Fatal("OpenJournal accepted a corrupt journal")
+		t.Fatal("OpenJournal succeeded on an unreadable file")
+	}
+	if len(asideFiles(t, path)) != 0 {
+		t.Fatal("unreadable file was moved aside")
+	}
+	// A directory where the file should be is a read error too.
+	dirPath := filepath.Join(t.TempDir(), "journal.json")
+	os.Mkdir(dirPath, 0o700)
+	if _, err := OpenJournal(dirPath); err == nil {
+		t.Fatal("OpenJournal succeeded on a directory")
+	}
+}
+
+// Running as root, a journal directory or file that others can write, or that
+// root does not own, is refused. (geteuid and trustedUID are faked so the
+// test needs no root.)
+func TestOpenJournalRejectsUntrusted(t *testing.T) {
+	oldEuid, oldUID := geteuid, trustedUID
+	t.Cleanup(func() { geteuid, trustedUID = oldEuid, oldUID })
+	geteuid = func() int { return 0 }
+	trustedUID = uint32(os.Getuid()) // the test's files count as root's
+
+	mk := func() (dir, path string) {
+		dir = t.TempDir()
+		path = filepath.Join(dir, "journal.json")
+		if err := os.WriteFile(path, []byte(`{"version":1,"owners":{}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	// Baseline: trusted.
+	_, path := mk()
+	if _, err := OpenJournal(path); err != nil {
+		t.Fatalf("trusted journal refused: %v", err)
+	}
+	for _, mode := range []os.FileMode{0o666, 0o620, 0o602} {
+		_, path := mk()
+		os.Chmod(path, mode)
+		if _, err := OpenJournal(path); err == nil {
+			t.Errorf("file mode %v accepted", mode)
+		}
+	}
+	for _, mode := range []os.FileMode{0o777, 0o770, 0o707} {
+		dir, path := mk()
+		os.Chmod(dir, mode)
+		_, err := OpenJournal(path)
+		os.Chmod(dir, 0o700)
+		if err == nil {
+			t.Errorf("dir mode %v accepted", mode)
+		}
+	}
+	// A missing file in a trusted directory is fine.
+	if _, err := OpenJournal(filepath.Join(t.TempDir(), "run", "j.json")); err != nil {
+		t.Errorf("missing journal refused: %v", err)
+	}
+	// Not owned by root.
+	trustedUID = uint32(os.Getuid()) + 1
+	_, path = mk()
+	if _, err := OpenJournal(path); err == nil {
+		t.Error("journal owned by another uid accepted")
+	}
+	// Refusal is not recovery: the file stays where it is.
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("refused journal was moved: %v", err)
+	}
+	// Not root: no checks.
+	geteuid = func() int { return 1000 }
+	if _, err := OpenJournal(path); err != nil {
+		t.Errorf("non-root open refused: %v", err)
+	}
+}
+
+// When ctx ends mid-cleanup nothing is forgotten: the failures of a cancelled
+// run say nothing about the system, and the next start must retry.
+func TestCleanupCancelledForgetsNothing(t *testing.T) {
+	j, path := newJournal(t)
+	j.Record("a", []Step{{Name: "ip", Args: []string{"a1"}}, {Name: "ip", Args: []string{"a2"}}})
+	j.Record("b", []Step{{Name: "ip", Args: []string{"b1"}}})
+	c, cancel := context.WithCancel(ctx)
+	r := &recorder{onRun: func(string) { cancel() }}
+	err := Cleanup(c, r, j, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Cleanup error = %v, want context.Canceled", err)
+	}
+	if len(r.cmds) != 1 {
+		t.Errorf("commands after cancel: %q, want only the first", r.cmds)
+	}
+	j2, err := OpenJournal(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e := j2.Entries(); len(e) != 2 {
+		t.Fatalf("journal after cancelled Cleanup: %v, want both owners kept", e)
+	}
+	// Already cancelled before the start: no command at all.
+	r = &recorder{}
+	if err := Cleanup(c, r, j, nil); err == nil || len(r.cmds) != 0 {
+		t.Fatalf("pre-cancelled Cleanup: err=%v cmds=%q", err, r.cmds)
+	}
+	if len(j.Entries()) != 2 {
+		t.Fatal("pre-cancelled Cleanup forgot owners")
 	}
 }
 

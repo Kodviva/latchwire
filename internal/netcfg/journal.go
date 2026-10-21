@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // DefaultJournalPath is where the daemon keeps its journal.
@@ -48,6 +50,8 @@ func cloneSteps(in []Step) []Step {
 type Journal struct {
 	path string
 
+	recovered bool // the file was unreadable as a journal and moved aside
+
 	mu     sync.Mutex
 	owners map[string][]Step
 }
@@ -61,8 +65,20 @@ const journalVersion = 1
 
 // OpenJournal loads the journal at path. A missing file is an empty journal;
 // the file and its directory are created on the first Record.
+//
+// A file that cannot be parsed, or has another version, is moved to
+// path+".corrupt-<unix time>" and the journal starts empty, so a damaged file
+// can never keep the daemon (and, with a kill switch, the network) down;
+// RecoveredFromCorruption reports it. Plain read errors fail, and so does a
+// journal directory or file that is not safe to trust (see checkTrusted).
 func OpenJournal(path string) (*Journal, error) {
 	j := &Journal{path: path, owners: map[string][]Step{}}
+	if err := checkTrusted(filepath.Dir(path)); err != nil {
+		return nil, err
+	}
+	if err := checkTrusted(path); err != nil {
+		return nil, err
+	}
 	b, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return j, nil
@@ -71,17 +87,61 @@ func OpenJournal(path string) (*Journal, error) {
 		return nil, fmt.Errorf("netcfg: reading journal: %w", err)
 	}
 	var f journalFile
-	if err := json.Unmarshal(b, &f); err != nil {
-		return nil, fmt.Errorf("netcfg: journal %s is corrupt: %w", path, err)
+	err = json.Unmarshal(b, &f)
+	if err == nil && f.Version != journalVersion {
+		err = fmt.Errorf("unsupported version %d", f.Version)
 	}
-	if f.Version != journalVersion {
-		return nil, fmt.Errorf("netcfg: journal %s has unsupported version %d", path, f.Version)
+	if err != nil {
+		aside := fmt.Sprintf("%s.corrupt-%d", path, time.Now().Unix())
+		if rerr := os.Rename(path, aside); rerr != nil {
+			log.Printf("netcfg: journal %s is unusable (%v) and could not be moved aside (%v); starting empty", path, err, rerr)
+		} else {
+			log.Printf("netcfg: journal %s is unusable (%v); moved to %s, starting empty", path, err, aside)
+		}
+		j.recovered = true
+		return j, nil
 	}
 	for o, steps := range f.Owners {
 		j.owners[o] = steps
 	}
 	return j, nil
 }
+
+// RecoveredFromCorruption reports whether OpenJournal found an unusable file
+// and started empty: whatever the old journal held is not known, so well-known
+// objects (such as the kill switch's firewall rules) must be cleared by name.
+func (j *Journal) RecoveredFromCorruption() bool { return j.recovered }
+
+// checkTrusted fails when the daemon runs as root and p exists but is not
+// owned by root or is group- or world-writable: an unprivileged user could
+// plant undo commands that root then runs. Without root there is nothing to
+// protect and nothing to check.
+func checkTrusted(p string) error {
+	if geteuid() != 0 {
+		return nil
+	}
+	fi, err := os.Stat(p)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("netcfg: checking %s: %w", p, err)
+	}
+	if fi.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("netcfg: %s is writable by others (mode %v)", p, fi.Mode().Perm())
+	}
+	if uid, ok := ownerUID(fi); ok && uid != trustedUID {
+		return fmt.Errorf("netcfg: %s is owned by uid %d, not root", p, uid)
+	}
+	return nil
+}
+
+// geteuid and trustedUID are variables so tests can exercise the checks
+// without being root.
+var (
+	geteuid           = os.Geteuid
+	trustedUID uint32 = 0
+)
 
 // Record replaces owner's undo steps (apply order) and persists them.
 func (j *Journal) Record(owner string, undo []Step) error {
@@ -180,6 +240,8 @@ func (j *Journal) flushLocked() error {
 // service start, before tunnels load. Undo is best effort: the interface or
 // route is usually gone already, so a failing step does not stop the rest,
 // and the owner is forgotten either way. The errors are joined and returned.
+// When ctx ends, Cleanup stops at once and forgets nothing it did not finish:
+// the failures of a cancelled run say nothing about the system.
 func Cleanup(ctx context.Context, r Runner, j *Journal, keep func(owner string) bool) error {
 	entries := j.Entries()
 	owners := make([]string, 0, len(entries))
@@ -193,11 +255,14 @@ func Cleanup(ctx context.Context, r Runner, j *Journal, keep func(owner string) 
 			continue
 		}
 		steps := entries[o]
-		for i := len(steps) - 1; i >= 0; i-- {
+		for i := len(steps) - 1; i >= 0 && ctx.Err() == nil; i-- {
 			s := steps[i]
 			if _, err := r.Run(ctx, s.Name, s.Args, s.Stdin); err != nil {
 				errs = append(errs, fmt.Errorf("cleanup %s: %s: %w", o, s, err))
 			}
+		}
+		if err := ctx.Err(); err != nil {
+			return errors.Join(append(errs, err)...)
 		}
 		if err := j.Forget(o); err != nil {
 			errs = append(errs, err)
