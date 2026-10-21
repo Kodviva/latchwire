@@ -200,9 +200,10 @@ type Manager struct {
 	tunnels map[string]*tunnel
 	agents  map[*ipc.Conn]*agentState
 	nextSeq uint64
-	// netID is the network the last on-demand evaluation saw ("" before
-	// the first). odEpoch changes with it and whenever an agent registers
-	// or reports a card anew: an on-demand attempt is made once per epoch.
+	// netID is the last identified network an on-demand evaluation saw
+	// ("" before the first). odEpoch changes with it and whenever an agent
+	// registers or reports a card anew: an on-demand attempt is made once
+	// per epoch.
 	netID   string
 	odEpoch uint64
 }
@@ -270,9 +271,10 @@ type tunnel struct {
 	// made the current binding (kept through a card_removed reconnect,
 	// cleared at disconnected and by a connect by hand); odPending that an
 	// on-demand connect is running; odTried is the Manager.odEpoch of the
-	// last on-demand attempt. odSuppressed says that a down by hand on
-	// network odSuppress keeps on-demand from connecting the tunnel until
-	// the machine is on another identified network.
+	// last on-demand or AutoConnect attempt. odSuppressed says that a down by hand on
+	// network odSuppress ("": not identified then; the next identified
+	// network counts as it) keeps on-demand from connecting the tunnel
+	// until the machine is on another identified network.
 	odConnected  bool
 	odPending    bool
 	odTried      uint64
@@ -607,20 +609,47 @@ func notAllowed(name string, uid uint32) error {
 }
 
 // requestDisconnect is tunnel.disconnect from uid. A non-administrator may
-// only disconnect a tunnel bound to its own uid. The agents registered now
-// do not auto-connect the tunnel again (agentState.noAuto), and on-demand
-// does not connect it again until the machine is on another network
+// disconnect a tunnel bound to its own uid, and, as one of its allowed
+// users, a disconnected tunnel that something automatic may bring up: an
+// on-demand or AutoConnect attempt is running (it is abandoned, PIN prompt
+// and all) or the policy has on-demand. The agents registered now do not
+// auto-connect the tunnel again (agentState.noAuto), and on-demand does not
+// connect it again until the machine is on another network
 // (tunnel.odSuppress).
 func (m *Manager) requestDisconnect(uid uint32, name string) (ipc.TunnelStatus, error) {
 	admin := m.admin(uid)
 	if !admin && !m.agentUser(uid) {
 		return ipc.TunnelStatus{}, errForbidden
 	}
-	odNet, od := m.downNetwork(name)
+	m.mu.Lock()
+	t := m.tunnels[name]
+	m.mu.Unlock()
+	var pol Policy
+	if t != nil {
+		pol = m.store.policyFor(name)
+	}
+	may := func(t *tunnel) bool { // under Manager.mu
+		return admin || t.boundTo(uid) ||
+			(t.state == StateDisconnected && (t.odPending || t.autoPending || pol.OnDemand) && pol.allows(uid))
+	}
+	// The network is looked up only for a caller who may take the tunnel
+	// down (checked again with the teardown).
+	var (
+		odNet string
+		od    bool
+	)
+	if t != nil && pol.OnDemand {
+		m.mu.Lock()
+		ok := may(t)
+		m.mu.Unlock()
+		if ok {
+			odNet, od = m.downNetwork(), true
+		}
+	}
 	// Under Manager.mu, in the same step as the teardown: no automatic
 	// connect can slip in between.
 	return m.disconnect(name, func(t *tunnel) bool {
-		if !admin && !t.boundTo(uid) {
+		if !may(t) {
 			return false
 		}
 		if od {
@@ -1068,7 +1097,9 @@ func (m *Manager) autoConnect(c *ipc.Conn, uid uint32, serials []uint32) {
 			m.mu.Unlock()
 			continue
 		}
-		t.autoPending = true
+		// On-demand does not try again in this epoch: one PIN prompt per
+		// report, whichever feature asks.
+		t.autoPending, t.odTried = true, m.odEpoch
 		m.mu.Unlock()
 		log.Printf("daemon: tunnel %s: connecting automatically with the YubiKey of uid %d", name, uid)
 		go func() {

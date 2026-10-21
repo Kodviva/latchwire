@@ -34,8 +34,13 @@ import (
 //     after odRecheck (P9) and, still unknown, treats it as untrusted (P10);
 //   - on a trusted network, takes down to disconnected the tunnels that an
 //     on-demand connect brought up (or is bringing up), exactly as down
-//     does: their kill switch stops blocking. A tunnel connected by hand or
-//     by AutoConnect is never taken down, and neither is one waiting for
+//     does: their kill switch stops blocking. Not so a tunnel whose kill
+//     switch an administrator set to "on" (P22): the network ID is not
+//     authenticated (anyone on the local segment can copy the gateway's IP
+//     and MAC address), and such a spoofable signal must not lift a kill
+//     switch chosen explicitly; on-demand only does not connect it there.
+//     A tunnel connected by hand or by AutoConnect is never taken down,
+//     and neither is one waiting for
 //     its card (card_removed) or failed (error): as everywhere, only down,
 //     remove or a shutdown lifts that kill switch (fail-closed). Should its
 //     card bring it back on the trusted network, the next evaluation (at
@@ -47,13 +52,21 @@ import (
 // It is idempotent: what it does (a connect's routes, a teardown) causes
 // network notifications, and the next evaluation then finds nothing to do.
 // An attempt is made once per "epoch": a failed attempt (a cancelled PIN)
-// is retried only when the network ID changes or an agent registers or
-// reports a card anew (Manager.odEpoch), not at every notification or tick.
+// is retried only when the machine is on another identified network (a
+// network ID other than the last identified one; "unknown" and "none" in
+// between do not count) or an agent registers or reports a card anew
+// (Manager.odEpoch), not at every notification or tick. An AutoConnect
+// attempt counts as the epoch's attempt too: one PIN prompt per report.
 //
 // A down by hand (tunnel.disconnect) suppresses on-demand for that tunnel
 // until the machine is on another identified network (tunnel.odSuppress);
 // "unknown" and "none" in between do not count as another network, so a
-// sleep or a brief loss of the gateway does not undo the down. This is
+// sleep or a brief loss of the gateway does not undo the down. When the
+// network cannot be identified at the down (and no evaluation identified
+// one before), the next identified network is taken as the down's, so
+// only a change between two identified networks lifts it. A down also
+// abandons an on-demand or AutoConnect attempt still waiting for its PIN
+// (requestDisconnect lets the tunnel's allowed users do that). This is
 // independent of AutoConnect's suppression (agentState.noAuto), which lasts
 // for the agent sessions registered at the down: each feature stays quiet
 // by its own rule, and a down sets both.
@@ -161,7 +174,7 @@ func (m *Manager) evaluateOnDemand(ctx context.Context) {
 		conns []want
 	)
 	m.mu.Lock()
-	if id != m.netID {
+	if identified(id) && id != m.netID {
 		log.Printf("daemon: on-demand: network %s", id)
 		m.netID = id
 		m.odEpoch++
@@ -172,15 +185,23 @@ func (m *Manager) evaluateOnDemand(ctx context.Context) {
 		if !ok || m.tunnels[t.name] != t {
 			continue
 		}
-		if t.odSuppressed && identified(id) && id != t.odSuppress {
-			t.odSuppressed = false
-			log.Printf("daemon: tunnel %s: on another network (%s) than at its down: on-demand applies again", t.name, id)
+		if t.odSuppressed && identified(id) {
+			switch t.odSuppress {
+			case "":
+				t.odSuppress = id // the network of the down, identified now
+			case id:
+			default:
+				t.odSuppressed = false
+				log.Printf("daemon: tunnel %s: on another network (%s) than at its down: on-demand applies again", t.name, id)
+			}
 		}
 		switch {
 		case id == netmon.NoNetwork:
 			// No network: nothing to protect, nothing to connect through.
 		case slices.Contains(pol.TrustedNetworks, id):
-			if t.onDemandHeldLocked() {
+			// P22: never lifts a kill switch set to "on", as read now or
+			// as the tunnel runs with it.
+			if t.onDemandHeldLocked() && pol.KillSwitch != KillSwitchOn && t.policy.KillSwitch != KillSwitchOn {
 				drop = append(drop, t)
 			}
 		case t.state == StateDisconnected && !t.autoPending && !t.odPending && !t.odSuppressed && t.odTried != epoch:
@@ -258,30 +279,19 @@ func (m *Manager) cardUsersLocked(cfg *config.Tunnel) []uint32 {
 	return uids
 }
 
-// downNetwork returns the network a down of tunnel name suppresses
-// on-demand on, and false when its policy has no on-demand. The network is
-// looked up now; when it cannot be identified at this moment, the last one
-// an evaluation saw stands in, if any.
-func (m *Manager) downNetwork(name string) (string, bool) {
-	if !m.store.policyFor(name).OnDemand {
-		return "", false
-	}
+// downNetwork returns the network a down suppresses on-demand on. It is
+// looked up now; when it cannot be identified at this moment, the last
+// identified one an evaluation saw stands in, or else "" (the next
+// identified network is taken as the down's).
+func (m *Manager) downNetwork() string {
 	ctx, cancel := context.WithTimeout(context.Background(), onDemandLookupTimeout)
 	defer cancel()
-	id, err := m.networkID(ctx)
-	if err == nil && identified(id) {
-		return id, true
+	if id, err := m.networkID(ctx); err == nil && identified(id) {
+		return id
 	}
 	m.mu.Lock()
-	last := m.netID
-	m.mu.Unlock()
-	switch {
-	case last != "":
-		return last, true
-	case err == nil:
-		return id, true
-	}
-	return netmon.UnknownNetwork, true
+	defer m.mu.Unlock()
+	return m.netID
 }
 
 // handleNetwork registers network.current: the ID of the network the

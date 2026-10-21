@@ -215,7 +215,9 @@ commands:
          [--trust-current-network] [--untrust-network ID]
          [--allow-user NAME] [--deny-user NAME]
                                 show a tunnel's policy, or change it
-                                (administrator)
+                                (administrator); a trusted network is
+                                recognised only by its gateway's IP and MAC
+                                address, which anyone there can copy
   network                       print the ID of the current network`
 
 	CLIUnknownCommandFmt = "unknown command %q"
@@ -326,6 +328,9 @@ are never tried automatically.`
 	// PolicyKillSwitchPendingFmt takes the tunnel name, the kill switch
 	// setting it runs with and the policy's.
 	PolicyKillSwitchPendingFmt = "note: tunnel %s still runs with kill switch %s; %s applies when it next connects"
+	// PolicyTrustWarning goes with --trust-network and
+	// --trust-current-network (P22).
+	PolicyTrustWarning = "warning: a trusted network is recognised only by its gateway's IP and MAC address, which anyone on that network can copy; on a trusted network on-demand does not protect your traffic"
 	// PolicyRevokedBlockingFmt takes the tunnel name.
 	PolicyRevokedBlockingFmt = "note: tunnel %[1]s was taken from a user who is no longer allowed and stays blocked by its kill switch; run sudo latchwire down %[1]s to lift it"
 	// network

@@ -280,6 +280,36 @@ compromised root.
   builds and signed releases are goals and do not exist yet.
 - **Windows, other platforms, and GUI.** Not implemented in the core CLI.
 
+### 5.6 Trusted networks (on-demand)
+
+On-demand connects a tunnel on networks that are not in its policy's trusted
+networks and takes it down on a trusted one. A network is recognised by its
+network ID: the first 16 hex digits of SHA-256 over the default gateway's IP
+address and MAC address (`latchwire network` prints it). The SSID is not used,
+because a root service cannot read it on macOS.
+
+- **The ID is not authenticated.** Anyone on the local network segment can
+  give their own router, or a rogue access point, the IP and MAC address of
+  your trusted network's gateway. Latchwire then recognises that network as
+  trusted. This is the same weakness as the SSID and BSSID rules of the
+  official WireGuard clients. Latchwire does not authenticate the network; an
+  authenticated network probe is out of scope for version 1.
+- **Trusting a network means accepting cleartext traffic there.** On a trusted
+  network, on-demand does not connect, and it takes down tunnels it connected
+  itself. Their traffic then leaves the machine unprotected. Trust only
+  networks whose operator and local segment you would trust without a VPN.
+  On-demand trust is a convenience, not a security boundary.
+- **An explicit kill switch wins.** A tunnel whose kill switch is set to `on`
+  is never taken down because the network is trusted: on such a network
+  on-demand only does not connect it. A spoofable signal must not lift an
+  explicit fail-closed choice. Tunnels whose kill switch is `auto` or `off`
+  are taken down like a `down` and their kill switch stops blocking.
+- **An unidentified network is never trusted.** When there is a gateway but
+  its MAC address cannot be read (`unknown`), Latchwire looks once more after
+  about two seconds, and then treats the network as untrusted. `unknown` and
+  `none` (no network) can never be added to the trusted networks. With no
+  network, on-demand does nothing.
+
 ## 6. Why the cached `ss` alone cannot build a tunnel
 
 A WireGuard handshake (Noise IK) uses the static private key in two kinds of

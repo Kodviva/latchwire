@@ -2070,11 +2070,15 @@ func newFullTunnelEnvWith(t *testing.T, supported, table bool) *fullTunnelEnv {
 }
 
 // newFullTunnelEnvOpts is newFullTunnelEnvWith with base options (card A
-// present, the hook are set here).
+// present is set here; o.hook runs first).
 func newFullTunnelEnvOpts(t *testing.T, supported, table bool, o envOpts) *fullTunnelEnv {
 	t.Helper()
 	fe := &fullTunnelEnv{}
+	base := o.hook
 	hook := func(m *Manager) {
+		if base != nil {
+			base(m)
+		}
 		m.fullTunnel = supported
 		m.pickTable = nil
 		if table {

@@ -15,7 +15,8 @@ import (
 )
 
 const policySynopsis = "policy <name> [--kill-switch auto|on|off] [--auto-connect=true|false] [--on-demand=true|false]" +
-	" [--trust-network ID] [--trust-current-network] [--untrust-network ID] [--allow-user NAME] [--deny-user NAME]"
+	" [--trust-network ID] [--trust-current-network] [--untrust-network ID] [--allow-user NAME] [--deny-user NAME]\n" +
+	msg.PolicyTrustWarning
 
 // listFlag collects the values of a flag that may be given several times.
 type listFlag []string
@@ -48,6 +49,9 @@ func cmdPolicy(ctx context.Context, e *env, args []string) error {
 	set := ipc.TunnelPolicySet{Name: pos[0]}
 	changed := false
 	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "trust-current-network" && !*trustCurrent {
+			return // --trust-current-network=false changes nothing
+		}
 		changed = true
 		switch f.Name {
 		case "auto-connect":
@@ -102,6 +106,9 @@ func cmdPolicy(ctx context.Context, e *env, args []string) error {
 			return err
 		}
 		e.printPolicy(p)
+		if len(set.Trust) > 0 {
+			fmt.Fprintln(e.stderr, msg.PolicyTrustWarning)
+		}
 		return nil
 	})
 }

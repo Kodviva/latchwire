@@ -219,8 +219,9 @@ func (m *Manager) getPolicy(name string) (ipc.TunnelPolicy, error) {
 
 // setPolicy is tunnel.policy.set (administrators only): it applies req to
 // the tunnel's policy file and returns the new policy. A file that cannot
-// be used is replaced, starting from the fail-closed policy. AutoConnect and
-// the trusted networks count from the next agent report or connect; the
+// be used is replaced, starting from the fail-closed policy. On-demand and
+// the trusted networks are evaluated at once; AutoConnect counts from the
+// next agent report or connect; the
 // kill switch from the tunnel's next connect. A user no longer allowed loses
 // the tunnel at once: a binding of that user that no administrator made is
 // taken down (P20).
@@ -257,6 +258,7 @@ func (m *Manager) setPolicy(req ipc.TunnelPolicySet) (ipc.TunnelPolicy, error) {
 		return ipc.TunnelPolicy{}, &ipc.Error{Code: ipc.CodeInternal, Message: fmt.Sprintf(msg.DaemonPolicyStoreFailedFmt, err)}
 	}
 	log.Printf("daemon: tunnel %s: policy set: %+v", req.Name, pol)
+	m.kickOnDemand() // on-demand and the trusted networks count at once
 	blocking := m.revoke(t, pol)
 	st := m.policyStatus(t, pol)
 	st.RevokedBlocking = blocking

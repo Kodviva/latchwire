@@ -92,3 +92,47 @@ func TestPolicyTrustCurrentNetwork(t *testing.T) {
 		}
 	}
 }
+
+// --trust-current-network=false changes nothing (the policy is printed);
+// the usage and a trust change carry the P22 warning.
+func TestPolicyTrustWarningAndFalseFlag(t *testing.T) {
+	te := newTestEnv(nil)
+	rpc := &fakeRPC{replies: map[string]func(any, any) error{
+		ipc.MethodTunnelPolicyGet: func(_, r any) error {
+			setResult(t, r, ipc.TunnelPolicy{Name: "office", KillSwitch: "auto"})
+			return nil
+		},
+	}}
+	withRPC(te, rpc)
+	if code := run(context.Background(), te.env, []string{"policy", "office", "--trust-current-network=false"}); code != 0 {
+		t.Fatalf("exit %d: %s", code, te.errOut)
+	}
+	if got := strings.Join(rpc.methods(), ","); got != ipc.MethodTunnelPolicyGet {
+		t.Fatalf("calls %s", got)
+	}
+
+	if !strings.Contains(msg.CLIUsage, "anyone there can copy") {
+		t.Error("usage lacks the trusted-network warning")
+	}
+	te = newTestEnv(nil)
+	withRPC(te, &fakeRPC{})
+	if code := run(context.Background(), te.env, []string{"policy", "--help"}); code != 0 {
+		t.Fatalf("policy --help: exit %d", code)
+	}
+	if !strings.Contains(te.out.String(), msg.PolicyTrustWarning) {
+		t.Errorf("policy --help: %q lacks the warning", te.out)
+	}
+	te = newTestEnv(nil)
+	withRPC(te, &fakeRPC{replies: map[string]func(any, any) error{
+		ipc.MethodTunnelPolicySet: func(_, r any) error {
+			setResult(t, r, ipc.TunnelPolicy{Name: "office", KillSwitch: "auto", TrustedNetworks: []string{netHome}})
+			return nil
+		},
+	}})
+	if code := run(context.Background(), te.env, []string{"policy", "office", "--trust-network", netHome}); code != 0 {
+		t.Fatalf("exit %d: %s", code, te.errOut)
+	}
+	if !strings.Contains(te.errOut.String(), msg.PolicyTrustWarning) {
+		t.Errorf("stderr %q lacks the warning", te.errOut)
+	}
+}

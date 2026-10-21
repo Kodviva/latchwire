@@ -60,25 +60,38 @@ func withRPC(te *testEnv, rpc *fakeRPC) {
 	te.dial = func(context.Context) (rpcConn, error) { return rpc, nil }
 }
 
+// A tunnel that is not up: the daemon is still asked (a down abandons an
+// automatic connect waiting for its PIN and suppresses on-demand); whether
+// it refuses (nothing of this user's to take down) or agrees, the user is
+// told the tunnel is already down.
 func TestDownAlreadyDisconnected(t *testing.T) {
-	for _, state := range []string{"disconnected", "error"} {
+	refuse := func(_, _ any) error {
+		// What the daemon answers a non-admin for an unbound tunnel.
+		return &ipc.Error{Code: ipc.CodeForbidden, Message: msg.DaemonNotYourTunnel}
+	}
+	agree := func(_, r any) error {
+		setResult(t, r, ipc.TunnelStatus{Name: "office", State: "disconnected"})
+		return nil
+	}
+	for _, tc := range []struct {
+		state string
+		reply func(any, any) error
+	}{{"disconnected", refuse}, {"error", refuse}, {"disconnected", agree}} {
+		state := tc.state
 		te := newTestEnv(nil)
 		rpc := &fakeRPC{replies: map[string]func(any, any) error{
 			ipc.MethodTunnelStatus: func(_, r any) error {
 				setResult(t, r, []ipc.TunnelStatus{{Name: "office", State: state}})
 				return nil
 			},
-			// What the daemon would answer a non-admin for an unbound tunnel.
-			ipc.MethodTunnelDisconnect: func(_, _ any) error {
-				return &ipc.Error{Code: ipc.CodeForbidden, Message: msg.DaemonNotYourTunnel}
-			},
+			ipc.MethodTunnelDisconnect: tc.reply,
 		}}
 		withRPC(te, rpc)
 		if code := run(context.Background(), te.env, []string{"down", "office"}); code != 0 {
 			t.Fatalf("%s: exit %d, stderr: %s", state, code, te.errOut)
 		}
-		if got := strings.Join(rpc.methods(), ","); got != ipc.MethodTunnelStatus {
-			t.Errorf("%s: calls = %s, want status only", state, got)
+		if got := strings.Join(rpc.methods(), ","); got != ipc.MethodTunnelStatus+","+ipc.MethodTunnelDisconnect {
+			t.Errorf("%s: calls = %s, want status and disconnect", state, got)
 		}
 		all := te.out.String() + te.errOut.String()
 		if !strings.Contains(all, "already disconnected") || strings.Contains(all, msg.DaemonNotYourTunnel) {
@@ -362,5 +375,28 @@ func TestUpPrintsWarning(t *testing.T) {
 	want := fmt.Sprintf(msg.UpDoneFmt+"\n"+msg.StatusWarningFmt+"\n", "office", "connected", "office", msg.DaemonWarnDNSIgnored)
 	if got := te.out.String(); got != want {
 		t.Errorf("stdout %q, want %q", got, want)
+	}
+}
+
+// An administrator's down of a failed tunnel takes it down (its kill switch
+// stops blocking) and says so.
+func TestDownFailedTunnel(t *testing.T) {
+	te := newTestEnv(nil)
+	rpc := &fakeRPC{replies: map[string]func(any, any) error{
+		ipc.MethodTunnelStatus: func(_, r any) error {
+			setResult(t, r, []ipc.TunnelStatus{{Name: "office", State: "error"}})
+			return nil
+		},
+		ipc.MethodTunnelDisconnect: func(_, r any) error {
+			setResult(t, r, ipc.TunnelStatus{Name: "office", State: "disconnected"})
+			return nil
+		},
+	}}
+	withRPC(te, rpc)
+	if code := run(context.Background(), te.env, []string{"down", "office"}); code != 0 {
+		t.Fatalf("exit %d: %s", code, te.errOut)
+	}
+	if want := fmt.Sprintf(msg.DownDoneFmt+"\n", "office"); te.out.String() != want {
+		t.Errorf("stdout %q, want %q", te.out, want)
 	}
 }

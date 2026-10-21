@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -104,20 +105,33 @@ func cmdDown(ctx context.Context, e *env, args []string) error {
 	}
 	name := args[0]
 	return withDaemon(ctx, e, func(c rpcConn) error {
-		// Ask first: for a tunnel that is not up, the daemon would tell a
-		// non-administrator "not your tunnel", which is misleading.
+		// Ask first: for a tunnel that is not up, the daemon tells a user
+		// with nothing to take down "not your tunnel", which is misleading.
+		// The daemon is asked all the same: a down also abandons an
+		// automatic connect still waiting for its PIN and keeps on-demand
+		// and AutoConnect from starting again.
 		var sts []ipc.TunnelStatus
 		if err := c.Call(ctx, ipc.MethodTunnelStatus, ipc.TunnelName{Name: name}, &sts); err != nil {
 			return err
 		}
+		prev := ""
 		for _, st := range sts {
-			if st.Name == name && (st.State == daemon.StateDisconnected || st.State == daemon.StateError) {
-				fmt.Fprintf(e.stdout, msg.DownAlreadyFmt+"\n", name)
-				return nil
+			if st.Name == name {
+				prev = st.State
 			}
 		}
 		var st ipc.TunnelStatus
-		if err := c.Call(ctx, ipc.MethodTunnelDisconnect, ipc.TunnelName{Name: name}, &st); err != nil {
+		err := c.Call(ctx, ipc.MethodTunnelDisconnect, ipc.TunnelName{Name: name}, &st)
+		var ie *ipc.Error
+		refused := errors.As(err, &ie) && ie.Code == ipc.CodeForbidden
+		switch {
+		// A failed tunnel that an administrator takes down is reported as
+		// taken down (its kill switch stops blocking).
+		case prev == daemon.StateDisconnected && (err == nil || refused),
+			prev == daemon.StateError && refused:
+			fmt.Fprintf(e.stdout, msg.DownAlreadyFmt+"\n", name)
+			return nil
+		case err != nil:
 			return err
 		}
 		fmt.Fprintf(e.stdout, msg.DownDoneFmt+"\n", name)
