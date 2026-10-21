@@ -294,9 +294,12 @@ Behaviour, with `full` (kill switch `auto`, so on):
       rules): connect and disconnect `full`; afterwards pf is still enabled
       and your rules are unchanged.
 - [ ] `sudo pfctl -d` while blocking: within 30 s the daemon logs a WARNING
-      and pf is enabled again with the rules. Also try `sudo pfctl -f
-      /etc/pf.conf` with a ruleset without the `com.apple/*` anchor point and
-      note that this is not detected (known gap, threat model 5.7).
+      and pf is enabled again with the rules. Also load a main ruleset
+      without the `com.apple/*` anchor point (`sudo pfctl -f <file>`): within
+      30 s the daemon logs `WARNING: the kill switch is NOT in effect` once
+      (not every 30 s), `latchwire status` shows the warning on the tunnel,
+      and after `sudo pfctl -f /etc/pf.conf` the log says the kill switch is
+      in effect again and the warning goes.
 - [ ] Other `com.apple/*` anchors sort before `250.latchwire`: none of them
       passes traffic `quick` before ours (AirDrop and the application firewall
       are expected only to block). Note whether connections opened before the

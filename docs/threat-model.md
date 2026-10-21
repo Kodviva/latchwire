@@ -83,8 +83,8 @@ Where this is enforced: `internal/ipc/peercred_linux.go`,
 | **Other local users reconfiguring your tunnels, or taking over a tunnel bound to you.** | `tunnel.add`, `tunnel.remove` and `tunnel.policy.set` are administrator-only (root, macOS `admin`, Linux `sudo`, `wheel` or `latchwire`). A non-administrator can connect only a tunnel whose policy lists it as an **allowed user** (section 5.2), only through **its own** agent, which must pass the proof of possession, and can disconnect only a tunnel bound to its own uid. A tunnel bound to you (`connecting`, `connected`, `card_removed`) cannot be taken over by a non-administrator. An administrator tries its own agents first. A failed or stalled connect by one user cannot bind or block a tunnel. **Limits:** this does not stop a local user who can reach your card through PC/SC from binding your tunnels that are not bound to you, and tunnel status is readable by any local user (section 5.2). | `internal/daemon/manager.go` (`handle`, `requestConnect`, `requestDisconnect`, `candidatesLocked`, `connect`, `boundTo`); `internal/daemon/policy.go` (`allows`, `revoke`); `internal/ipc/admin_linux.go`, `internal/ipc/admin_darwin.go`. Tests: `TestNonAdminCannotAddTunnel`, `TestNonAllowedUserCannotConnect`, `TestDenyRevokesUserBinding`, `TestNonAdminConnectUsesOnlyOwnAgent`, `TestNonAdminCannotSquatTunnel`, `TestAdminTriesOwnAgentsAcrossAllIdentitiesFirst`. |
 | **A card that is swapped or re-seated under a connection.** | The vendored piv-go checks the card serial again after any reconnect, inside the new transaction, and refuses to send anything to a different card. A PIN meant for card A is never sent to card B. | `third_party/piv-go/PATCHES.md` (patch 6); `internal/keyprovider/piv/provider.go` (`mapCardErr`: `ErrCardChanged` becomes "unavailable"). |
 | **Handshake floods used to wear out or block the card.** | See section 8. | `internal/keyprovider/wgadapter/adapter.go`. |
-| **Traffic leaving outside the tunnel** (a removed card, a failed or still connecting tunnel, a crashed daemon). | With the kill switch on (by default for a full tunnel with one peer), only the tunnel interfaces, loopback, the endpoints and link setup pass; it keeps blocking while the tunnel is connecting, waiting for its card or failed, and after a crash of the daemon. Only `latchwire down`, `remove` or an orderly stop of the service lifts it. See section 5.7 for the details and the limits. | `internal/daemon/policy.go:103` (`armed`); `internal/daemon/manager.go:1927` (`killSwitchStatus`), `:382` (startup keeps the kill switch), `:2369` (`startKillSwitch`); `internal/killswitch/nft.go:100`, `internal/killswitch/pf.go:79`. Linux end-to-end: `testKillSwitchCard`, `testCrash` in `test/e2e/linux/e2e_test.go`. |
-| **DNS queries going to the local network's resolver while a full tunnel is up.** | A full tunnel's DNS servers answer every name (macOS: the primary service's DNS; Linux: systemd-resolved with `~.`, or openresolv exclusively). With the kill switch on, DNS can only leave through a tunnel interface. Limits in section 5.7. | `internal/daemon/manager.go:1867` (`dnsRoleLocked`); `internal/netcfg/linuxplan_dns.go:50`, `internal/netcfg/darwinplan_dns.go:521`; `internal/killswitch/nft.go:90` (no DNS exception). Linux end-to-end: `testDNS`, `testFull`. |
+| **Traffic leaving outside the tunnel** (a removed card, a failed or still connecting tunnel, a crashed daemon). | With the kill switch on (by default for a full tunnel with one peer), only the tunnel interfaces, loopback, the endpoints and link setup pass; it keeps blocking while the tunnel is connecting, waiting for its card or failed, and after a crash of the daemon. Only `latchwire down`, `remove` or an orderly stop of the service lifts it. See section 5.7 for the details and the limits. | `internal/daemon/policy.go:103` (`armed`); `internal/daemon/manager.go:2162` (`killSwitchStatus`), `:399` (startup keeps the kill switch), `:2639` (`startKillSwitch`); `internal/killswitch/nft.go:100`, `internal/killswitch/pf.go:79`. Linux end-to-end: `testKillSwitchCard`, `testCrash` in `test/e2e/linux/e2e_test.go`. |
+| **DNS queries going to the local network's resolver while a full tunnel is up.** | A full tunnel's DNS servers answer every name (macOS: the primary service's DNS; Linux: systemd-resolved with `~.`, or openresolv exclusively). With the kill switch on, DNS can only leave through a tunnel interface. Limits in section 5.7. | `internal/daemon/manager.go:2017` (`dnsRoleLocked`); `internal/netcfg/linuxplan_dns.go:50`, `internal/netcfg/darwinplan_dns.go:521`; `internal/killswitch/nft.go:90` (no DNS exception). Linux end-to-end: `testDNS`, `testFull`. |
 | **The program storing or leaking your PIN.** | The PIN is never stored: no struct field, file or environment variable. It is read from the terminal (no echo), handed straight to the card, and never logged. The buffer read from the terminal is cleared; the Go string passed on to the card cannot be erased (see 5.3). | `internal/agent/prompt_tty.go`, `internal/agent/agent.go` (package comment, `prompt`), `internal/keyprovider/piv/provider.go` (`promptPIN`), `cmd/latchwire/tty.go`. |
 
 ## 5. What Latchwire does NOT protect against
@@ -169,7 +169,11 @@ exists. A refused user gets no PIN prompt. Denying a user who holds a tunnel
 takes it from them at once, unless an administrator made that binding: an
 unarmed tunnel goes down; a tunnel whose kill switch is on stays blocking,
 bound to nobody, until an administrator runs `latchwire down` (a deny removes
-access, it is not a way out of the kill switch). A policy file that cannot be
+access, it is not a way out of the kill switch). This includes a tunnel that
+failed (`error`) while bound to the denied user, so a restart of the daemon
+cannot hand it back to them. A user whose own connect failed may take that
+failed tunnel down while still an allowed user, and a connect its user gave
+up on (Ctrl-C during `latchwire up`) leaves the tunnel as it was. A policy file that cannot be
 read safely counts as "kill switch on, nothing automatic, administrators
 only".
 
@@ -178,12 +182,12 @@ your tunnel only if that user is on its allowed users. The list limits only
 Latchwire's daemon, not the second point: the real fix is still the PC/SC
 access policy.
 
-Where this is enforced: `internal/daemon/manager.go:777` (`add`, owner as
-the only allowed user), `:1330` and `:1394` (`connect`: the gate before any
-agent call and again at the reservation with a fresh policy read), `:761`
+Where this is enforced: `internal/daemon/manager.go:888` (`add`, owner as
+the only allowed user), `:1448` and `:1514` (`connect`: the gate before any
+agent call and again at the reservation with a fresh policy read), `:872`
 (`tunnel.policy.set` administrator-only); `internal/daemon/policy.go:69`
-(`allows`), `:280` (`revoke`; `:293` keeps an armed tunnel blocking,
-unbound), `:66` (`failClosedPolicy`); `cmd/latchwire/policy.go:195`
+(`allows`), `:288` (`revoke`, also of a failed tunnel; `:304` keeps an
+armed tunnel blocking, unbound), `:66` (`failClosedPolicy`); `cmd/latchwire/policy.go:195`
 (`sudoUID`). Tests: `TestAddRecordsOwnerAsAllowedUser`,
 `TestNonAllowedUserCannotConnect`, `TestDenyRevokesUserBinding`,
 `TestAdminBindingSurvivesDeny` in `internal/daemon/policy_test.go`; Linux
@@ -294,9 +298,10 @@ compromised root.
   wrong address, but cannot read or forge traffic, because the server is
   identified by its public key. It can deny service. While the kill switch
   blocks, the resolver reaches no DNS server, so the last address found for
-  that endpoint is used (`internal/daemon/manager.go:1960`,
+  that endpoint is used (`internal/daemon/manager.go:2195`,
   `resolveTunnel`); a Linux full tunnel resolves with its fwmark, outside
-  the tunnel (`internal/daemon/resolver_linux.go:15`).
+  the tunnel (`internal/daemon/resolver_linux.go:15`), and a kill switch
+  that blocks already lets that mark through before the lookup.
 - **Preshared keys.** If a configuration uses `PresharedKey`, that key is a
   secret stored on disk (`0600`, root). It is not the identity key, and
   stealing it does not allow a connection without the card, but it is a secret
@@ -356,7 +361,7 @@ Where this is enforced: `internal/netmon/identity.go:43` (`NetworkID`;
 (`currentNetwork`, the second look), `:140` (`evaluateOnDemand`), `:204`
 (a kill switch set to `on` is never taken down on a trusted network);
 `internal/daemon/policy.go:92` (`ValidTrustedNetwork`);
-`internal/msg/en.go:335` (`PolicyTrustWarning`, printed with the policy
+`internal/msg/en.go:339` (`PolicyTrustWarning`, printed with the policy
 usage). Tests: `internal/daemon/ondemand_test.go`; Linux end-to-end:
 `testOnDemand` in `test/e2e/linux/e2e_test.go` (untrusted network connects,
 `--trust-current-network` takes the tunnel down).
@@ -373,11 +378,16 @@ checked by hand (docs/hardware-checklist.md, sections 8 to 15).
 sysctl, nft or pf rules, DNS) is written to the journal
 `/var/run/latchwire/journal.json` (`0600`, root) before it is made, and
 undone from there. At startup the daemon undoes whatever a crashed run left,
-except an active kill switch (below). `/var/run` does not survive a reboot,
+except an active kill switch (below). An undo that fails when a tunnel goes
+down (a DNS restore, a policy rule) stays journaled and is retried every 30
+seconds while the daemon runs, whatever interface it was on, and again at
+the next start. `/var/run` does not survive a reboot,
 and neither do the routes, rules or firewall state it describes.
-Where: `internal/netcfg/netcfg.go:347` (`applyStepLocked`: the undo reaches
-the journal first), `internal/netcfg/journal.go:18`, `:250` (`Cleanup`),
-`internal/daemon/manager.go:382` (the kill switch is kept). Linux end-to-end:
+Where: `internal/netcfg/netcfg.go:374` (`applyStepLocked`: the undo reaches
+the journal first), `internal/netcfg/journal.go:19`, `:265` (`Cleanup`:
+failed persistent undos stay journaled; tunnels that are up are left
+alone), `internal/daemon/manager.go:399` (the kill switch is kept), `:560`
+(`retryLeftovers`, the 30-second retry). Linux end-to-end:
 `testCrash` (the policy rules and the tunnel DNS left by `kill -9` are gone
 after the restart).
 
@@ -407,7 +417,7 @@ after the restart).
   interface unless the kill switch is on. Add `::/0` to keep IPv6 in the
   tunnel.
 
-Where: `internal/daemon/manager.go:1703` (`routesAll`), `:1818`
+Where: `internal/daemon/manager.go:1846` (`routesAll`), `:1964`
 (`conflictLocked`); `internal/netcfg/linuxplan_fulltunnel.go:62`
 (`LinuxTable`), `:152` (`src_valid_mark`), `:171` and `:175` (the rules),
 `:182` (reverse-path filter), `internal/msg/en.go:120` (`NetNoRPFilterFmt`);
@@ -418,8 +428,14 @@ end-to-end: `testFull`, `testMulti` (a full and a split tunnel together).
 **DNS.** A full tunnel's DNS servers answer every name. A split tunnel's do
 so only when no other tunnel holds that role; otherwise they answer the
 tunnel's search domains only, or are not used (status `ignored`). A full
-tunnel takes the role from a split tunnel when it connects. `latchwire
-status` shows the outcome in the DNS column.
+tunnel takes the role from a split tunnel when it connects, **also when it
+has no DNS servers of its own**: the system's DNS then goes into the full
+tunnel with all other traffic, rather than every name going to the split
+tunnel's resolver. A split tunnel that connects while a full tunnel is up
+does not take the role either. When the full tunnel goes down, the split
+tunnels that gave the role up to it get it back. A tunnel whose DNS waits
+for another tunnel's DNS undo to be retried shows `busy` until then.
+`latchwire status` shows the outcome in the DNS column.
 
 - Linux with systemd-resolved: `resolvectl dns`, `domain ~.` and
   `default-route` on the tunnel link. Programs that bypass resolved (a
@@ -446,10 +462,11 @@ status` shows the outcome in the DNS column.
   leave through the physical interface (names then fail to resolve
   instead).
 
-Where: `internal/daemon/manager.go:1867` (`dnsRoleLocked`), `:1754`
-(`demote`), `:1899` (`dnsStatus`), `:476` and `:479` (network changes and the
-30-second check); `internal/netcfg/netcfg.go:224` (`SetDNSRole`), `:522`
-(one primary owner per daemon); `internal/netcfg/linuxplan_dns.go:50`
+Where: `internal/daemon/manager.go:2017` (`dnsRoleLocked`), `:1880`
+(`demotionLocked`), `:1899` (`demote`), `:2068` (`promoteDNS`), `:2134`
+(`dnsStatus`), `:493` and `:496` (network changes and the 30-second check),
+`:588` (`retakeDNS`); `internal/netcfg/netcfg.go:236` (`SetDNSRole`),
+`:553` (one primary owner per daemon); `internal/netcfg/linuxplan_dns.go:50`
 (`linuxDNS`: resolved, then openresolv `:209`, then classic `:74`, else
 refused `:62`); `internal/netcfg/darwinplan_dns.go:521` (`darwinDNS`),
 `:468` (`manualDNS`), `:614` (`moveDNSLocked`). Linux end-to-end: `testDNS`
@@ -473,8 +490,8 @@ firewall cannot be set up (Linux without `nft`; macOS when the main pf
 ruleset lacks the `com.apple/*` anchor point).
 
 Where: `internal/daemon/policy.go:103` (`armed`);
-`internal/daemon/manager.go:2339` (`armKillSwitch`: refused without a
-firewall), `:1927` (`killSwitchStatus`); `internal/killswitch/nft.go:18`,
+`internal/daemon/manager.go:2609` (`armKillSwitch`: refused without a
+firewall), `:2162` (`killSwitchStatus`); `internal/killswitch/nft.go:18`,
 `:51` to `:54` (DHCP), `:90` (no DNS rule), `:100` (`nftScript`), `:176`
 (forward chain); `internal/killswitch/pf.go:24`, `:48` and `:50` (DHCP,
 `user root`), `:79` (`pfRules`), `:110`, `:228` (anchor point), `:240`
@@ -492,9 +509,18 @@ stop of the daemon lift it.
   user, so the card's return reconnects them and their user can take them
   down. Everything else (routes, rules, DNS) is undone.
 - **Something removes the rules** (`pfctl -d`, `nft delete table`): the
-  daemon checks every 30 seconds and sets them again.
+  daemon checks every 30 seconds and sets them again. On macOS the check also
+  sees a main ruleset replaced (`pfctl -f`) by one that no longer evaluates
+  `com.apple/*`: setting the rules again cannot fix that, so the daemon logs
+  a warning once and `latchwire status` warns on every tunnel whose kill
+  switch is on, until the anchor point is back.
+- **A connect that fails** leaves the tunnel in `error`, still blocking;
+  the user whose connect it was (while still an allowed user) or an
+  administrator can take it down. A connect its requester gives up on after
+  the tunnel was reserved (Ctrl-C during `latchwire up`, after the PIN)
+  puts the tunnel back as it was instead.
 - **A deny of the user who holds an armed tunnel** keeps it blocking
-  (section 5.2).
+  (section 5.2), unbound, also when it had failed.
 - **The kill switch does not survive a reboot**, and it does not block
   before a tunnel with the kill switch has started connecting: until then
   the machine's traffic is not blocked.
@@ -503,10 +529,12 @@ stop of the daemon lift it.
   kill switch objects and logs a warning, rather than leaving a block that
   nothing could lift.
 
-Where: `internal/daemon/manager.go:1927` (`killSwitchStatus`), `:382`,
-`:2369` (`startKillSwitch`; `:2371` corrupt journal, `:2379` crash),
-`:2408` (`restoreKillSwitchTunnels`), `:2288` (`verifyKillSwitch`), `:532`
-(`shutdown`); `internal/daemon/store.go:269` (`killswitch.state`, the record
+Where: `internal/daemon/manager.go:2162` (`killSwitchStatus`), `:399`,
+`:2639` (`startKillSwitch`; `:2641` corrupt journal, `:2649` crash),
+`:2678` (`restoreKillSwitchTunnels`), `:2550` (`verifyKillSwitch`), `:730`
+(`requestDisconnect`: who may lift a failed tunnel), `:628` (`shutdown`);
+`internal/killswitch/pf.go:271` (`Verify`: also a main ruleset that no longer
+evaluates the anchor); `internal/daemon/store.go:271` (`killswitch.state`, the record
 of the tunnels to restore). Linux end-to-end: `testKillSwitchCard` (card
 removed: blocked; card back: connected; `down`: open), `testCrash` (blocked
 while the daemon is dead and after its restart; the card's return
@@ -527,21 +555,12 @@ reconnects), `testShutdown` (an orderly stop lifts it).
   removed and can keep passing. Latchwire's own rules keep state only for
   the endpoint traffic. On Linux no earlier connection survives (the
   rules do not accept established traffic in general).
-- On macOS the 30-second check sees pf disabled or the anchor emptied, but
-  not a main ruleset that someone replaced (`pfctl -f`) with one that no
-  longer evaluates `com.apple/*`; the kill switch is then silently not in
-  effect. On Linux it checks that the table exists, not its contents.
+- On macOS a main ruleset without the `com.apple/*` anchor point leaves
+  the kill switch not in effect until it is restored: it is reported (above),
+  not repaired. On Linux the 30-second check sees that the table exists, not
+  its contents.
 - Trusted networks (on-demand) take down tunnels whose kill switch is `auto`
   or `off`, on a signal anyone on the local network can fake (section 5.6).
-
-**Known gaps at this revision.** These are tracked for a fix:
-
-- A DNS undo that fails when a tunnel goes down is retried only at the next
-  daemon start; until then other tunnels' DNS stays `busy`.
-- The macOS anchor-evaluation check named above.
-- A deny of the user who holds a tunnel in state `error` with its kill
-  switch on does not unbind that user, who can then lift the kill switch
-  with `latchwire down` after a restart of the daemon.
 
 ## 6. Why the cached `ss` alone cannot build a tunnel
 
@@ -591,11 +610,11 @@ Where this is enforced: `third_party/wireguard-go/PATCHES.md` and
 | --- | --- |
 | `tunnel.add`, `tunnel.remove`, `tunnel.policy.set` | Administrators only: root, macOS `admin`, Linux `sudo`, `wheel` or `latchwire`. |
 | `tunnel.connect` | An administrator, or one of the tunnel's allowed users whose own agent is registered and passes the proof of possession. Non-administrators use only their own agent and cannot take over a tunnel bound to another user. The proof shows access to the card, not which user owns it: an allowed user who can reach your card through PC/SC can bind your unbound tunnels (section 5.2). |
-| `tunnel.disconnect` | An administrator, the user the tunnel is bound to, or an allowed user abandoning an automatic connect (on-demand, AutoConnect) that is pending for that user. A tunnel left blocking by a deny can be taken down only by an administrator. |
+| `tunnel.disconnect` | An administrator, the user the tunnel is bound to, the user whose own connect left it failed (`error`) while still one of its allowed users, or an allowed user abandoning an automatic connect (on-demand, AutoConnect) that is pending for that user. A tunnel left blocking by a deny can be taken down only by an administrator. |
 | `tunnel.status`, `tunnel.policy.get`, `network.current` | An administrator or a user with a registered agent. Registering needs no card, so in practice any local user. |
 | `key.public`, `key.x25519` | The daemon, to the agent. The agent refuses a daemon that is neither root nor its own user. |
 
-Where this is enforced: `internal/daemon/manager.go:688` (`handle`), `:630`
+Where this is enforced: `internal/daemon/manager.go:799` (`handle`), `:730`
 (`requestDisconnect`), `internal/daemon/ondemand.go:299`
 (`handleNetwork`), tests listed in sections 4 and 5.2.
 
