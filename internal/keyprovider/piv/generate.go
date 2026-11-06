@@ -122,6 +122,20 @@ func (c *Card) Occupied(s uint8) (bool, error) {
 	return c.occupied(s)
 }
 
+// PINRetries reads how many PIN attempts are left. It does not use one.
+func (c *Card) PINRetries() (int, error) {
+	c.sem <- struct{}{}
+	defer func() { <-c.sem }()
+	if c.closed {
+		return 0, keyprovider.ErrUnavailable
+	}
+	n, err := c.c.Retries()
+	if err != nil {
+		return 0, mapCardErr(err)
+	}
+	return n, nil
+}
+
 func (c *Card) occupied(s uint8) (bool, error) {
 	_, err := c.c.KeyInfo(pivSlot(s))
 	switch {

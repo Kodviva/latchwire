@@ -1,0 +1,831 @@
+{
+  "@@locale": "en",
+  "KeyRefInvalidFmt": "invalid key reference {ref}: expected piv://<decimal serial>/<slot 82-95>",
+  "@KeyRefInvalidFmt": {
+    "description": "KeyRefInvalidFmt takes the offending reference string.",
+    "placeholders": {
+      "ref": {
+        "verb": "%q"
+      }
+    }
+  },
+  "ConfigPrivateKeyNotAllowed": "PrivateKey is not allowed: the private key stays in the hardware token, use KeyRef = piv://<serial>/<slot>",
+  "ConfigNoIdentity": "no hardware key configured: add KeyRef = piv://<serial>/<slot> and its PublicKey to [Interface] or an [Identity] section",
+  "ConfigTooLargeFmt": "configuration is larger than {limit} bytes",
+  "@ConfigTooLargeFmt": {
+    "placeholders": {
+      "limit": {
+        "verb": "%d"
+      }
+    }
+  },
+  "ConfigLineFmt": "line {line}: {err}",
+  "@ConfigLineFmt": {
+    "description": "ConfigLineFmt takes a line number and a wrapped error.",
+    "placeholders": {
+      "line": {
+        "verb": "%d"
+      },
+      "err": {
+        "verb": "%w"
+      }
+    }
+  },
+  "ConfigHookNotSupportedFmt": "{key} is not supported: Latchwire never runs commands from tunnel configurations",
+  "@ConfigHookNotSupportedFmt": {
+    "description": "The formats below take a key or section name, never a value."
+  },
+  "ConfigUnknownKeyFmt": "unknown key {key} in [{section}]",
+  "ConfigUnknownSectionFmt": "unknown section [{section}]",
+  "ConfigKeyOutsideSection": "key found before any section header",
+  "ConfigMalformedLine": "expected Key = Value or [Section]",
+  "ConfigDuplicateKeyFmt": "{key} is set more than once",
+  "ConfigInvalidValueFmt": "invalid value for {key}",
+  "ConfigMissingKeyFmt": "[{section}] section is missing {key}",
+  "ConfigDuplicateSectionFmt": "[{section}] section appears more than once",
+  "ConfigDuplicatePeer": "the same PublicKey is used by more than one [Peer]",
+  "ConfigMixedIdentities": "KeyRef and Address belong in [Interface] or in [Identity] sections, not both",
+  "ConfigMTURange": "MTU must be 0 (automatic) or between 1280 and 9000",
+  "ConfigPublicKeyWithoutKeyRef": "PublicKey in [Interface] is the public key of the KeyRef there; with [Identity] sections put each PublicKey in its section",
+  "PIVCardNotFound": "no YubiKey with that serial number was found (is it plugged in, or in use by another program?)",
+  "@PIVCardNotFound": {
+    "description": "YubiKey PIV backend. None of these formats take a PIN, PUK or key."
+  },
+  "PIVFirmwareTooOld": "YubiKey firmware is too old: X25519 keys in PIV need firmware 5.7.0 or later",
+  "PIVSlotOccupied": "the slot already holds a key; use --force to replace it (the old key is destroyed)",
+  "PIVNoFreeSlot": "no free retired slot (82-95) is left on this YubiKey",
+  "PIVSlotEmpty": "the slot holds no key",
+  "PIVFreshCard": "this YubiKey still uses the factory management key: give the current PIN and PUK and a new PIN and PUK (6-8 characters each, not the factory values) so it can be secured first",
+  "PIVManagementKeyRequired": "the management key is needed: give the PIN if the management key is stored on the YubiKey protected by the PIN, or give the management key",
+  "PIVImportedKey": "the key in this slot was imported, not generated on the YubiKey; Latchwire only uses keys generated on the card",
+  "PIVNotX25519": "the key in this slot is not an X25519 key",
+  "PIVSlotOutOfRangeFmt": "slot {slot} is not a retired key management slot (82-95)",
+  "@PIVSlotOutOfRangeFmt": {
+    "placeholders": {
+      "slot": {
+        "verb": "%02x"
+      }
+    }
+  },
+  "PIVWrongPUKFmt": "wrong PUK, {retries} retries left",
+  "@PIVWrongPUKFmt": {
+    "placeholders": {
+      "retries": {
+        "verb": "%d"
+      }
+    }
+  },
+  "PIVPUKBlocked": "the PUK is blocked",
+  "PIVStoredKeyMismatch": "the management key stored on the YubiKey could not be read back correctly, so the factory management key was kept",
+  "PIVPIVManFlagFailed": "the new management key is set and stored on the YubiKey under the PIN, but ykman's \"protected by PIN\" flag could not be written",
+  "PIVPINAlreadyChanged": "the PIN has already been changed to the new PIN (the PUK has not)",
+  "@PIVPINAlreadyChanged": {
+    "description": "PIVPINAlreadyChanged and PIVPINAndPUKAlreadyChanged prefix errors from\nsecuring a fresh card after the PIN (and PUK) were already changed."
+  },
+  "PIVPINAndPUKAlreadyChanged": "the PIN and PUK have already been changed to the new values",
+  "PIVSecretTooLong": "a PIN or PUK longer than 8 bytes was given",
+  "PIVPINTooLong": "the PIN entered is longer than 8 bytes",
+  "PIVUnsupportedPolicy": "the key in this slot does not use PIN policy \"once\" and touch policy \"never\"; Latchwire only uses such keys",
+  "PIVEmptyPIN": "no PIN was entered",
+  "PIVUnexpectedPublicKey": "the YubiKey returned an unexpected public key type",
+  "LastPINRetry": "warning: only one PIN attempt is left; a wrong PIN now blocks the PIV PIN and only the PUK can unblock it",
+  "@LastPINRetry": {
+    "description": "User-session agent. None of these formats take a PIN or key material."
+  },
+  "AgentPINPromptFmt": "Latchwire: PIN for YubiKey {serial} slot {slot} ({retries} attempts left): ",
+  "@AgentPINPromptFmt": {
+    "description": "AgentPINPromptFmt takes the serial, the slot and the retries left.",
+    "placeholders": {
+      "serial": {
+        "verb": "%d"
+      },
+      "slot": {
+        "verb": "%02x"
+      },
+      "retries": {
+        "verb": "%d"
+      }
+    }
+  },
+  "AgentWrongPINFmt": "wrong PIN, {retries} attempts left",
+  "@AgentWrongPINFmt": {
+    "description": "AgentWrongPINFmt takes the retries left.",
+    "placeholders": {
+      "retries": {
+        "verb": "%d"
+      }
+    }
+  },
+  "AgentPINBlocked": "the YubiKey PIN is blocked; unblock it with the PUK (for example: ykman piv access unblock-pin)",
+  "AgentPINRequired": "the YubiKey PIN is needed but was not entered",
+  "AgentCardUnavailable": "the YubiKey is not available (was it removed?)",
+  "AgentBadPeer": "peer must be the base64 encoding of a 32-byte X25519 public key",
+  "AgentBadRequest": "malformed request",
+  "AgentLowOrderPeer": "the peer public key is a low-order point",
+  "AgentNoTTY": "no terminal is available to ask for the PIN",
+  "AgentPINDialogFmt": "Enter the PIN for YubiKey {serial} slot {slot} ({retries} attempts left).",
+  "@AgentPINDialogFmt": {
+    "description": "PIN dialog shown when the agent has no terminal (osascript on macOS,\npinentry on Linux). AgentPINDialogFmt takes the serial, the slot and\nthe retries left.",
+    "placeholders": {
+      "serial": {
+        "verb": "%d"
+      },
+      "slot": {
+        "verb": "%02x"
+      },
+      "retries": {
+        "verb": "%d"
+      }
+    }
+  },
+  "AgentPINDialogTitle": "Latchwire",
+  "AgentPINDialogPrompt": "PIN",
+  "AgentPINDialogOK": "OK",
+  "AgentPINDialogCancel": "Cancel",
+  "AgentNoPinentry": "no terminal is available to ask for the PIN and no pinentry program (pinentry, pinentry-gnome3, pinentry-qt or pinentry-curses in /usr/bin, /bin or /usr/local/bin) was found",
+  "AgentNoPINDialog": "no terminal is available to ask for the PIN and this system has no supported PIN dialog",
+  "AgentPINDialogLate": "the PIN dialog was not answered in time",
+  "AgentPINDialogFailed": "the PIN dialog failed",
+  "AgentPINDialogBadOut": "the PIN dialog program gave unexpected output",
+  "AgentPINDialogLong": "the PIN dialog program gave too much output",
+  "AgentNotifyFailed": "showing a notification failed",
+  "AgentRequestExpired": "the request expired before the YubiKey could be used",
+  "AgentUntrustedDaemonFmt": "refusing the service socket: it is served by uid {uid}, not by root or this user",
+  "@AgentUntrustedDaemonFmt": {
+    "description": "AgentUntrustedDaemonFmt takes the uid of the socket's owner process.",
+    "placeholders": {
+      "uid": {
+        "verb": "%d"
+      }
+    }
+  },
+  "KillSwitchUnsupported": "the kill switch is not available on this system (on Linux it needs the nft command from nftables); install nftables, or turn the kill switch off in the tunnel's policy",
+  "@KillSwitchUnsupported": {
+    "section": "Kill switch."
+  },
+  "KillSwitchPfNoAnchor": "the kill switch is not available: the main pf ruleset has no anchor \"com.apple/*\" (a custom /etc/pf.conf?), so its rules would never be evaluated; restore the anchor lines of the stock /etc/pf.conf, or turn the kill switch off in the tunnel's policy",
+  "@KillSwitchPfNoAnchor": {
+    "description": "KillSwitchPfNoAnchor: macOS with a main pf ruleset that lacks the\nstock anchor point."
+  },
+  "KillSwitchPfMissing": "the kill switch is not available: pfctl was not found in /sbin or /usr/sbin; turn the kill switch off in the tunnel's policy",
+  "@KillSwitchPfMissing": {
+    "description": "KillSwitchPfMissing: macOS without pfctl."
+  },
+  "PolicyUntrustableNetworkFmt": "network {network} cannot be trusted: it stands for no network or a network whose gateway could not be identified",
+  "@PolicyUntrustableNetworkFmt": {
+    "description": "PolicyUntrustableNetworkFmt and PolicyBadNetworkIDFmt take the\nnetwork ID.",
+    "section": "Tunnel policy.",
+    "placeholders": {
+      "network": {
+        "verb": "%q"
+      }
+    }
+  },
+  "PolicyBadNetworkIDFmt": "invalid network ID {network}: a network ID is 16 lowercase hexadecimal digits",
+  "@PolicyBadNetworkIDFmt": {
+    "placeholders": {
+      "network": {
+        "verb": "%q"
+      }
+    }
+  },
+  "PolicyKillSwitchValueFmt": "the kill switch must be auto, on or off, not {value}",
+  "@PolicyKillSwitchValueFmt": {
+    "description": "PolicyKillSwitchValueFmt takes the value given.",
+    "placeholders": {
+      "value": {
+        "verb": "%q"
+      }
+    }
+  },
+  "PolicyListTooLongFmt": "more than {limit} trusted networks or allowed users",
+  "@PolicyListTooLongFmt": {
+    "description": "PolicyListTooLongFmt takes the limit.",
+    "placeholders": {
+      "limit": {
+        "verb": "%d"
+      }
+    }
+  },
+  "NetFullTunnelUnsupported": "routing all traffic through the tunnel (AllowedIPs 0.0.0.0/0 or ::/0) is not supported yet; list the networks to reach instead",
+  "@NetFullTunnelUnsupported": {
+    "section": "Network configuration."
+  },
+  "NetAlreadyApplied": "network configuration is already applied to this interface",
+  "NetEndpointRouteLoopFmt": "a route to the endpoint {endpoint} already leads into the tunnel interface {iface}, so the tunnel could not reach its peer; remove the route or keep the endpoint address out of AllowedIPs",
+  "@NetEndpointRouteLoopFmt": {
+    "description": "NetEndpointRouteLoopFmt takes the endpoint address and the tunnel\ninterface."
+  },
+  "NetNoRPFilterFmt": "nft is not installed: the full tunnel on {iface} runs without its reverse-path filter (packets addressed to the tunnel that arrive on other interfaces are not dropped); install nftables to enable it",
+  "@NetNoRPFilterFmt": {
+    "description": "NetNoRPFilterFmt takes the interface name."
+  },
+  "NetDNSUnsupported": "the tunnel sets DNS servers, but this system has neither systemd-resolved nor resolvconf to apply them; install one, or remove the DNS line from the tunnel configuration",
+  "NetDNSScopedUnsupportedFmt": "DNS for {iface} is limited to its search domains, which resolvconf cannot do: the tunnel's DNS servers are not applied; use systemd-resolved to enable them",
+  "@NetDNSScopedUnsupportedFmt": {
+    "description": "NetDNSScopedUnsupportedFmt takes the interface name."
+  },
+  "NetDNSSharedFmt": "DNS for {iface} is not exclusive on this system: the classic resolvconf keeps the other interfaces' DNS servers next to the tunnel's, so names may still be sent outside the tunnel; install openresolv or systemd-resolved, or turn the kill switch on",
+  "@NetDNSSharedFmt": {
+    "description": "NetDNSSharedFmt takes the interface name."
+  },
+  "NetBadSearchDomainFmt": "invalid DNS search domain {domain}",
+  "@NetBadSearchDomainFmt": {
+    "description": "NetBadSearchDomainFmt takes the search domain.",
+    "placeholders": {
+      "domain": {
+        "verb": "%q"
+      }
+    }
+  },
+  "NetZonedDNSFmt": "DNS server {server} names a network interface (a %zone suffix); use an address without a zone",
+  "@NetZonedDNSFmt": {
+    "description": "NetZonedDNSFmt takes the DNS server address."
+  },
+  "NetDNSUnreadableFmt": "cannot read the DNS settings of network service {service}, so they could not be restored afterwards; they are left unchanged: {err}",
+  "@NetDNSUnreadableFmt": {
+    "description": "NetDNSUnreadableFmt takes the network service ID and the error.",
+    "placeholders": {
+      "err": {
+        "verb": "%v"
+      }
+    }
+  },
+  "NetDNSNoServiceFmt": "no network is active: the DNS servers of {iface} are applied when one comes up",
+  "@NetDNSNoServiceFmt": {
+    "description": "NetDNSNoServiceFmt takes the interface name."
+  },
+  "NetDNSPrimaryBusyFmt": "the DNS servers of {iface} are not applied: the tunnel on {other} already answers every name, and only one tunnel at a time can; disconnect it first to use these",
+  "@NetDNSPrimaryBusyFmt": {
+    "description": "NetDNSPrimaryBusyFmt takes the interface name and the interface of\nthe tunnel whose DNS is in use."
+  },
+  "NetNotApplied": "the tunnel's network configuration is not applied",
+  "NetDNSManualFmt": "DNS servers set by hand for the active network (System Settings) take precedence over those of {iface}, so names may still be sent outside the tunnel; remove them in System Settings, or turn the kill switch on",
+  "@NetDNSManualFmt": {
+    "description": "NetDNSManualFmt takes the interface name."
+  },
+  "DaemonAdminOnly": "permission denied: only an administrator can add or remove tunnels",
+  "@DaemonAdminOnly": {
+    "section": "Tunnel daemon. None of these formats take key material or a PIN."
+  },
+  "DaemonForbidden": "permission denied: run this as an administrator, or start latchwire agent as this user first",
+  "DaemonBadRequest": "malformed request",
+  "DaemonTunnelNotFound": "no tunnel with that name",
+  "DaemonTunnelExists": "a tunnel with that name already exists; remove it first",
+  "DaemonInvalidName": "invalid tunnel name: use 1-15 letters, digits or _=+.- and do not start with a dot",
+  "DaemonNoCard": "none of the tunnel's YubiKeys is available: plug one in and make sure latchwire agent is running",
+  "DaemonAgentGone": "the agent holding the YubiKey is not connected",
+  "DaemonBadAgentReply": "the agent sent a malformed reply",
+  "DaemonConnectAborted": "connecting was interrupted: the tunnel was disconnected or its YubiKey was removed",
+  "DaemonNotYourTunnel": "permission denied: this tunnel is in use with another user's YubiKey",
+  "DaemonNotAllowedUserFmt": "permission denied: you are not one of the allowed users of tunnel {name}; an administrator can allow you with: sudo latchwire policy {name} --allow-user <your user name>",
+  "@DaemonNotAllowedUserFmt": {
+    "description": "DaemonNotAllowedUserFmt takes the tunnel name."
+  },
+  "DaemonPolicyAdminOnly": "permission denied: only an administrator can change a tunnel's policy",
+  "DaemonKeyMismatchFmt": "the YubiKey answering for {ref} does not hold the PublicKey configured for this tunnel; refusing to connect",
+  "@DaemonKeyMismatchFmt": {
+    "description": "DaemonKeyMismatchFmt and DaemonProofFailedFmt take the KeyRef."
+  },
+  "DaemonProofFailedFmt": "the agent answering for {ref} could not prove that it holds the private key of the configured PublicKey; refusing to connect",
+  "DaemonResolveFmt": "cannot resolve the endpoint host {host}",
+  "@DaemonResolveFmt": {
+    "description": "DaemonResolveFmt takes the endpoint host name."
+  },
+  "DaemonConnectFailedFmt": "could not bring the tunnel up: {err}",
+  "@DaemonConnectFailedFmt": {
+    "description": "DaemonConnectFailedFmt and DaemonStoreFailedFmt take an error.",
+    "placeholders": {
+      "err": {
+        "verb": "%v"
+      }
+    }
+  },
+  "DaemonStoreFailedFmt": "could not save the tunnel configuration: {err}",
+  "@DaemonStoreFailedFmt": {
+    "placeholders": {
+      "err": {
+        "verb": "%v"
+      }
+    }
+  },
+  "DaemonPolicyStoreFailedFmt": "could not save the tunnel's policy: {err}",
+  "@DaemonPolicyStoreFailedFmt": {
+    "description": "DaemonPolicyStoreFailedFmt takes an error.",
+    "placeholders": {
+      "err": {
+        "verb": "%v"
+      }
+    }
+  },
+  "DaemonBadPolicyFmt": "invalid policy: {err}",
+  "@DaemonBadPolicyFmt": {
+    "description": "DaemonBadPolicyFmt takes what is wrong with the requested policy.",
+    "placeholders": {
+      "err": {
+        "verb": "%v"
+      }
+    }
+  },
+  "DaemonNetworkFailedFmt": "could not identify the current network: {err}",
+  "@DaemonNetworkFailedFmt": {
+    "description": "DaemonNetworkFailedFmt takes the error of the network lookup.",
+    "placeholders": {
+      "err": {
+        "verb": "%v"
+      }
+    }
+  },
+  "DaemonKillSwitchRefusedFmt": "not connecting: this tunnel's kill switch is on and could not block traffic outside the tunnel: {err}",
+  "@DaemonKillSwitchRefusedFmt": {
+    "description": "DaemonKillSwitchRefusedFmt takes the error that kept the kill switch\nfrom blocking.",
+    "placeholders": {
+      "err": {
+        "verb": "%v"
+      }
+    }
+  },
+  "DaemonConflictFullFmt": "not connecting: tunnel {name} already routes all traffic, and only one such tunnel can be connected at a time; disconnect it first",
+  "@DaemonConflictFullFmt": {
+    "description": "DaemonConflictFullFmt takes the name of the connected full tunnel."
+  },
+  "DaemonConflictAllowedIPsFmt": "not connecting: AllowedIPs {prefix} overlaps {other} of tunnel {name}, which is connected; disconnect it first or change the AllowedIPs",
+  "@DaemonConflictAllowedIPsFmt": {
+    "description": "DaemonConflictAllowedIPsFmt takes this tunnel's AllowedIPs prefix,\nthe other tunnel's prefix it overlaps, and the other tunnel's name."
+  },
+  "DaemonConflictListenPortFmt": "not connecting: ListenPort {port} is in use by tunnel {name}; disconnect it first or change the ListenPort",
+  "@DaemonConflictListenPortFmt": {
+    "description": "DaemonConflictListenPortFmt takes the port and the other tunnel's\nname.",
+    "placeholders": {
+      "port": {
+        "verb": "%d"
+      }
+    }
+  },
+  "DaemonDemoteFailedFmt": "not connecting: the DNS servers of tunnel {name} answer every name and could not be limited to its search domains, so this full tunnel cannot take over name resolution: {err}",
+  "@DaemonDemoteFailedFmt": {
+    "description": "DaemonDemoteFailedFmt takes the name of the split tunnel whose DNS\nanswers every name and the error.",
+    "placeholders": {
+      "err": {
+        "verb": "%v"
+      }
+    }
+  },
+  "DaemonWarnDNSShared": "DNS is not exclusive: the classic resolvconf keeps the other interfaces' DNS servers next to this tunnel's, so names may be sent outside the tunnel; install openresolv or systemd-resolved, or turn the kill switch on",
+  "@DaemonWarnDNSShared": {
+    "description": "Status warnings (ipc.TunnelStatus.Warning)."
+  },
+  "DaemonWarnDNSOverridden": "DNS servers set by hand for the active network (System Settings) take precedence over this tunnel's, so names may be sent outside the tunnel; remove them, or turn the kill switch on",
+  "DaemonWarnDNSBusy": "this tunnel's DNS servers are not applied: those of another tunnel already answer every name, and only one tunnel's can; disconnect that tunnel, then reconnect this one",
+  "DaemonWarnDNSIgnored": "this tunnel's DNS servers are not used: another tunnel's answer every name, and this tunnel has no search domains to send to its own; add search domains to its DNS line to use them for those",
+  "DaemonWarnDNSScopedUnsupported": "this tunnel's DNS servers are not used: another tunnel's answer every name, and resolvconf cannot send only this tunnel's search domains to its own; use systemd-resolved to enable them",
+  "DaemonWarnDNSNotApplied": "this tunnel's DNS servers are not applied on this system",
+  "DaemonWarnNoRPFilter": "this full tunnel runs without its reverse-path filter because nft is not installed; install nftables to enable it",
+  "DaemonWarnKillSwitchNoEffectFmt": "the kill switch is NOT in effect, traffic outside the tunnels is not blocked: {err}",
+  "@DaemonWarnKillSwitchNoEffectFmt": {
+    "description": "DaemonWarnKillSwitchNoEffectFmt takes why the kill switch's rules\nare in place (or wanted) but cannot take effect (macOS: the main pf\nruleset no longer evaluates the com.apple anchors).",
+    "placeholders": {
+      "err": {
+        "verb": "%v"
+      }
+    }
+  },
+  "CLIUsage": "usage: latchwire <command> [arguments]\n\ncommands:\n  devices                       list connected YubiKeys\n  keygen --serial N [--slot 82] [--force] [--address IP]\n                                generate an X25519 key on a YubiKey\n  pubkey <keyref>               print the public key of a key on a YubiKey\n  agent                         run the user agent (asks for the PIN)\n  daemon                        run the tunnel daemon (root)\n  add <name> <file>             add a tunnel configuration (administrator)\n  remove <name>                 remove a tunnel (administrator)\n  up <name>                     connect a tunnel\n  down <name>                   disconnect a tunnel\n  status [name]                 show tunnels\n  policy <name> [--kill-switch auto|on|off] [--auto-connect=true|false]\n         [--on-demand=true|false] [--trust-network ID]\n         [--trust-current-network] [--untrust-network ID]\n         [--allow-user NAME] [--deny-user NAME]\n                                show a tunnel's policy, or change it\n                                (administrator); a trusted network is\n                                recognised only by its gateway's IP and MAC\n                                address, which anyone there can copy\n  network                       print the ID of the current network",
+  "@CLIUsage": {
+    "section": "Command line. None of these formats take a PIN, PUK or key; the ones that\nshow a public key say so in their name."
+  },
+  "CLIUnknownCommandFmt": "unknown command {command}",
+  "@CLIUnknownCommandFmt": {
+    "placeholders": {
+      "command": {
+        "verb": "%q"
+      }
+    }
+  },
+  "CLIUsageErrorFmt": "usage: latchwire {usage}",
+  "CLIErrorFmt": "latchwire: {err}",
+  "@CLIErrorFmt": {
+    "placeholders": {
+      "err": {
+        "verb": "%v"
+      }
+    }
+  },
+  "CLIDaemonNotRunning": "the Latchwire daemon is not running (start it with: sudo latchwire daemon)",
+  "DevicesNone": "no YubiKey found",
+  "@DevicesNone": {
+    "description": "devices"
+  },
+  "DevicesHeaderFmt": "YubiKey {serial}",
+  "@DevicesHeaderFmt": {
+    "placeholders": {
+      "serial": {
+        "verb": "%d"
+      }
+    }
+  },
+  "DevicesFirmware": "  Firmware:  {version}",
+  "DevicesSupported": "  Supported: {answer}",
+  "DevicesReader": "  Reader:    {reader}",
+  "DevicesYes": "yes",
+  "DevicesNo": "no (firmware 5.7.0 or later is needed for X25519)",
+  "KeygenSerialRequired": "keygen needs --serial (see: latchwire devices)",
+  "@KeygenSerialRequired": {
+    "description": "keygen"
+  },
+  "KeygenBadSlotFmt": "invalid --slot {slot}: use a retired slot from 82 to 95 (hexadecimal)",
+  "@KeygenBadSlotFmt": {
+    "placeholders": {
+      "slot": {
+        "verb": "%q"
+      }
+    }
+  },
+  "KeygenBadAddressFmt": "invalid --address {address}: use the tunnel IP address of this client, for example 10.8.0.2",
+  "@KeygenBadAddressFmt": {
+    "placeholders": {
+      "address": {
+        "verb": "%q"
+      }
+    }
+  },
+  "KeygenPINPromptFmt": "PIN for YubiKey {serial}: ",
+  "@KeygenPINPromptFmt": {
+    "placeholders": {
+      "serial": {
+        "verb": "%d"
+      }
+    }
+  },
+  "KeygenPUKPrompt": "Current PUK: ",
+  "KeygenNewPINPrompt": "New PIN (6-8 characters): ",
+  "KeygenNewPINAgain": "New PIN again: ",
+  "KeygenNewPUKPrompt": "New PUK (6-8 characters): ",
+  "KeygenNewPUKAgain": "New PUK again: ",
+  "KeygenSecretMismatch": "the two entries differ, try again",
+  "KeygenSecretRules": "use 6 to 8 characters, try again",
+  "KeygenSecretGaveUp": "no valid new PIN or PUK was entered; nothing was changed on the YubiKey",
+  "KeygenFreshRejected": "the new PIN or PUK was not accepted: it must have 6 to 8 characters and differ from the factory values; nothing was changed on the YubiKey",
+  "KeygenManagementKeyPrompt": "This YubiKey has a custom management key. Management key (hexadecimal): ",
+  "KeygenBadManagementKey": "invalid management key: enter it in hexadecimal, 32, 48 or 64 characters (16, 24 or 32 bytes); nothing was changed on the YubiKey",
+  "KeygenManagementKeyRejected": "the YubiKey did not accept this management key; nothing was changed on the YubiKey",
+  "KeygenSlotOccupiedFmt": "slot {slot} on YubiKey {serial} already holds an X25519 key (PublicKey = {key})",
+  "@KeygenSlotOccupiedFmt": {
+    "placeholders": {
+      "slot": {
+        "verb": "%02x"
+      },
+      "serial": {
+        "verb": "%d"
+      }
+    }
+  },
+  "KeygenSlotOccupiedOther": "slot {slot} on YubiKey {serial} already holds a key that Latchwire cannot use ({err})",
+  "@KeygenSlotOccupiedOther": {
+    "placeholders": {
+      "slot": {
+        "verb": "%02x"
+      },
+      "serial": {
+        "verb": "%d"
+      },
+      "err": {
+        "verb": "%v"
+      }
+    }
+  },
+  "KeygenSlotOccupiedStop": "nothing was changed; run again with --force to destroy that key and generate a new one",
+  "KeygenForceWarn": "--force destroys this key. This cannot be undone: tunnels that use it stop working until their configuration and the server are updated.",
+  "KeygenForceConfirmPrompt": "Type yes to destroy it and generate a new key: ",
+  "KeygenForceNeedsTTY": "--force on an occupied slot needs a terminal to confirm; nothing was changed on the YubiKey",
+  "KeygenForceDeclined": "not confirmed; nothing was changed on the YubiKey",
+  "KeygenWrongPINFmt": "wrong PIN, {retries} attempts left; run the command again to retry",
+  "@KeygenWrongPINFmt": {
+    "placeholders": {
+      "retries": {
+        "verb": "%d"
+      }
+    }
+  },
+  "KeygenDoneFmt": "Generated an X25519 key on YubiKey {serial}, slot {slot}. The private key never leaves the YubiKey.",
+  "@KeygenDoneFmt": {
+    "placeholders": {
+      "serial": {
+        "verb": "%d"
+      },
+      "slot": {
+        "verb": "%02x"
+      }
+    }
+  },
+  "KeygenKeyRefFmt": "KeyRef: {ref}",
+  "KeygenIdentityHeader": "Add these lines to the tunnel configuration (in [Interface] or in an [Identity] section):",
+  "KeygenIdentityLinesFmt": "KeyRef = {ref}\nPublicKey = {key}",
+  "KeygenPeerHeader": "Add this client as a peer on the server:",
+  "KeygenPeerBlockFmt": "[Peer]\nPublicKey = {key}\nAllowedIPs = {ip}/{bits}",
+  "@KeygenPeerBlockFmt": {
+    "placeholders": {
+      "bits": {
+        "verb": "%d"
+      }
+    }
+  },
+  "KeygenTunnelIP": "<tunnel IP>",
+  "KeygenAddressHint": "Replace <tunnel IP> with the tunnel address of this client, or pass --address next time.",
+  "FreshCardExplain": "This YubiKey still uses its factory management key, so it must be secured first.\nWithout that, anyone who knows the factory settings could replace the key that\nis about to be created. Latchwire will:\n  1. change the PIN and the PUK to the new values you choose now (the PIN you\n     just entered is taken as the current PIN),\n  2. generate a random management key and store it on the YubiKey, protected by\n     your PIN (ykman shows this as \"stored on the YubiKey, protected by PIN\").\nEnter the current PUK, then choose a new PIN and a new PUK. The factory values\nare never tried automatically.",
+  "@FreshCardExplain": {
+    "description": "FreshCardExplain is shown when the YubiKey still has factory secrets."
+  },
+  "PubkeyUsage": "pubkey <keyref>   (for example piv://40727512/82)",
+  "@PubkeyUsage": {
+    "description": "pubkey"
+  },
+  "DaemonMustBeRoot": "the daemon creates network interfaces and must run as root: use sudo latchwire daemon",
+  "@DaemonMustBeRoot": {
+    "description": "agent and daemon"
+  },
+  "AgentStartedFmt": "latchwire agent: using {socket}; press Ctrl-C to stop",
+  "DaemonStartedFmt": "latchwire daemon: serving on {socket}",
+  "AddReadFailedFmt": "cannot read {path}: {err}",
+  "@AddReadFailedFmt": {
+    "description": "add and remove",
+    "placeholders": {
+      "err": {
+        "verb": "%v"
+      }
+    }
+  },
+  "AddedFmt": "tunnel {name} added",
+  "RemovedFmt": "tunnel {name} removed",
+  "UpWaitingFmt": "connecting {name}; if the YubiKey needs its PIN, enter it in the terminal where latchwire agent runs",
+  "@UpWaitingFmt": {
+    "description": "up and down"
+  },
+  "UpDoneFmt": "tunnel {name} is {state}",
+  "DownAlreadyFmt": "tunnel {name} is already disconnected",
+  "DownDoneFmt": "tunnel {name} disconnected",
+  "DownStillBlockingFmt": "note: tunnel {name} failed and its kill switch still blocks traffic outside the tunnel; only the user whose connect failed (while still an allowed user) or an administrator can lift it: latchwire down {name} as that user, or sudo latchwire down {name}",
+  "@DownStillBlockingFmt": {
+    "description": "DownStillBlockingFmt takes the tunnel name."
+  },
+  "StatusNone": "no tunnels configured",
+  "StatusHeader": "NAME\tSTATE\tIDENTITY\tLAST HANDSHAKE\tINTERFACE\tMTU\tROUTES\tDNS\tKILL SWITCH",
+  "StatusRowFmt": "{name}\t{state}\t{identity}\t{handshake}\t{iface}\t{mtu}\t{routes}\t{dns}\t{killswitch}",
+  "StatusDash": "-",
+  "StatusFull": "all",
+  "@StatusFull": {
+    "description": "ROUTES of a full tunnel"
+  },
+  "StatusSplit": "split",
+  "@StatusSplit": {
+    "description": "ROUTES of any other tunnel"
+  },
+  "StatusWarningFmt": "warning: {name}: {warning}",
+  "@StatusWarningFmt": {
+    "description": "StatusWarningFmt takes the tunnel name and the warning."
+  },
+  "PolicyBadKillSwitchFmt": "invalid --kill-switch {value}: use auto, on or off",
+  "@PolicyBadKillSwitchFmt": {
+    "description": "policy",
+    "placeholders": {
+      "value": {
+        "verb": "%q"
+      }
+    }
+  },
+  "PolicyUnknownUserFmt": "no user named {user}",
+  "@PolicyUnknownUserFmt": {
+    "description": "PolicyUnknownUserFmt takes the user name.",
+    "placeholders": {
+      "user": {
+        "verb": "%q"
+      }
+    }
+  },
+  "PolicyPrintFmt": "tunnel {name}\n  kill switch:      {killswitch}\n  auto-connect:     {autoconnect}\n  on-demand:        {ondemand}\n  trusted networks: {networks}\n  allowed users:    {users}",
+  "@PolicyPrintFmt": {
+    "description": "PolicyPrintFmt takes the tunnel name, the kill switch, auto-connect\nand on-demand (PolicyOn or PolicyOff), the trusted networks and the\nallowed users."
+  },
+  "PolicyOn": "on",
+  "PolicyOff": "off",
+  "PolicyNone": "none",
+  "PolicyAdminsOnly": "administrators only",
+  "PolicyUserFmt": "{user} ({uid})",
+  "@PolicyUserFmt": {
+    "description": "PolicyUserFmt takes a user name and its uid.",
+    "placeholders": {
+      "uid": {
+        "verb": "%d"
+      }
+    }
+  },
+  "PolicyKillSwitchPendingFmt": "note: tunnel {name} still runs with kill switch {current}; {next} applies when it next connects",
+  "@PolicyKillSwitchPendingFmt": {
+    "description": "PolicyKillSwitchPendingFmt takes the tunnel name, the kill switch\nsetting it runs with and the policy's."
+  },
+  "PolicyTrustWarning": "warning: a trusted network is recognised only by its gateway's IP and MAC address, which anyone on that network can copy; on a trusted network on-demand does not protect your traffic",
+  "@PolicyTrustWarning": {
+    "description": "PolicyTrustWarning goes with --trust-network and\n--trust-current-network (P22)."
+  },
+  "PolicyRevokedBlockingFmt": "note: tunnel {name} was taken from a user who is no longer allowed and stays blocked by its kill switch; run sudo latchwire down {name} to lift it",
+  "@PolicyRevokedBlockingFmt": {
+    "description": "PolicyRevokedBlockingFmt takes the tunnel name."
+  },
+  "NetworkUntrustableNoteFmt": "note: {network} names no particular network (no default gateway, or its hardware address is not known yet) and cannot be trusted",
+  "@NetworkUntrustableNoteFmt": {
+    "description": "network\nNetworkUntrustableNoteFmt takes the network ID (\"none\" or \"unknown\")."
+  },
+  "CLIUntrustedDaemonFmt": "refusing the service socket: it is served by uid {uid}, not by root or this user",
+  "@CLIUntrustedDaemonFmt": {
+    "description": "CLIUntrustedDaemonFmt takes the uid of the socket's owner process.",
+    "placeholders": {
+      "uid": {
+        "verb": "%d"
+      }
+    }
+  },
+  "UILangName": "English",
+  "@UILangName": {
+    "description": "This language's own name, shown in the language picker."
+  },
+  "UILanguage": "Language",
+  "UINavTunnels": "Tunnels",
+  "@UINavTunnels": {
+    "description": "Sidebar entry."
+  },
+  "UIDemoBanner": "Demo mode: no real card or service is used.",
+  "UIStep": "STEP {step} / 2",
+  "@UIStep": {
+    "description": "Shown above a heading.",
+    "placeholders": {
+      "step": {
+        "verb": "%d"
+      }
+    }
+  },
+  "UIOnboardTitle": "{count, plural, =0 {Plug in your YubiKey} one {Hardware key found} other {# hardware keys found}}",
+  "UIOnboardBody": "The private key is created inside this device and never leaves it. No copy is written to this computer.",
+  "UIOnboardEmpty": "No YubiKey found. Plug one in; this screen updates by itself.",
+  "UIDeviceName": "YubiKey {serial}",
+  "@UIDeviceName": {
+    "placeholders": {
+      "serial": {
+        "verb": "%d"
+      }
+    }
+  },
+  "UIDeviceLine": "Serial {serial} · Firmware {firmware} · PIV",
+  "@UIDeviceLine": {
+    "placeholders": {
+      "serial": {
+        "verb": "%d"
+      }
+    }
+  },
+  "UICompatible": "Compatible",
+  "UIIncompatible": "Firmware too old",
+  "UISettings": "SETTINGS",
+  "UISlotLabel": "Slot on the card",
+  "UISlotRecommended": "Retired slot {slot} (recommended)",
+  "@UISlotRecommended": {
+    "placeholders": {
+      "slot": {
+        "verb": "%02x"
+      }
+    }
+  },
+  "UISlotOption": "Retired slot {slot}",
+  "@UISlotOption": {
+    "placeholders": {
+      "slot": {
+        "verb": "%02x"
+      }
+    }
+  },
+  "UISlotHint": "Slots 9a and 9d stay untouched, so smart-card login keeps working.",
+  "UISlotNoneFree": "No free slot",
+  "UITouchLabel": "Touch",
+  "UITouchNever": "Never. A handshake happens about every 2 minutes, so a touch policy would interrupt the tunnel.",
+  "UICreateKey": "Create key on the card",
+  "UIPINWillBeAsked": "The PIV PIN will be asked",
+  "UIExistingKeys": "Keys already on this card",
+  "UIExistingKey": "Slot {slot}: {key}",
+  "@UIExistingKey": {
+    "placeholders": {
+      "slot": {
+        "verb": "%02x"
+      }
+    }
+  },
+  "UIUseKey": "Use this key",
+  "UIWorking": "Working with the card, do not remove it…",
+  "UIPINForKey": "PIN for YubiKey {serial}",
+  "@UIPINForKey": {
+    "placeholders": {
+      "serial": {
+        "verb": "%d"
+      }
+    }
+  },
+  "UIPINForSlot": "PIN for YubiKey {serial}, slot {slot}",
+  "@UIPINForSlot": {
+    "placeholders": {
+      "serial": {
+        "verb": "%d"
+      },
+      "slot": {
+        "verb": "%02x"
+      }
+    }
+  },
+  "UIPINReason": "A tunnel you or this computer started needs the card. Enter the PIN only if you expected this.",
+  "UIPINRetries": "{retries, plural, one {# attempt left} other {# attempts left}}",
+  "UIOK": "OK",
+  "UICancel": "Cancel",
+  "UIFreshTitle": "Secure this YubiKey first",
+  "UICurrentPUK": "Current PUK",
+  "UINewPIN": "New PIN (6-8 characters)",
+  "UINewPINAgain": "New PIN again",
+  "UINewPUK": "New PUK (6-8 characters)",
+  "UINewPUKAgain": "New PUK again",
+  "UIManagementTitle": "Management key",
+  "UIManagementBody": "This YubiKey has a custom management key. Enter it in hexadecimal (32, 48 or 64 characters).",
+  "UIPubTitleNew": "Key created on the card",
+  "UIPubTitleExisting": "Key on the card",
+  "UIPubBody": "Add only this public key to your server. The private key stays inside YubiKey {serial}.",
+  "@UIPubBody": {
+    "placeholders": {
+      "serial": {
+        "verb": "%d"
+      }
+    }
+  },
+  "UIPublicKey": "Public key",
+  "UICopy": "Copy",
+  "UICopied": "Copied",
+  "UIPeerBlockLabel": "Peer to add on the server",
+  "UITunnelIPLabel": "Tunnel IP of this client",
+  "UITunnelIPHint": "for example 10.8.0.2",
+  "UITunnelIPInvalid": "This is not an IP address.",
+  "UIShowQR": "Show QR",
+  "UIQRTitle": "Peer block as a QR code",
+  "UIQRBody": "It holds only the public key and the tunnel IP. There is nothing secret in it.",
+  "UIClose": "Close",
+  "UIImportConf": "Import the server's .conf file",
+  "UIImportTitle": "Add tunnel from .conf",
+  "UITunnelName": "Tunnel name",
+  "UIBackupAddressLabel": "Tunnel IP of the backup card",
+  "UIImportAdd": "Add tunnel",
+  "UIImportPrivateKey": "This file contained a PrivateKey line. Latchwire dropped it and keeps no copy. The server must list the public key shown here instead of the key that file was made for, otherwise the handshake fails. Delete that file if you no longer need it.",
+  "UIImportAdded": "Tunnel {name} added.",
+  "UIBackupTitle": "Add a backup card",
+  "UIBackupBody": "This key cannot be copied. In case the card is lost, create a separate key on a second YubiKey and add it to the server as a second peer with its own tunnel IP.",
+  "UIBackupCreate": "Create for {serial} too",
+  "@UIBackupCreate": {
+    "placeholders": {
+      "serial": {
+        "verb": "%d"
+      }
+    }
+  },
+  "UIBackupPlugIn": "Plug in a second YubiKey to create its key.",
+  "UIBackupReady": "Backup key on YubiKey {serial} is ready. Add its peer on the server too.",
+  "@UIBackupReady": {
+    "placeholders": {
+      "serial": {
+        "verb": "%d"
+      }
+    }
+  },
+  "UIFinish": "Done, go to tunnels",
+  "UITunnelsHeader": "TUNNELS",
+  "UITunnelsEmpty": "No tunnels yet. Create a key on your card, then import your server's .conf file.",
+  "UINewTunnel": "+ New tunnel",
+  "UIStateConnected": "Connected",
+  "UIStateConnecting": "Connecting…",
+  "UIStateDisconnected": "Not connected",
+  "UIStateCardRemoved": "No card · disconnected",
+  "UIStateError": "Error",
+  "UIKeyLabel": "Key",
+  "UIKeyNone": "No card in use",
+  "UIKeyPresent": "Plugged in · private key in hardware",
+  "UIKeyAbsent": "Not plugged in",
+  "UILastHandshake": "Last handshake",
+  "UIHandshakeNote": "One card operation about every 2 minutes",
+  "UIHandshakeNone": "—",
+  "UIAgoSeconds": "{n, plural, one {# second ago} other {# seconds ago}}",
+  "UIAgoMinutes": "{n, plural, one {# minute ago} other {# minutes ago}}",
+  "UIAgoHours": "{n, plural, one {# hour ago} other {# hours ago}}",
+  "UICardRemoved": "The card was removed: the session keys were erased and the tunnel is closed. Plug the card back in to reconnect; the PIN may be asked again.",
+  "UIBlocking": "The kill switch is blocking all traffic outside the tunnel until the tunnel is back or you disconnect it.",
+  "UIConnect": "Connect",
+  "UIDisconnect": "Disconnect",
+  "UITrayOpen": "Open Latchwire",
+  "UITrayQuit": "Quit Latchwire",
+  "UITrayNoTunnels": "No tunnels",
+  "UITrayConnect": "Connect {name}",
+  "UITrayDisconnect": "Disconnect {name}",
+  "UITrayConnected": "{count, plural, =0 {No tunnel connected} one {# tunnel connected} other {# tunnels connected}}",
+  "UIQuitTitle": "Quit Latchwire?",
+  "UIQuitBody": "{count, plural, one {# tunnel is connected.} other {# tunnels are connected.}} Quitting stops the key agent, and connected tunnels close about 10 seconds later."
+}
