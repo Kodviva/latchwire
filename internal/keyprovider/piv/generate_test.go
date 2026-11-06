@@ -410,3 +410,17 @@ func TestNeverVerifiesDefaultPIN(t *testing.T) {
 		}
 	}
 }
+
+func TestPINRetriesReadsWithoutSpending(t *testing.T) {
+	f := newFakeCard(t, 40727512)
+	c, err := newCard(f, "Yubico YubiKey")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		n, err := c.PINRetries()
+		if err != nil || n != 3 {
+			t.Fatal(n, err)
+		}
+	}
+}
