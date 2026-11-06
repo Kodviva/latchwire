@@ -7,3 +7,11 @@ Latchwire is an open-source WireGuard-compatible client that keeps the static X2
 - Security: [threat model](docs/threat-model.md) (what is and is not protected, including the card-sharing caveat and the limits of the kill switch and DNS handling) and [security policy](SECURITY.md) (how to report a vulnerability).
 - Testing with real hardware: [docs/hardware-checklist.md](docs/hardware-checklist.md).
 - Contributing: [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Desktop app
+
+`desktop/` is a menu bar and tray app built with Fyne, in its own Go module. It hosts the key agent, so run it instead of `latchwire agent`. Test it with `cd desktop && go test ./...`; `desktop/build_macos.sh -tags demo` builds a demo that needs no card or daemon.
+
+## Translations
+
+Messages live in `internal/msg/locales/*.arb` (ICU MessageFormat); `en.arb` is the source. The steps for adding a message or a language are in `internal/msg/doc.go`.

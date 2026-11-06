@@ -50,12 +50,14 @@ test only).
 
 ## 3. Components and trust
 
-Three programs (all in the one `latchwire` binary) cooperate:
+Three programs (all in the one `latchwire` binary) cooperate. The desktop app
+(`desktop/`, a separate binary) is a fourth way to run the agent:
 
 | Component | Runs as | Does |
 | --- | --- | --- |
 | `latchwire daemon` | root | Owns the TUN device, the wireguard-go device, the routes and policy rules, the tunnel's DNS settings and the kill switch's firewall rules (section 5.7). Never touches the card. Asks the agent for every X25519 operation that needs the static key. |
 | `latchwire agent` | the logged-in user | Talks to the card over PC/SC, asks for the PIN (a dialog when started by launchd or systemd, else the terminal), answers the daemon's key requests. |
+| Desktop app | the logged-in user | Hosts the same agent code in its own process and shows its own PIN form instead of the terminal or system dialog. Creates keys on the card, reads which keys a card holds, and calls the daemon over the same socket and with the same permissions as the CLI. See section 5.8. |
 | `latchwire` CLI | the caller | `keygen`, `devices`, `pubkey` talk to the card directly; `add`, `remove`, `up`, `down`, `status`, `policy`, `network` talk to the daemon. |
 
 They talk over one unix socket, `/var/run/latchwire.sock`, mode `0666`. The
@@ -85,7 +87,7 @@ Where this is enforced: `internal/ipc/peercred_linux.go`,
 | **Handshake floods used to wear out or block the card.** | See section 8. | `internal/keyprovider/wgadapter/adapter.go`. |
 | **Traffic leaving outside the tunnel** (a removed card, a failed or still connecting tunnel, a crashed daemon). | With the kill switch on (by default for a full tunnel with one peer), only the tunnel interfaces, loopback, the endpoints and link setup pass; it keeps blocking while the tunnel is connecting, waiting for its card or failed, and after a crash of the daemon. Only `latchwire down`, `remove` or an orderly stop of the service lifts it. See section 5.7 for the details and the limits. | `internal/daemon/policy.go:103` (`armed`); `internal/daemon/manager.go:2162` (`killSwitchStatus`), `:399` (startup keeps the kill switch), `:2643` (`startKillSwitch`); `internal/killswitch/nft.go:100`, `internal/killswitch/pf.go:79`. Linux end-to-end: `testKillSwitchCard`, `testCrash` in `test/e2e/linux/e2e_test.go`. |
 | **DNS queries going to the local network's resolver while a full tunnel is up.** | A full tunnel's DNS servers answer every name (macOS: the primary service's DNS; Linux: systemd-resolved with `~.`, or openresolv exclusively). With the kill switch on, DNS can only leave through a tunnel interface. Limits in section 5.7. | `internal/daemon/manager.go:2017` (`dnsRoleLocked`); `internal/netcfg/linuxplan_dns.go:50`, `internal/netcfg/darwinplan_dns.go:521`; `internal/killswitch/nft.go:90` (no DNS exception). Linux end-to-end: `testDNS`, `testFull`. |
-| **The program storing or leaking your PIN.** | The PIN is never stored: no struct field, file or environment variable. It is read from the terminal (no echo), handed straight to the card, and never logged. The buffer read from the terminal is cleared; the Go string passed on to the card cannot be erased (see 5.3). | `internal/agent/prompt_tty.go`, `internal/agent/agent.go` (package comment, `prompt`), `internal/keyprovider/piv/provider.go` (`promptPIN`), `cmd/latchwire/tty.go`. |
+| **The program storing or leaking your PIN.** | The PIN is never stored: no struct field, file or environment variable. It is read from the terminal (no echo), handed straight to the card, and never logged. The buffer read from the terminal is cleared; the Go string passed on to the card cannot be erased (see 5.3). The desktop app reads it into one byte array that it wipes and draws only dots; the same limit applies from there on (see 5.8). | `internal/agent/prompt_tty.go`, `internal/agent/agent.go` (package comment, `prompt`), `internal/keyprovider/piv/provider.go` (`promptPIN`), `cmd/latchwire/tty.go`, `desktop/ui/secret.go`, `desktop/ui/dialogs.go`. |
 
 ## 5. What Latchwire does NOT protect against
 
@@ -309,17 +311,61 @@ compromised root.
 - **Counterfeit or compromised tokens and firmware.** Latchwire trusts what the
   card reports about where a key came from. It does not (yet) verify a PIV
   attestation certificate. This is a possible future addition.
-- **The PIN prompt.** The agent asks for the PIN on its terminal when the
-  daemon's request needs it. A process that can request a connect as your user
+- **The PIN prompt.** The agent asks for the PIN on its terminal, or in the
+  desktop app's window, when the daemon's request needs it. A process that can request a connect as your user
   can cause a prompt, and an administrator whose own card is missing can cause
   a prompt in another user's agent. Do not type your PIN into a prompt you did
   not expect.
 - **Builds and supply chain.** Latchwire vendors patched copies of wireguard-go
   and piv-go (`third_party/*/PATCHES.md` lists every change). Reproducible
   builds and signed releases are goals and do not exist yet.
-- **Windows, other platforms, and GUI.** Not implemented in the core CLI.
+- **Windows and other platforms.** Not implemented in the core CLI.
   The Windows build does not compile yet (`ipc.PeerUID` has no Windows
   implementation); that is the work of the Windows plan.
+
+### 5.8 The desktop app
+
+The app adds a user interface, not a new trust level: it runs as you, and
+everything in this section is on top of the limits above.
+
+- **No web engine.** The window is drawn by Fyne (Go and OpenGL). No HTML or
+  JavaScript runs in the process that handles your PIN.
+- **The PIN field.** `SecretField` keeps input in one byte array, wiped when
+  the form closes, and has no undo history and no paste. The PIN then reaches
+  the card as a Go string, as in the terminal path (5.3). Key events pass
+  through the window system and the toolkit first, and a program that can read
+  your keyboard or your process memory sees the PIN; that is true of any
+  dialog. PUK, new PIN and management key follow the same path, for the time
+  key creation takes.
+- **A larger process.** The app links a GUI toolkit and its dependencies, about
+  320 packages. They share an address space with the agent, so a bug in them is
+  closer to your PIN than in the small `latchwire agent` process. Use the CLI
+  agent if you prefer the smaller one.
+- **Fake windows.** Any program running as you can draw a window that looks
+  like the PIN form. As in 5.5: do not enter the PIN into a prompt you did not
+  expect. The form appears only when a tunnel you or a login item started needs
+  the card.
+- **Key creation never replaces a key.** The app offers empty slots only and
+  never sets `Force`. Replacing a key stays a deliberate `latchwire keygen
+  --force`.
+- **Importing a `.conf`.** A `PrivateKey` line, and any comment naming one, is
+  dropped while reading, the file's bytes are wiped, and the form says so. The
+  key stays in the file on your disk until you delete it, and copies can remain
+  in memory until it is reused. The app does not touch the file.
+- **The clipboard** only ever receives public keys and `[Peer]` blocks. The QR
+  code holds the same text.
+- **Status is polled** every 2 seconds, so a removed card appears on screen up
+  to about 3 seconds later, even though the daemon closes the tunnel sooner.
+- **Quitting stops the agent.** Tunnels then close after the 10-second grace
+  period (section 10). The app asks first when a tunnel is connected.
+- **Do not run a second agent.** With `latchwire agent` running as the same
+  user too, the daemon uses whichever registered first, so PIN prompts can
+  appear in a place you do not expect. Two copies of the app are refused by a
+  per-user lock; a CLI agent next to the app is not.
+
+The demo build (`-tags demo`) uses made-up data and is not what is shipped;
+`desktop/deps_test.go` checks that the normal build links neither it nor the
+software key.
 
 ### 5.6 Trusted networks (on-demand)
 

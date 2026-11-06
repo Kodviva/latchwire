@@ -402,6 +402,37 @@ Behaviour, with `full` (kill switch `auto`, so on):
       pinentry dialogs, cancel, timeout, last-attempt warning, no PIN in the
       process list or environment, launchd and systemd units running).
 
+## 15a. Desktop app
+
+Build with `desktop/build_macos.sh`, stop any `latchwire agent`, start
+`desktop/build/Latchwire.app`, and run the daemon. Use a test card: these steps
+write to it.
+
+- [ ] The menu bar shows the Latchwire icon and no Dock icon appears. Its menu
+      lists the tunnels, Open and Quit. Closing the window leaves the app running.
+- [ ] A factory-fresh card: Create key asks for the PIN, then shows the form for
+      the PUK and the new PIN and PUK. `ykman piv info` shows the management key
+      stored under the PIN.
+- [ ] A secured card: the slot list shows only empty slots; keys already on the
+      card appear under "Keys already on this card".
+- [ ] A custom management key: the form asks for it; a wrong one changes nothing.
+- [ ] The `[Peer]` block goes on a real server; the QR code scans to the same
+      text; the public key in Copy matches `latchwire pubkey`.
+- [ ] Import a `.conf` that has a `PrivateKey` line: the warning appears and
+      `/var/lib` or the tunnel store holds no such line. As a non-administrator
+      the daemon's refusal is shown.
+- [ ] Second card: Create for ... too, then import: the tunnel has two
+      `[Identity]` sections and connects with either card.
+- [ ] Connect: the PIN form comes to the front even with the window closed;
+      cancel gives one prompt and no loop; a wrong PIN shows the attempts left.
+- [ ] One attempt left: the form shows the warning. Do this on a test card only.
+- [ ] Pull the card while connected: the state changes to "No card ·
+      disconnected" within about 3 seconds with the explanation. Replug it.
+- [ ] Quit while connected: the app asks first, and the tunnel closes about 10
+      seconds later.
+- [ ] Read every Turkish screen (the translation is marked for review in
+      `internal/msg/locales/tr.arb`).
+
 ## 16. Clean up
 
 - [ ] `sudo latchwire remove office`; stop the daemon with Ctrl-C and check

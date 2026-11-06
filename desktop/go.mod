@@ -1,6 +1,6 @@
 module github.com/Kodviva/latchwire/desktop
 
-go 1.25
+go 1.27.3
 
 // The UI lives in its own module so that the toolkit's cgo and its 78-line
 // dependency list stay out of the CLI and daemon build.
@@ -13,7 +13,7 @@ replace github.com/go-piv/piv-go/v2 => ../third_party/piv-go
 require (
 	fyne.io/fyne/v2 v2.8.2
 	github.com/Kodviva/latchwire v0.0.0-00010101000000-000000000000
-	golang.org/x/sys v0.32.0
+	golang.org/x/sys v0.49.0
 	rsc.io/qr v0.2.0
 )
 
@@ -48,12 +48,12 @@ require (
 	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef // indirect
 	github.com/stretchr/testify v1.11.1 // indirect
 	github.com/yuin/goldmark v1.8.2 // indirect
-	golang.org/x/crypto v0.37.0 // indirect
+	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/image v0.24.0 // indirect
-	golang.org/x/net v0.39.0 // indirect
-	golang.org/x/term v0.31.0 // indirect
-	golang.org/x/text v0.24.0 // indirect
-	golang.org/x/time v0.7.0 // indirect
+	golang.org/x/net v0.62.0 // indirect
+	golang.org/x/term v0.47.0 // indirect
+	golang.org/x/text v0.43.0 // indirect
+	golang.org/x/time v0.16.0 // indirect
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
 	golang.zx2c4.com/wireguard v0.0.0-00010101000000-000000000000 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect

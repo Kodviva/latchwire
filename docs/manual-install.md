@@ -19,6 +19,15 @@ Linux): the daemon runs it as root and every user's agent runs it too.
   case as a login item) it asks with a dialog: `osascript` on macOS,
   `pinentry` on Linux. Started from a shell instead, it asks on the terminal.
 
+- **Desktop app** (`desktop/`, optional): a menu bar or tray app that runs the
+  agent itself. Use it instead of the agent login item, not next to it: with
+  both, the daemon uses whichever registered first. Build it on macOS with
+  `desktop/build_macos.sh`; it needs Xcode's command line tools. On Linux,
+  `go build` in `desktop/` needs a C compiler and the OpenGL and X11 headers
+  (Debian: `libgl1-mesa-dev xorg-dev`). `LATCHWIRE_LANG=tr` picks a language.
+  `desktop/build_macos.sh -tags demo` builds a demo that uses no card and no
+  daemon.
+
 ## macOS
 
 Install the property lists (owner root, mode 0644, or launchd refuses them):
