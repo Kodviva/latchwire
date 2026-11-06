@@ -60,6 +60,11 @@ exclusive lock, as upstream `SetPrivateKey` did for its DH.
   pipe and which would let a client serve the pipe itself.
   `SECURITY_IDENTIFICATION` lets the server read who the client is but not act
   as it.
+- `ipc/namedpipe/namedpipe.go`: `makeConnectedServerPipe` returns
+  `net.ErrClosed` for every result once the listener is closing. Reason: a
+  connect that the close cancels on its way into the kernel returns
+  `ERROR_OPERATION_ABORTED` directly, `listenerRoutine` then keeps running, and
+  `Close` waits for it forever, which stops a daemon from shutting down.
 
 ## Not changed
 
