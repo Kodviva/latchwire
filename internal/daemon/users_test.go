@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/Kodviva/latchwire/internal/ipc"
@@ -25,6 +26,9 @@ func TestAddOwner(t *testing.T) {
 }
 
 func TestUserMethodsAbsentOnUnix(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows has the table")
+	}
 	e := newEnv(t, envOpts{})
 	var ie *ipc.Error
 	err := e.cli.Call(context.Background(), ipc.MethodUserID, ipc.UserInfo{SID: testSID}, nil)

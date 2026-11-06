@@ -47,7 +47,7 @@ func TestPolicyDefaultsAndPersistence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fi.Mode().Perm() != 0o600 {
+	if !modeIs(fi, 0o600) {
 		t.Errorf("mode %v, want 0600", fi.Mode().Perm())
 	}
 	ents, err := os.ReadDir(s.dir)
@@ -102,7 +102,7 @@ func TestAddRecordsOwnerAsAllowedUser(t *testing.T) {
 	if want := (Policy{KillSwitch: KillSwitchAuto, AllowedUsers: []uint32{uidB}}); err != nil || !reflect.DeepEqual(p, want) {
 		t.Fatalf("policy after add: %+v, %v; want %+v", p, err, want)
 	}
-	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
+	if fi, err := os.Stat(path); err != nil || !modeIs(fi, 0o600) {
 		t.Fatalf("policy file: %v, %v", fi, err)
 	}
 	if err := e.call(ipc.MethodTunnelRemove, ipc.TunnelName{Name: tunName}, nil); err != nil {

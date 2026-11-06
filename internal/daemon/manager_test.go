@@ -17,6 +17,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -489,6 +490,9 @@ func newEnv(t *testing.T, o envOpts) *env {
 	// No network: on-demand does nothing and runs no command.
 	e.m.networkID = func(context.Context) (string, error) { return netmon.NoNetwork, nil }
 	e.m.netDebounce = 10 * time.Millisecond
+	if runtime.GOOS == "windows" {
+		e.m.users = ipc.OpenUserTable(filepath.Join(dir, "users.json")) // never the host's
+	}
 	if o.hook != nil {
 		o.hook(e.m)
 	}
@@ -717,8 +721,12 @@ func TestConnectAutoMTU(t *testing.T) {
 			}
 			e.f.mu.Lock()
 			defer e.f.mu.Unlock()
-			if len(e.f.mtus) != 1 || e.f.mtus[0] != tc.want {
-				t.Fatalf("TUN MTUs %v, want [%d]", e.f.mtus, tc.want)
+			want := tc.want
+			if runtime.GOOS == "windows" && tc.mtu == "" {
+				want = 1420 // the runner answers no Windows command: the fallback
+			}
+			if len(e.f.mtus) != 1 || e.f.mtus[0] != want {
+				t.Fatalf("TUN MTUs %v, want [%d]", e.f.mtus, want)
 			}
 		})
 	}
@@ -1131,7 +1139,7 @@ func TestStaticKeySetOnceBeforeUp(t *testing.T) {
 		t.Fatal(err)
 	}
 	// pin_ready on the live device must recompute, not set the key.
-	e.m.pinReady(serialA, uint32(os.Getuid()))
+	e.m.pinReady(serialA, uidA)
 	e.b.setPresent(serialA, false)
 	e.waitState(StateCardRemoved, 3*time.Second)
 	e.b.setPresent(serialA, true)
@@ -1189,12 +1197,12 @@ func TestPinReadyRecomputesStaticStatic(t *testing.T) {
 	e, srv := connected(t, envOpts{})
 	before := e.b.callsFor(srv.pub)
 	// Only the agent's own user may trigger it for its card.
-	e.m.pinReady(serialA, uint32(os.Getuid())+1)
+	e.m.pinReady(serialA, uidA+1)
 	time.Sleep(100 * time.Millisecond)
 	if n := e.b.callsFor(srv.pub); n != before {
 		t.Fatalf("pin_ready from another uid recomputed (%d -> %d calls)", before, n)
 	}
-	e.m.pinReady(serialA, uint32(os.Getuid()))
+	e.m.pinReady(serialA, uidA)
 	deadline := time.Now().Add(3 * time.Second)
 	for e.b.callsFor(srv.pub) != before+1 {
 		if time.Now().After(deadline) {
@@ -1301,7 +1309,7 @@ func TestReconnectUsesCachedEndpointUnderKillSwitch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("no endpoint cache after a successful lookup: %v", err)
 	}
-	if fi.Mode().Perm() != 0o600 {
+	if !modeIs(fi, 0o600) {
 		t.Errorf("cache mode %v, want 0600", fi.Mode().Perm())
 	}
 	b, err := os.ReadFile(cache)
@@ -1385,10 +1393,12 @@ func TestReconnectUsesCachedEndpointUnderKillSwitch(t *testing.T) {
 	if err := e.call(ipc.MethodTunnelDisconnect, ipc.TunnelName{Name: tunName}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(cache, 0o622); err != nil {
-		t.Fatal(err)
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(cache, 0o622); err != nil {
+			t.Fatal(err)
+		}
+		assertCode(t, e.call(ipc.MethodTunnelConnect, ipc.TunnelName{Name: tunName}, nil), ipc.CodeUnavailable)
 	}
-	assertCode(t, e.call(ipc.MethodTunnelConnect, ipc.TunnelName{Name: tunName}, nil), ipc.CodeUnavailable)
 
 	if err := e.call(ipc.MethodTunnelRemove, ipc.TunnelName{Name: tunName}, nil); err != nil {
 		t.Fatal(err)
@@ -1431,10 +1441,10 @@ func TestStorePersistsTunnels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fi.Mode().Perm() != 0o600 {
+	if !modeIs(fi, 0o600) {
 		t.Errorf("config mode %v, want 0600", fi.Mode().Perm())
 	}
-	if di, _ := os.Stat(e.store); di.Mode().Perm() != 0o700 {
+	if di, _ := os.Stat(e.store); !modeIs(di, 0o700) {
 		t.Errorf("store mode %v, want 0700", di.Mode().Perm())
 	}
 
@@ -1507,12 +1517,27 @@ func assertCode(t *testing.T, err error, code string) {
 // ---- several users (R19, R20) ----
 
 var (
-	uidA     = uint32(os.Getuid()) // the test process: CLI and real agent
+	uidA     = selfUID()           // the test process: CLI and real agent
 	uidB     = uidA + 1000         // another local user, fake agent
 	uidAdmin = uint32(4242)        // an administrator without an agent
 )
 
 func onlyAdmin(uid uint32) bool { return uid == uidAdmin }
+
+// selfUID is the uid the daemon sees for this process. Windows has no uid: an
+// elevated client, as on CI, is peer 0.
+func selfUID() uint32 {
+	if runtime.GOOS == "windows" {
+		return 0
+	}
+	return uint32(os.Getuid())
+}
+
+// modeIs reports whether fi has the mode want. Windows has no mode bits: the
+// data directory's ACL protects these files.
+func modeIs(fi os.FileInfo, want os.FileMode) bool {
+	return runtime.GOOS == "windows" || fi.Mode().Perm() == want
+}
 
 // fakeAgent is an agent connection registered as uid. It answers key.public
 // with pub and key.x25519 with key's DH, whatever the card serial: it may be
