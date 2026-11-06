@@ -81,6 +81,20 @@ user_ctl() { as_user systemctl --user "$@"; }
 agent_show() { user_ctl show -p "$1" --value "$AGENT"; }
 agent_active() { [ "$(agent_show ActiveState)" = active ]; }
 
+# Why the user manager did not come up. The agent scenarios depend on it.
+user_manager_report() {
+	local uid
+	uid=$(id -u "$USERNAME")
+	loginctl show-user "$USERNAME" --no-pager 2>&1 | grep -E '^(Linger|State)='
+	systemctl status "user@$uid.service" "user-runtime-dir@$uid.service" systemd-logind.service --no-pager -l 2>&1 | tail -40
+	journalctl -u "user@$uid.service" -u "user-runtime-dir@$uid.service" -u systemd-logind.service --no-pager 2>&1 | tail -40
+	ls -la "/run/user/$uid" 2>&1
+	stat -c '%A %U %n' /etc/passwd /etc/shadow /usr/sbin/unix_chkpwd 2>&1
+	grep -E '^(passwd|shadow):' /etc/nsswitch.conf
+	echo "shadow entry: $(getent shadow "$USERNAME" | cut -d: -f1)"
+	grep -E '^Cap(Eff|Bnd)' /proc/self/status
+}
+
 # ---- the network and the fake card; survives all package changes ----
 prepare_network() {
 	mkdir -p "$WORK/keys"
@@ -194,7 +208,11 @@ scenario_install_starts() {
 	# A user with a running manager, like a logged-in desktop user.
 	useradd -m "$USERNAME" 2>/dev/null
 	loginctl enable-linger "$USERNAME"
-	wait_for 15 user_ctl is-system-running || :
+	if ! wait_for 15 user_ctl show-environment; then
+		user_manager_report
+		fail "user manager running"
+		return 1
+	fi
 
 	pkg_first "$OLD" >"$LOG" 2>&1 || { cat "$LOG"; fail "package installs"; return 1; }
 	pass "package installs"

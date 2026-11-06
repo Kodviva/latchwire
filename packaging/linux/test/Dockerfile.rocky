@@ -1,9 +1,11 @@
 # Boots systemd for packaging/linux/test/run.sh. Version 9 on purpose: it has
 # the oldest glibc the packages support (2.34). It ships no resolvconf: the
-# test tunnel carries no DNS line here.
+# test tunnel carries no DNS line here. Its /etc/shadow has mode 000, and on
+# GitHub's runners PAM then cannot read it, so the user manager never starts.
 FROM rockylinux/rockylinux:9
 RUN dnf install -y -q --setopt=install_weak_deps=False \
     systemd dbus-daemon iputils iproute pcsc-lite procps-ng util-linux \
+    && chmod 0400 /etc/shadow \
     && rm -f /etc/machine-id
 STOPSIGNAL SIGRTMIN+3
 CMD ["/sbin/init"]
