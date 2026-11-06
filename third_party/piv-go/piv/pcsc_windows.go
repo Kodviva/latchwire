@@ -50,12 +50,24 @@ func scCheck(rc uintptr) error {
 	return &scErr{int64(rc)}
 }
 
+// Latchwire patch: Windows stops the Smart Card service when the last reader
+// goes, and then answers with these two rather than "no readers". Pulling
+// the only YubiKey must read as an empty list, not as a failure.
+const (
+	scardENoService      = 0x8010001D
+	scardEServiceStopped = 0x8010001E
+)
+
 func isRCNoReaders(rc uintptr) bool {
-	return rc == 0x8010002E
+	return rc == 0x8010002E || rc == scardENoService || rc == scardEServiceStopped
 }
 
 type scContext struct {
 	ctx syscall.Handle
+	// noService (Latchwire patch): the Smart Card service was not running
+	// when this context was asked for. There are no readers, and nothing
+	// to release.
+	noService bool
 }
 
 func newSCContext() (*scContext, error) {
@@ -67,6 +79,9 @@ func newSCContext() (*scContext, error) {
 		uintptr(0),
 		uintptr(unsafe.Pointer(&ctx)),
 	)
+	if r0 == scardENoService || r0 == scardEServiceStopped {
+		return &scContext{noService: true}, nil // Latchwire patch
+	}
 	if err := scCheck(r0); err != nil {
 		return nil, err
 	}
@@ -74,11 +89,17 @@ func newSCContext() (*scContext, error) {
 }
 
 func (c *scContext) Close() error {
+	if c.noService { // Latchwire patch
+		return nil
+	}
 	r0, _, _ := procSCardReleaseContext.Call(uintptr(c.ctx))
 	return scCheck(r0)
 }
 
 func (c *scContext) ListReaders() ([]string, error) {
+	if c.noService { // Latchwire patch
+		return nil, nil
+	}
 	var n uint32
 	r0, _, _ := procSCardListReadersW.Call(
 		uintptr(c.ctx),

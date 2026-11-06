@@ -133,3 +133,14 @@ rewritten.
 `cd third_party/piv-go && go test ./...` runs only the unit tests: every
 upstream test that opens a card is gated behind the `--wipe-yubikey` flag
 and skips without it.
+
+## Smart Card service stopped on Windows (`piv/pcsc_windows.go`)
+
+Windows stops the Smart Card service when the last reader is removed, and
+`SCardEstablishContext` and `SCardListReaders` then fail with
+`SCARD_E_NO_SERVICE` or `SCARD_E_SERVICE_STOPPED`. Pulling the only YubiKey
+must read as "no cards", so that it is seen as a removal. `isRCNoReaders`
+covers both codes, and `newSCContext` returns a context marked `noService`
+whose `ListReaders` is empty and whose `Close` does nothing. Connecting
+through such a context fails like any other call. Only compiled so far; see
+`docs/hardware-checklist.md`.
