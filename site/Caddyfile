@@ -1,18 +1,55 @@
-:80 {
+(common) {
 	root * /srv
 	encode zstd gzip
-	file_server
-
 	header {
 		X-Content-Type-Options nosniff
 		Referrer-Policy strict-origin-when-cross-origin
 		X-Frame-Options DENY
 		Permissions-Policy "camera=(), microphone=(), geolocation=()"
-		Content-Security-Policy "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+		Content-Security-Policy "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 		-Server
 	}
-	@html path / /index.html
+}
+
+:80 {
+	import common
+
+	# The first language in Accept-Language picks the page. No cookie is set.
+	map {http.request.header.accept-language} {start_path} {
+		~(?i)^tr(?:[-,;]|$) tr
+		~(?i)^es(?:[-,;]|$) es
+		~(?i)^pt(?:[-,;]|$) pt-br
+		~(?i)^de(?:[-,;]|$) de
+		~(?i)^fr(?:[-,;]|$) fr
+		~(?i)^ru(?:[-,;]|$) ru
+		~(?i)^zh-(?:hant|tw|hk|mo)(?:[-,;]|$) en
+		~(?i)^zh(?:[-,;]|$) zh-hans
+		~(?i)^ja(?:[-,;]|$) ja
+		~(?i)^ko(?:[-,;]|$) ko
+		default en
+	}
+	@root path /
+	header @root {
+		Vary Accept-Language
+		Cache-Control "private, no-cache"
+	}
+	redir @root /{start_path}/ 302
+
+	file_server
+
+	@html {
+		path */ *.html
+		not path /
+	}
 	header @html Cache-Control "public, max-age=300"
-	@assets path *.svg *.png *.txt *.xml
+	@assets path *.svg *.png *.txt *.xml *.css *.js
 	header @assets Cache-Control "public, max-age=86400"
+
+	handle_errors {
+		import common
+		rewrite * /404.html
+		file_server {
+			status {err.status_code}
+		}
+	}
 }
