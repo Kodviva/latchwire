@@ -1,0 +1,128 @@
+# Builds the packages and runs them for real. Nothing here signs, notarizes
+# or publishes: the artifacts are unsigned test builds.
+name: Packages
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - packaging/**
+      - .github/workflows/packages.yml
+      - cmd/**
+      - go.mod
+      - go.sum
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: packages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-install:
+    name: Install test ${{ matrix.distro }} ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {distro: debian, arch: amd64, runner: ubuntu-24.04}
+          - {distro: ubuntu, arch: amd64, runner: ubuntu-24.04}
+          - {distro: fedora, arch: arm64, runner: ubuntu-24.04-arm}
+          - {distro: rocky, arch: amd64, runner: ubuntu-24.04}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          DISTRO: ${{ matrix.distro }}
+          ARCH: ${{ matrix.arch }}
+        run: packaging/linux/test/run.sh "$DISTRO" "$ARCH"
+
+  linux-packages:
+    name: Linux packages ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {arch: amd64, runner: ubuntu-24.04}
+          - {arch: arm64, runner: ubuntu-24.04-arm}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Two builds match
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: packaging/check-reproducible.sh linux "$ARCH"
+      - name: Build
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: packaging/linux/build-in-container.sh --arch "$ARCH"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: linux-${{ matrix.arch }}-unsigned
+          path: dist/linux/
+          if-no-files-found: error
+
+  macos-package:
+    name: macOS package
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Read pinned versions
+        run: grep -E '^GO_VERSION=' packaging/toolchain.env >>"$GITHUB_ENV"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - name: Lifecycle against stubs
+        run: bash packaging/macos/test/lifecycle-test.sh
+      - name: Signing scripts refuse to run without credentials
+        run: sh packaging/macos/test/test-credentials.sh
+      - name: Two builds match
+        run: packaging/check-reproducible.sh macos
+      - name: Build the unsigned package
+        run: |
+          version=$(sh packaging/version.sh)
+          echo "VERSION=$version" >>"$GITHUB_ENV"
+          packaging/macos/build-universal.sh --out dist/macos/latchwire
+          packaging/third-party.sh --licenses dist/macos/THIRD_PARTY_LICENSES.txt
+          packaging/macos/build-pkg.sh --binary dist/macos/latchwire \
+            --licenses dist/macos/THIRD_PARTY_LICENSES.txt --out "dist/macos/latchwire-$version.pkg"
+      - name: Cask template renders to valid Ruby
+        run: |
+          packaging/macos/render-cask.sh "$VERSION" "dist/macos/latchwire-$VERSION.pkg" >latchwire.rb
+          ruby -c latchwire.rb
+      # The runner is a throw-away VM: this is the only place the package is
+      # really installed before a release.
+      - name: Install, start, uninstall on the runner
+        run: |
+          sudo installer -pkg "dist/macos/latchwire-$VERSION.pkg" -target /
+          sudo launchctl print system/com.latchwire.daemon | grep -q 'state = running'
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            [ -S /var/run/latchwire.sock ] && break
+            sleep 1
+          done
+          /usr/local/bin/latchwire version
+          sudo /usr/local/bin/latchwire status
+          sudo /usr/local/latchwire/lifecycle.sh uninstall --purge
+          test ! -e /usr/local/latchwire
+          test ! -e /Library/LaunchDaemons/com.latchwire.daemon.plist
+          test ! -e /var/run/latchwire.sock
+          if sudo launchctl print system/com.latchwire.daemon >/dev/null 2>&1; then exit 1; fi
+          if pkgutil --pkgs | grep -q com.latchwire.pkg; then exit 1; fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos-unsigned
+          path: dist/macos/*.pkg
+          if-no-files-found: error
