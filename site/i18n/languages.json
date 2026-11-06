@@ -1,0 +1,17 @@
+{
+  "origin": "https://latchwire.com",
+  "source": "en",
+  "vars": { "go": "1.25", "firmware": "5.7", "slotFirst": "82", "slotLast": "95" },
+  "languages": [
+    { "code": "en", "path": "en", "endonym": "English", "ogLocale": "en_US", "status": "source" },
+    { "code": "tr", "path": "tr", "endonym": "Türkçe", "ogLocale": "tr_TR", "status": "draft" },
+    { "code": "es", "path": "es", "endonym": "Español", "ogLocale": "es_ES", "status": "draft" },
+    { "code": "pt-BR", "path": "pt-br", "endonym": "Português (Brasil)", "ogLocale": "pt_BR", "status": "draft" },
+    { "code": "de", "path": "de", "endonym": "Deutsch", "ogLocale": "de_DE", "status": "draft" },
+    { "code": "fr", "path": "fr", "endonym": "Français", "ogLocale": "fr_FR", "status": "draft" },
+    { "code": "ru", "path": "ru", "endonym": "Русский", "ogLocale": "ru_RU", "status": "draft" },
+    { "code": "zh-Hans", "path": "zh-hans", "endonym": "简体中文", "ogLocale": "zh_CN", "status": "draft" },
+    { "code": "ja", "path": "ja", "endonym": "日本語", "ogLocale": "ja_JP", "status": "draft" },
+    { "code": "ko", "path": "ko", "endonym": "한국어", "ogLocale": "ko_KR", "status": "draft" }
+  ]
+}

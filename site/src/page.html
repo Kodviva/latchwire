@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="{{@lang}}" dir="ltr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{meta.title}}</title>
+<meta name="description" content="{{meta.desc}}">
+<link rel="canonical" href="{{@url}}">
+{{@hreflang}}
+<meta name="theme-color" content="#0a0e16">
+<meta name="color-scheme" content="dark">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="{{@css}}">
+<script src="{{@js}}" defer></script>
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Latchwire">
+<meta property="og:title" content="{{meta.title}}">
+<meta property="og:description" content="{{meta.desc}}">
+<meta property="og:url" content="{{@url}}">
+<meta property="og:locale" content="{{@ogLocale}}">
+{{@ogAlternates}}
+<meta property="og:image" content="{{@ogImage}}">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="{{hero.h1}}">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="{{meta.title}}">
+<meta name="twitter:description" content="{{meta.desc}}">
+<meta name="twitter:image" content="{{@ogImage}}">
+</head>
+<body>
+<a class="skip" href="#main">{{a11y.skip}}</a>
+
+<header class="site-head">
+  <div class="wrap head-in">
+    <a class="brand" href="{{@home}}">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="7.5" cy="12" r="4.5"/><circle cx="7.5" cy="12" r="1.2"/><path d="M12 12h9.5M18.5 12v3.5M21.5 12v2.5"/></svg>
+      <span translate="no">Latchwire</span>
+    </a>
+    <nav class="nav">
+      <a href="#how">{{nav.how}}</a>
+      <a href="#hw">{{nav.hw}}</a>
+      <a href="#security">{{nav.sec}}</a>
+      <a href="#status">{{nav.status}}</a>
+      <a href="#install">{{nav.install}}</a>
+      <a href="https://github.com/Kodviva/latchwire" translate="no">GitHub</a>
+    </nav>
+    <details class="lang">
+      <summary aria-label="{{nav.lang}}: {{@endonym}}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.500 5.600 12 3z"/></svg><span>{{@endonym}}</span></summary>
+      <ul>{{@languages}}</ul>
+    </details>
+  </div>
+</header>
+{{@draft}}
+
+<main id="main">
+  <section class="hero" aria-labelledby="hero-h">
+    <div class="wrap">
+      <p class="eyebrow">{{hero.eyebrow}}</p>
+      <h1 id="hero-h">{{hero.h1}}</h1>
+      <p class="sub">{{hero.sub}}</p>
+      <p class="status"><span class="dot" aria-hidden="true"></span><span>{{hero.status}}</span></p>
+      <div class="cta">
+        <a class="btn primary" href="https://github.com/Kodviva/latchwire">{{hero.cta1}}</a>
+        <a class="btn ghost" href="#status">{{hero.cta2}}</a>
+      </div>
+    </div>
+  </section>
+
+  <div class="wrap">
+    <section id="how" aria-labelledby="how-h">
+      <h2 id="how-h">{{how.h}}</h2>
+      <ol class="steps">
+        <li class="card"><h3>{{how.s1h}}</h3><p>{{how.s1p}}</p></li>
+        <li class="card"><h3>{{how.s2h}}</h3><p>{{how.s2p}}</p></li>
+        <li class="card"><h3>{{how.s3h}}</h3><p>{{how.s3p}}</p></li>
+      </ol>
+    </section>
+
+    <section id="compare" aria-labelledby="cmp-h">
+      <h2 id="cmp-h">{{cmp.h}}</h2>
+      <div class="tablebox">
+        <table>
+          <thead>
+            <tr><th scope="col"><span class="vh">{{cmp.q}}</span></th><th scope="col">{{cmp.classic}}</th><th scope="col" class="col-lw" translate="no">Latchwire</th></tr>
+          </thead>
+          <tbody>
+            <tr><th scope="row">{{cmp.r1q}}</th><td data-label="{{cmp.classic}}">{{cmp.r1a}}</td><td class="col-lw" data-label="Latchwire">{{cmp.r1b}}</td></tr>
+            <tr><th scope="row">{{cmp.r2q}}</th><td data-label="{{cmp.classic}}">{{cmp.r2a}}</td><td class="col-lw" data-label="Latchwire">{{cmp.r2b}}</td></tr>
+            <tr><th scope="row">{{cmp.r3q}}</th><td data-label="{{cmp.classic}}">{{cmp.r3a}}</td><td class="col-lw" data-label="Latchwire">{{cmp.r3b}}</td></tr>
+            <tr><th scope="row">{{cmp.r4q}}</th><td data-label="{{cmp.classic}}">{{cmp.r4a}}</td><td class="col-lw" data-label="Latchwire">{{cmp.r4b}}</td></tr>
+            <tr><th scope="row">{{cmp.r5q}}</th><td data-label="{{cmp.classic}}">{{cmp.r5a}}</td><td class="col-lw" data-label="Latchwire">{{cmp.r5b}}</td></tr>
+            <tr><th scope="row">{{cmp.r6q}}</th><td data-label="{{cmp.classic}}">{{cmp.r6a}}</td><td class="col-lw" data-label="Latchwire">{{cmp.r6b}}</td></tr>
+            <tr><th scope="row">{{cmp.r7q}}</th><td data-label="{{cmp.classic}}">{{cmp.r7a}}</td><td class="col-lw" data-label="Latchwire">{{cmp.r7b}}</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="hw" aria-labelledby="hw-h">
+      <h2 id="hw-h">{{hw.h}}</h2>
+      <p class="lead">{{hw.lead}}</p>
+      <div class="grid2">
+        <div class="card hw supported"><div class="top"><h3>{{hw.c1h}}</h3><span class="badge now">{{hw.v1}}</span></div><p>{{hw.c1p}}</p></div>
+        <div class="card hw"><div class="top"><h3>{{hw.c2h}}</h3><span class="badge">{{hw.soon}}</span></div><p>{{hw.c2p}}</p></div>
+        <div class="card hw"><div class="top"><h3>{{hw.c3h}}</h3><span class="badge">{{hw.soon}}</span></div><p>{{hw.c3p}}</p></div>
+        <div class="card hw dashed"><div class="top"><h3>{{hw.c4h}}</h3><span class="badge">{{hw.roadmap}}</span></div><p>{{hw.c4p}}</p></div>
+      </div>
+    </section>
+
+    <section id="security" aria-labelledby="sec-h">
+      <h2 id="sec-h">{{sec.h}}</h2>
+      <p class="lead">{{sec.lead}}</p>
+      <div class="sec-grid">
+        <div class="card yes">
+          <h3>{{sec.yesH}}</h3>
+          <ul class="checklist">
+            <li>{{sec.y1}}</li>
+            <li>{{sec.y2}}</li>
+            <li>{{sec.y3}}</li>
+            <li>{{sec.y4}}</li>
+            <li>{{sec.y5}}</li>
+          </ul>
+        </div>
+        <div class="card no">
+          <h3>{{sec.noH}}</h3>
+          <ul class="checklist">
+            <li>{{sec.n1}}</li>
+            <li>{{sec.n2}}</li>
+            <li>{{sec.n3}}</li>
+            <li>{{sec.n4}}</li>
+            <li>{{sec.n5}}</li>
+            <li>{{sec.n6}}</li>
+          </ul>
+        </div>
+      </div>
+      <div class="card notes">
+        <h3>{{sec.notesH}}</h3>
+        <ul class="checklist">
+          <li>{{sec.note1}}</li>
+          <li>{{sec.note2}}</li>
+          <li>{{sec.note3}}</li>
+          <li>{{sec.note4}}</li>
+        </ul>
+        <div class="links">
+          <a href="https://github.com/Kodviva/latchwire/blob/main/docs/threat-model.md">{{sec.tm}}</a>
+          <a href="https://github.com/Kodviva/latchwire/blob/main/SECURITY.md">{{sec.vuln}}</a>
+        </div>
+      </div>
+    </section>
+
+    <section id="status" aria-labelledby="st-h">
+      <h2 id="st-h">{{st.h}}</h2>
+      <p class="lead">{{st.lead}}</p>
+      <ul class="statuslist">
+        <li><div><h3>{{st.r1h}}</h3><p>{{st.r1p}}</p></div><span class="badge now">{{st.tested}}</span></li>
+        <li><div><h3>{{st.r2h}}</h3><p>{{st.r2p}}</p></div><span class="badge warn">{{st.unverified}}</span></li>
+        <li><div><h3>{{st.r3h}}</h3><p>{{st.r3p}}</p></div><span class="badge warn">{{st.unverified}}</span></li>
+        <li><div><h3>{{st.r4h}}</h3><p>{{st.r4p}}</p></div><span class="badge">{{st.notready}}</span></li>
+        <li><div><h3>{{st.r5h}}</h3><p>{{st.r5p}}</p></div><span class="badge">{{st.notready}}</span></li>
+        <li><div><h3>{{st.r6h}}</h3><p>{{st.r6p}}</p></div><span class="badge">{{st.none}}</span></li>
+        <li><div><h3>{{st.r7h}}</h3><p>{{st.r7p}}</p></div><span class="badge">{{st.none}}</span></li>
+      </ul>
+    </section>
+
+    <section id="install" aria-labelledby="inst-h">
+      <h2 id="inst-h">{{inst.h}}</h2>
+      <p class="lead">{{inst.lead}}</p>
+      <p class="req">{{inst.req}}</p>
+      <h3 class="cmd-h">{{inst.s1}}</h3>
+      <div class="code">
+<pre dir="ltr" translate="no"><code>git clone https://github.com/Kodviva/latchwire
+cd latchwire
+go build -o latchwire ./cmd/latchwire
+sudo install -o root -m 0755 latchwire /usr/local/bin/latchwire</code></pre>
+        <button type="button" class="copy" data-copied="{{inst.copied}}" hidden>{{inst.copy}}</button>
+      </div>
+      <h3 class="cmd-h">{{inst.s2}}</h3>
+      <div class="code">
+<pre dir="ltr" translate="no"><code>sudo latchwire daemon
+latchwire agent</code></pre>
+        <button type="button" class="copy" data-copied="{{inst.copied}}" hidden>{{inst.copy}}</button>
+      </div>
+      <h3 class="cmd-h">{{inst.s3}}</h3>
+      <div class="code">
+<pre dir="ltr" translate="no"><code>latchwire devices
+latchwire keygen --serial &lt;serial&gt; --address &lt;tunnel-ip&gt;
+sudo latchwire add office office.conf
+latchwire up office</code></pre>
+        <button type="button" class="copy" data-copied="{{inst.copied}}" hidden>{{inst.copy}}</button>
+      </div>
+      <p class="req">{{inst.s3p}}</p>
+      <span class="vh" id="copy-status" role="status" aria-live="polite"></span>
+      <p class="req">{{inst.pkg}}</p>
+      <div class="links">
+        <a href="https://github.com/Kodviva/latchwire/blob/main/docs/manual-install.md">{{inst.manual}}</a>
+        <a href="https://github.com/Kodviva/latchwire/blob/main/docs/hardware-checklist.md">{{inst.check}}</a>
+      </div>
+    </section>
+
+    <section id="roadmap" aria-labelledby="road-h">
+      <h2 id="road-h">{{road.h}}</h2>
+      <ol class="road">
+        <li class="done"><span class="mk" aria-hidden="true"></span><h3><span>{{road.r1}}</span><span class="badge done">{{road.done}}</span></h3><p>{{road.r1p}}</p></li>
+        <li class="done"><span class="mk" aria-hidden="true"></span><h3><span>{{road.r2}}</span><span class="badge done">{{road.done}}</span></h3><p>{{road.r2p}}</p></li>
+        <li><span class="mk" aria-hidden="true"></span><h3><span>{{road.r3}}</span><span class="badge">{{road.open}}</span></h3><p>{{road.r3p}}</p></li>
+        <li><span class="mk" aria-hidden="true"></span><h3><span>{{road.r4}}</span><span class="badge">{{road.wip}}</span></h3><p>{{road.r4p}}</p></li>
+        <li><span class="mk" aria-hidden="true"></span><h3><span>{{road.r5}}</span><span class="badge">{{road.wip}}</span></h3><p>{{road.r5p}}</p></li>
+        <li><span class="mk" aria-hidden="true"></span><h3><span>{{road.r6}}</span><span class="badge">{{road.later}}</span></h3><p>{{road.r6p}}</p></li>
+      </ol>
+    </section>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <p>{{foot.lic}}</p>
+    <p>{{foot.tm}}</p>
+    <div class="links">
+      <a href="https://github.com/Kodviva/latchwire" translate="no">GitHub</a>
+      <a href="https://github.com/Kodviva/latchwire/blob/main/SECURITY.md">{{foot.sec}}</a>
+    </div>
+  </div>
+</footer>
+</body>
+</html>
