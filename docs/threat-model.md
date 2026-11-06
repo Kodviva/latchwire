@@ -323,50 +323,6 @@ compromised root.
   The Windows build does not compile yet (`ipc.PeerUID` has no Windows
   implementation); that is the work of the Windows plan.
 
-### 5.8 The desktop app
-
-The app adds a user interface, not a new trust level: it runs as you, and
-everything in this section is on top of the limits above.
-
-- **No web engine.** The window is drawn by Fyne (Go and OpenGL). No HTML or
-  JavaScript runs in the process that handles your PIN.
-- **The PIN field.** `SecretField` keeps input in one byte array, wiped when
-  the form closes, and has no undo history and no paste. The PIN then reaches
-  the card as a Go string, as in the terminal path (5.3). Key events pass
-  through the window system and the toolkit first, and a program that can read
-  your keyboard or your process memory sees the PIN; that is true of any
-  dialog. PUK, new PIN and management key follow the same path, for the time
-  key creation takes.
-- **A larger process.** The app links a GUI toolkit and its dependencies, about
-  320 packages. They share an address space with the agent, so a bug in them is
-  closer to your PIN than in the small `latchwire agent` process. Use the CLI
-  agent if you prefer the smaller one.
-- **Fake windows.** Any program running as you can draw a window that looks
-  like the PIN form. As in 5.5: do not enter the PIN into a prompt you did not
-  expect. The form appears only when a tunnel you or a login item started needs
-  the card.
-- **Key creation never replaces a key.** The app offers empty slots only and
-  never sets `Force`. Replacing a key stays a deliberate `latchwire keygen
-  --force`.
-- **Importing a `.conf`.** A `PrivateKey` line, and any comment naming one, is
-  dropped while reading, the file's bytes are wiped, and the form says so. The
-  key stays in the file on your disk until you delete it, and copies can remain
-  in memory until it is reused. The app does not touch the file.
-- **The clipboard** only ever receives public keys and `[Peer]` blocks. The QR
-  code holds the same text.
-- **Status is polled** every 2 seconds, so a removed card appears on screen up
-  to about 3 seconds later, even though the daemon closes the tunnel sooner.
-- **Quitting stops the agent.** Tunnels then close after the 10-second grace
-  period (section 10). The app asks first when a tunnel is connected.
-- **Do not run a second agent.** With `latchwire agent` running as the same
-  user too, the daemon uses whichever registered first, so PIN prompts can
-  appear in a place you do not expect. Two copies of the app are refused by a
-  per-user lock; a CLI agent next to the app is not.
-
-The demo build (`-tags demo`) uses made-up data and is not what is shipped;
-`desktop/deps_test.go` checks that the normal build links neither it nor the
-software key.
-
 ### 5.6 Trusted networks (on-demand)
 
 On-demand connects a tunnel on networks that are not in its policy's trusted
@@ -607,6 +563,50 @@ reconnects), `testShutdown` (an orderly stop lifts it).
   its contents.
 - Trusted networks (on-demand) take down tunnels whose kill switch is `auto`
   or `off`, on a signal anyone on the local network can fake (section 5.6).
+
+### 5.8 The desktop app
+
+The app adds a user interface, not a new trust level: it runs as you, and
+everything in this section is on top of the limits above.
+
+- **No web engine.** The window is drawn by Fyne (Go and OpenGL). No HTML or
+  JavaScript runs in the process that handles your PIN.
+- **The PIN field.** `SecretField` keeps input in one byte array, wiped when
+  the form closes, and has no undo history and no paste. The PIN then reaches
+  the card as a Go string, as in the terminal path (5.3). Key events pass
+  through the window system and the toolkit first, and a program that can read
+  your keyboard or your process memory sees the PIN; that is true of any
+  dialog. PUK, new PIN and management key follow the same path, for the time
+  key creation takes.
+- **A larger process.** The app links a GUI toolkit and its dependencies, about
+  390 packages. They share an address space with the agent, so a bug in them is
+  closer to your PIN than in the small `latchwire agent` process. Use the CLI
+  agent if you prefer the smaller one.
+- **Fake windows.** Any program running as you can draw a window that looks
+  like the PIN form. As in 5.5: do not enter the PIN into a prompt you did not
+  expect. The form appears only when a tunnel you or a login item started needs
+  the card.
+- **Key creation never replaces a key.** The app offers empty slots only and
+  never sets `Force`. Replacing a key stays a deliberate `latchwire keygen
+  --force`.
+- **Importing a `.conf`.** A `PrivateKey` line, and any comment naming one, is
+  dropped while reading, the file's bytes are wiped, and the form says so. The
+  key stays in the file on your disk until you delete it, and copies can remain
+  in memory until it is reused. The app does not touch the file.
+- **The clipboard** only ever receives public keys and `[Peer]` blocks. The QR
+  code holds the same text.
+- **Status is polled** every 2 seconds, so a removed card appears on screen up
+  to about 3 seconds later, even though the daemon closes the tunnel sooner.
+- **Quitting stops the agent.** Tunnels then close after the 10-second grace
+  period (section 10). The app asks first when a tunnel is connected.
+- **Do not run a second agent.** With `latchwire agent` running as the same
+  user too, the daemon uses whichever registered first, so PIN prompts can
+  appear in a place you do not expect. Two copies of the app are refused by a
+  per-user lock; a CLI agent next to the app is not.
+
+The demo build (`-tags demo`) uses made-up data and is not what is shipped;
+`desktop/deps_test.go` checks that the normal build links neither it nor the
+software key.
 
 ## 6. Why the cached `ss` alone cannot build a tunnel
 
