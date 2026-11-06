@@ -1517,9 +1517,9 @@ func assertCode(t *testing.T, err error, code string) {
 // ---- several users (R19, R20) ----
 
 var (
-	uidA     = selfUID()           // the test process: CLI and real agent
-	uidB     = uidA + 1000         // another local user, fake agent
-	uidAdmin = uint32(4242)        // an administrator without an agent
+	uidA     = selfUID()    // the test process: CLI and real agent
+	uidB     = uidA + 1000  // another local user, fake agent
+	uidAdmin = uint32(4242) // an administrator without an agent
 )
 
 func onlyAdmin(uid uint32) bool { return uid == uidAdmin }
