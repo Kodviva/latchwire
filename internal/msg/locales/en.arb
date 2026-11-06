@@ -644,11 +644,6 @@
       }
     }
   },
-  "UIAppName": "Latchwire",
-  "@UIAppName": {
-    "section": "Desktop app",
-    "description": "The product name; do not translate."
-  },
   "UILangName": "English",
   "@UILangName": {
     "description": "This language's own name, shown in the language picker."
@@ -656,10 +651,6 @@
   "UILanguage": "Language",
   "UINavTunnels": "Tunnels",
   "@UINavTunnels": {
-    "description": "Sidebar entry."
-  },
-  "UINavNewKey": "New key",
-  "@UINavNewKey": {
     "description": "Sidebar entry."
   },
   "UIDemoBanner": "Demo mode: no real card or service is used.",
@@ -728,7 +719,6 @@
   },
   "UIUseKey": "Use this key",
   "UIWorking": "Working with the card, do not remove it…",
-  "UIPINTitle": "YubiKey PIN",
   "UIPINForKey": "PIN for YubiKey {serial}",
   "@UIPINForKey": {
     "placeholders": {
@@ -752,7 +742,6 @@
   "UIPINRetries": "{retries, plural, one {# attempt left} other {# attempts left}}",
   "UIOK": "OK",
   "UICancel": "Cancel",
-  "UIContinue": "Continue",
   "UIFreshTitle": "Secure this YubiKey first",
   "UICurrentPUK": "Current PUK",
   "UINewPIN": "New PIN (6-8 characters)",
@@ -808,7 +797,6 @@
       }
     }
   },
-  "UIKeySelect": "Key shown",
   "UIFinish": "Done, go to tunnels",
   "UITunnelsHeader": "TUNNELS",
   "UITunnelsEmpty": "No tunnels yet. Create a key on your card, then import your server's .conf file.",
@@ -839,7 +827,5 @@
   "UITrayDisconnect": "Disconnect {name}",
   "UITrayConnected": "{count, plural, =0 {No tunnel connected} one {# tunnel connected} other {# tunnels connected}}",
   "UIQuitTitle": "Quit Latchwire?",
-  "UIQuitBody": "{count, plural, one {# tunnel is connected.} other {# tunnels are connected.}} Quitting stops the key agent, and connected tunnels close about 10 seconds later.",
-  "UIErrorTitle": "Something went wrong",
-  "UIAgentGoneHint": "Latchwire is already running, or another key agent uses this card."
+  "UIQuitBody": "{count, plural, one {# tunnel is connected.} other {# tunnels are connected.}} Quitting stops the key agent, and connected tunnels close about 10 seconds later."
 }

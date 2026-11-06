@@ -338,15 +338,11 @@ are never tried automatically.`
 
 // Desktop app messages, rendered with Render.
 const (
-	// The product name; do not translate.
-	UIAppName ID = "UIAppName"
 	// This language's own name, shown in the language picker.
 	UILangName ID = "UILangName"
 	UILanguage ID = "UILanguage"
 	// Sidebar entry.
 	UINavTunnels ID = "UINavTunnels"
-	// Sidebar entry.
-	UINavNewKey  ID = "UINavNewKey"
 	UIDemoBanner ID = "UIDemoBanner"
 	// Shown above a heading.
 	UIStep               ID = "UIStep"
@@ -371,14 +367,12 @@ const (
 	UIExistingKey        ID = "UIExistingKey"
 	UIUseKey             ID = "UIUseKey"
 	UIWorking            ID = "UIWorking"
-	UIPINTitle           ID = "UIPINTitle"
 	UIPINForKey          ID = "UIPINForKey"
 	UIPINForSlot         ID = "UIPINForSlot"
 	UIPINReason          ID = "UIPINReason"
 	UIPINRetries         ID = "UIPINRetries"
 	UIOK                 ID = "UIOK"
 	UICancel             ID = "UICancel"
-	UIContinue           ID = "UIContinue"
 	UIFreshTitle         ID = "UIFreshTitle"
 	UICurrentPUK         ID = "UICurrentPUK"
 	UINewPIN             ID = "UINewPIN"
@@ -413,7 +407,6 @@ const (
 	UIBackupCreate       ID = "UIBackupCreate"
 	UIBackupPlugIn       ID = "UIBackupPlugIn"
 	UIBackupReady        ID = "UIBackupReady"
-	UIKeySelect          ID = "UIKeySelect"
 	UIFinish             ID = "UIFinish"
 	UITunnelsHeader      ID = "UITunnelsHeader"
 	UITunnelsEmpty       ID = "UITunnelsEmpty"
@@ -445,6 +438,4 @@ const (
 	UITrayConnected      ID = "UITrayConnected"
 	UIQuitTitle          ID = "UIQuitTitle"
 	UIQuitBody           ID = "UIQuitBody"
-	UIErrorTitle         ID = "UIErrorTitle"
-	UIAgentGoneHint      ID = "UIAgentGoneHint"
 )
