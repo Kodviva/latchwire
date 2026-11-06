@@ -59,7 +59,8 @@ const (
 )
 
 func isRCNoReaders(rc uintptr) bool {
-	return rc == 0x8010002E || rc == scardENoService || rc == scardEServiceStopped
+	c := uint32(rc) // Latchwire patch: the upper half of the result is undefined
+	return c == 0x8010002E || c == scardENoService || c == scardEServiceStopped
 }
 
 type scContext struct {
@@ -79,7 +80,7 @@ func newSCContext() (*scContext, error) {
 		uintptr(0),
 		uintptr(unsafe.Pointer(&ctx)),
 	)
-	if r0 == scardENoService || r0 == scardEServiceStopped {
+	if c := uint32(r0); c == scardENoService || c == scardEServiceStopped {
 		return &scContext{noService: true}, nil // Latchwire patch
 	}
 	if err := scCheck(r0); err != nil {

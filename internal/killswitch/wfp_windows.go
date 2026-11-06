@@ -35,6 +35,7 @@ var (
 const (
 	rpcAuthnDefault      = 0xffffffff
 	fwpErrAlreadyExists  = 0x80320009
+	fwpErrProviderAbsent = 0x80320005
 	wfpTxnWaitMillis     = 15000
 	wfpEnumBatch         = 512
 	wfpSublayerMaxWeight = 0xffff
@@ -55,8 +56,8 @@ func newPlatform(_ netcfg.Runner, j *netcfg.Journal) (Firewall, error) {
 
 // wfpCall checks a function that returns a Win32 or FWP error code.
 func wfpCall(what string, r1 uintptr) error {
-	if r1 != 0 {
-		return fmt.Errorf("%s: %w", what, windows.Errno(r1))
+	if uint32(r1) != 0 {
+		return fmt.Errorf("%s: %w", what, windows.Errno(uint32(r1)))
 	}
 	return nil
 }
@@ -96,7 +97,7 @@ func wfpEnsureObjects(h windows.Handle) error {
 	provider := &fwpmProvider0{providerKey: wfpProviderKey, displayData: wfpDisplay("provider")}
 	r, _, _ := procProviderAdd.Call(uintptr(h), uintptr(unsafe.Pointer(provider)), 0)
 	runtime.KeepAlive(provider)
-	if r != fwpErrAlreadyExists {
+	if uint32(r) != fwpErrAlreadyExists {
 		if err := wfpCall("FwpmProviderAdd0", r); err != nil {
 			return err
 		}
@@ -104,13 +105,15 @@ func wfpEnsureObjects(h windows.Handle) error {
 	sublayer := &fwpmSublayer0{subLayerKey: wfpSublayerKey, displayData: wfpDisplay("sublayer"), providerKey: &wfpProviderKey, weight: wfpSublayerMaxWeight}
 	r, _, _ = procSubLayerAdd.Call(uintptr(h), uintptr(unsafe.Pointer(sublayer)), 0)
 	runtime.KeepAlive(sublayer)
-	if r != fwpErrAlreadyExists {
+	if uint32(r) != fwpErrAlreadyExists {
 		return wfpCall("FwpmSubLayerAdd0", r)
 	}
 	return nil
 }
 
-// wfpFilterIDs lists the IDs of Latchwire's filters on every layer.
+// wfpFilterIDs lists the IDs of Latchwire's filters on every layer. The
+// provider is gone after a reboot or an engine restart, and then there are
+// no filters of it either.
 func wfpFilterIDs(h windows.Handle) ([]uint64, error) {
 	var ids []uint64
 	for _, l := range wfpLayers {
@@ -123,6 +126,9 @@ func wfpFilterIDs(h windows.Handle) ([]uint64, error) {
 		var enum windows.Handle
 		r, _, _ := procFilterEnumOpen.Call(uintptr(h), uintptr(unsafe.Pointer(tmpl)), uintptr(unsafe.Pointer(&enum)))
 		runtime.KeepAlive(tmpl)
+		if uint32(r) == fwpErrProviderAbsent {
+			return nil, nil
+		}
 		if err := wfpCall("FwpmFilterCreateEnumHandle0", r); err != nil {
 			return nil, err
 		}

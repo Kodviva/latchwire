@@ -136,9 +136,14 @@ var (
 	className = windows.StringToUTF16Ptr("LatchwirePIN")
 )
 
+func moduleInstance() uintptr {
+	inst, _, _ := procGetModuleHandle.Call(0)
+	return inst
+}
+
 func registerClass() error {
 	classOnce.Do(func() {
-		inst, _, _ := procGetModuleHandle.Call(0)
+		inst := moduleInstance()
 		cur, _, _ := procLoadCursor.Call(0, idcArrow)
 		c := wndClassEx{
 			wndProc:    windows.NewCallback(pinProc),
@@ -196,7 +201,7 @@ func wipeEdit(edit uintptr) {
 
 func child(class string, text *uint16, style uintptr, x, y, w, h int, parent, id uintptr, exStyle uintptr, font uintptr) uintptr {
 	hwnd, _, _ := procCreateWindowEx.Call(exStyle, uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(class))), uintptr(unsafe.Pointer(text)),
-		wsChild|wsVisible|style, uintptr(x), uintptr(y), uintptr(w), uintptr(h), parent, id, 0, 0)
+		wsChild|wsVisible|style, uintptr(x), uintptr(y), uintptr(w), uintptr(h), parent, id, moduleInstance(), 0)
 	if hwnd != 0 {
 		procSendMessage.Call(hwnd, wmSetFont, font, 1)
 	}
@@ -225,7 +230,7 @@ func askPIN(text, title string, millis uint32) (pin string, entered bool, err er
 		return "", false, err
 	}
 	hwnd, _, e := procCreateWindowEx.Call(wsExTopmost|wsExDlgFrame, uintptr(unsafe.Pointer(className)), uintptr(unsafe.Pointer(titleW)),
-		wsOverlapped|wsCaption|wsSysMenu|wsVisible, (sx-width)/2, (sy-height)/2, width, height, 0, 0, 0, 0)
+		wsOverlapped|wsCaption|wsSysMenu|wsVisible, (sx-width)/2, (sy-height)/2, width, height, 0, 0, moduleInstance(), 0)
 	if hwnd == 0 {
 		return "", false, e
 	}

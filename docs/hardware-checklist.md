@@ -439,6 +439,8 @@ Service and data directory:
       or shutdown of Windows does the same. Daemon messages reach the Event Log.
 - [ ] Kill the service process (`taskkill /f`): it is restarted by the recovery
       action and section "kill switch" below holds across it.
+- [ ] Make the daemon fail at start (a damaged data directory owner): the service
+      stops with an error and the recovery action retries it.
 - [ ] `latchwire service uninstall` stops and removes it and keeps the data.
 
 Named pipe:
@@ -493,12 +495,16 @@ DNS:
       the physical interface shows no DNS, with and without the kill switch.
 - [ ] Split tunnel with search domains only those names go to the tunnel;
       other names use the system's DNS.
-- [ ] Search domains apply on a primary tunnel.
+- [ ] Search domains apply on a primary tunnel: the key
+      `Tcpip\Parameters\Interfaces\{GUID}` holding `SearchList` must be the
+      adapter's own, which assumes Wintun used the GUID Latchwire requested.
 - [ ] `down` removes the rule; after a killed service it goes at the next start.
 - [ ] A machine with group policy NRPT rules: record what happens to local rules.
 
 Kill switch:
 
+- [ ] First kill switch after a reboot (no provider yet): it comes on. Record
+      what the filter enumeration returned.
 - [ ] While blocking, only tunnels, endpoints and link traffic pass: browse, ping
       and DNS outside the tunnel fail. `netsh wfp show filters` lists the filters.
 - [ ] A connection opened before the kill switch came on is cut. **Record the

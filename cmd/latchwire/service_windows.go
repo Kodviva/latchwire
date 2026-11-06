@@ -171,6 +171,12 @@ func installService() error {
 		s.Delete()
 		return err
 	}
+	// A daemon that fails reports a stop with an error code, not a crash;
+	// without this the service manager would leave it stopped.
+	if err := s.SetRecoveryActionsOnNonCrashFailures(true); err != nil {
+		s.Delete()
+		return err
+	}
 	if err := eventlog.InstallAsEventCreate(serviceName, eventlog.Error|eventlog.Warning|eventlog.Info); err != nil {
 		s.Delete()
 		return err
