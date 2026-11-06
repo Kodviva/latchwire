@@ -1,0 +1,9 @@
+# Boots systemd for packaging/linux/test/run.sh. systemd-resolved handles DNS,
+# the Ubuntu default.
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+    systemd systemd-sysv libpam-systemd systemd-resolved dbus iputils-ping iproute2 pcscd procps ca-certificates \
+    && rm -f /etc/machine-id
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]
