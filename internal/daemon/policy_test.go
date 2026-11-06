@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -116,7 +117,11 @@ func TestAddRecordsOwnerAsAllowedUser(t *testing.T) {
 		t.Fatal(err)
 	}
 	p, err = e.m.store.loadPolicy(tunName)
-	if want := (Policy{KillSwitch: KillSwitchAuto}); err != nil || !reflect.DeepEqual(p, want) {
+	want := Policy{KillSwitch: KillSwitchAuto}
+	if runtime.GOOS == "windows" && len(p.AllowedUsers) == 1 {
+		want.AllowedUsers = p.AllowedUsers // the user behind an elevated client
+	}
+	if err != nil || !reflect.DeepEqual(p, want) {
 		t.Fatalf("policy after add without owner: %+v, %v; want %+v", p, err, want)
 	}
 	if _, err := os.Lstat(path); err != nil {
