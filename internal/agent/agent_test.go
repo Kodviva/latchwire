@@ -11,7 +11,6 @@ import (
 	"log"
 	"net"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -19,6 +18,7 @@ import (
 	"time"
 
 	"github.com/Kodviva/latchwire/internal/ipc"
+	"github.com/Kodviva/latchwire/internal/ipc/ipctest"
 	"github.com/Kodviva/latchwire/internal/keyprovider"
 	"github.com/Kodviva/latchwire/internal/keyprovider/softkey"
 	"github.com/Kodviva/latchwire/internal/keyref"
@@ -238,21 +238,11 @@ type daemon struct {
 	events   chan ipc.AgentEvent
 }
 
-func sockPath(t *testing.T) string {
-	t.Helper()
-	dir, err := os.MkdirTemp("", "lw")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	return filepath.Join(dir, "s.sock")
-}
-
 func newDaemon(t *testing.T) *daemon {
 	t.Helper()
 	d := &daemon{
 		t:        t,
-		path:     sockPath(t),
+		path:     ipctest.Path(t),
 		conns:    make(chan *ipc.Conn, 4),
 		register: make(chan ipc.AgentRegister, 16),
 		events:   make(chan ipc.AgentEvent, 64),

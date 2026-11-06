@@ -32,6 +32,7 @@ import (
 
 	"github.com/Kodviva/latchwire/internal/agent"
 	"github.com/Kodviva/latchwire/internal/ipc"
+	"github.com/Kodviva/latchwire/internal/ipc/ipctest"
 	"github.com/Kodviva/latchwire/internal/keyprovider"
 	"github.com/Kodviva/latchwire/internal/keyprovider/softkey"
 	"github.com/Kodviva/latchwire/internal/keyref"
@@ -463,7 +464,7 @@ func newEnv(t *testing.T, o envOpts) *env {
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
 
-	e := &env{t: t, socket: filepath.Join(dir, "s"), store: filepath.Join(dir, "tunnels"),
+	e := &env{t: t, socket: ipctest.Path(t), store: filepath.Join(dir, "tunnels"),
 		b: newFakeBackend(t, o.present...), p: &fakePrompter{pin: o.pin}, f: &netFactory{},
 		poll: o.poll, admin: o.admin, fw: &fakeFirewall{}}
 	if e.admin == nil {
@@ -1530,7 +1531,7 @@ func newFakeAgent(t *testing.T, e *env, uid uint32, key *softkey.Key, serials ..
 
 func newLyingAgent(t *testing.T, e *env, uid uint32, pub [32]byte, key *softkey.Key, gate chan struct{}, serials ...uint32) *fakeAgent {
 	t.Helper()
-	path := filepath.Join(filepath.Dir(e.socket), fmt.Sprintf("f%d", uid))
+	path := fmt.Sprintf("%s-f%d", e.socket, uid)
 	l, err := ipc.Listen(path)
 	if err != nil {
 		t.Fatal(err)
@@ -1967,7 +1968,7 @@ func TestServeCleansJournalAtStart(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := &cmdRunner{}
-	sock := filepath.Join(dir, "s")
+	sock := ipctest.Path(t)
 	m := NewManager(Options{Socket: sock, StoreDir: filepath.Join(dir, "tunnels"), JournalPath: jpath, Runner: r,
 		TUN: (&netFactory{}).make})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -2011,7 +2012,7 @@ func TestServeStartsWithCorruptJournal(t *testing.T) {
 	if err := os.WriteFile(jpath, []byte("{garbage"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	sock := filepath.Join(dir, "s")
+	sock := ipctest.Path(t)
 	m := NewManager(Options{Socket: sock, StoreDir: filepath.Join(dir, "tunnels"), JournalPath: jpath,
 		Runner: &cmdRunner{}, TUN: (&netFactory{}).make})
 	ctx, cancel := context.WithCancel(context.Background())

@@ -16,6 +16,12 @@ func TestNewPlatform(t *testing.T) {
 			t.Fatalf("New on darwin: %T, %v, ran %q; want the pf firewall", f, err, r.cmds)
 		}
 		return
+	case "windows":
+		// WFP: the engine opens on the first Set.
+		if err != nil || f == nil {
+			t.Fatalf("New on windows: %v, %v; want the WFP firewall", f, err)
+		}
+		return
 	case "linux":
 	default:
 		if !errors.Is(err, ErrUnsupported) || f != nil {

@@ -18,6 +18,7 @@ import (
 	"golang.zx2c4.com/wireguard/tun"
 
 	"github.com/Kodviva/latchwire/internal/ipc"
+	"github.com/Kodviva/latchwire/internal/ipc/ipctest"
 	"github.com/Kodviva/latchwire/internal/keyref"
 	"github.com/Kodviva/latchwire/internal/killswitch"
 	"github.com/Kodviva/latchwire/internal/msg"
@@ -718,7 +719,7 @@ func TestRevokeArmedErrorTunnelUnbinds(t *testing.T) {
 	if err := j.Record(killswitch.JournalOwner, []netcfg.Step{{Name: "nft", Args: []string{"-f", "-"}, Stdin: []byte("x"), Persistent: true}}); err != nil {
 		t.Fatal(err)
 	}
-	m := NewManager(Options{Socket: filepath.Join(dir, "s2"), StoreDir: e.store, JournalPath: filepath.Join(dir, "journal.json"),
+	m := NewManager(Options{Socket: ipctest.Path(t), StoreDir: e.store, JournalPath: filepath.Join(dir, "journal.json"),
 		Runner: &cmdRunner{}, TUN: (&netFactory{}).make, Firewall: &fakeFirewall{},
 		IsAdmin: func(uid uint32) (bool, error) { return onlyAdmin(uid), nil }})
 	serveManager(t, m)
