@@ -222,7 +222,11 @@ commands:
                                 (administrator); a trusted network is
                                 recognised only by its gateway's IP and MAC
                                 address, which anyone there can copy
-  network                       print the ID of the current network`
+  network                       print the ID of the current network
+  version                       print the version of this program`
+
+	// VersionFmt: version, commit, Go version, operating system, architecture.
+	VersionFmt = "latchwire %s (%s, %s %s/%s)"
 
 	CLIUnknownCommandFmt = "unknown command %q"
 	CLIUsageErrorFmt     = "usage: latchwire %s"

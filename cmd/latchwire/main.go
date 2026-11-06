@@ -158,6 +158,7 @@ func commands() map[string]command {
 		"status":  {"status [name]", cmdStatus},
 		"policy":  {policySynopsis, cmdPolicy},
 		"network": {"network", cmdNetwork},
+		"version": {"version", cmdVersion},
 	}
 }
 
