@@ -34,8 +34,8 @@ const (
 // the lookup failing). It is never a hash of the gateway address alone,
 // because 192.168.1.1 is the gateway of countless home and hotspot networks.
 // Callers must treat NoNetwork and UnknownNetwork as untrusted. Only the
-// IPv4 default route is consulted on macOS; Linux uses the preferred (lowest
-// metric) default route of either family.
+// IPv4 default route is consulted on macOS and Windows; Linux uses the
+// preferred (lowest metric) default route of either family.
 //
 // The identity is a convenience, not an authentication: anyone who controls
 // a network can reuse its gateway's IP and MAC address and be recognised as
@@ -70,6 +70,12 @@ func networkID(ctx context.Context, r netcfg.Runner, goos string) (string, error
 		}
 		gw, iface = parseDefaultRouteLinux(string(out))
 		neighCmd, neighField = "ip", "lladdr"
+	case "windows":
+		out, err := r.Run(ctx, "route", []string{"print", "-4"}, nil)
+		if err != nil {
+			return "", fmt.Errorf("netmon: route print: %w", err)
+		}
+		gw = netcfg.WindowsDefaultGateway(string(out))
 	default:
 		return "", fmt.Errorf("netmon: network identity on %s: %w", goos, errUnsupported)
 	}
@@ -77,9 +83,12 @@ func networkID(ctx context.Context, r netcfg.Runner, goos string) (string, error
 		return NoNetwork, nil
 	}
 
-	if goos == "darwin" {
+	switch goos {
+	case "darwin":
 		neighArgs = []string{"-n", gw.String()}
-	} else {
+	case "windows":
+		neighCmd, neighArgs = "arp", []string{"-a", gw.String()}
+	default:
 		neighArgs = []string{"neigh", "show", gw.String()}
 	}
 	out, err := r.Run(ctx, neighCmd, neighArgs, nil)
@@ -89,7 +98,12 @@ func networkID(ctx context.Context, r netcfg.Runner, goos string) (string, error
 		}
 		return UnknownNetwork, nil
 	}
-	mac := macFromNeighbours(string(out), neighField, iface)
+	var mac string
+	if goos == "windows" {
+		mac = macFromArpWindows(string(out), gw)
+	} else {
+		mac = macFromNeighbours(string(out), neighField, iface)
+	}
 	if mac == "" {
 		return UnknownNetwork, nil
 	}
@@ -181,6 +195,25 @@ func macFromNeighbours(out, field, iface string) string {
 		}
 	}
 	return first
+}
+
+// macFromArpWindows reads `arp -a <ip>`: a row of the address, the MAC in
+// dashes and a type in the system's language. Only the row that starts with
+// the address counts.
+func macFromArpWindows(out string, ip netip.Addr) string {
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 2 {
+			continue
+		}
+		if a, err := netip.ParseAddr(f[0]); err != nil || a != ip {
+			continue
+		}
+		if mac := normalizeMAC(strings.ReplaceAll(f[1], "-", ":")); mac != "" {
+			return mac
+		}
+	}
+	return ""
 }
 
 // normalizeMAC returns s as six lower-case two-digit hex octets separated by
