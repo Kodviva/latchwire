@@ -12,6 +12,7 @@ import (
 
 	"github.com/Kodviva/latchwire/internal/daemon"
 	"github.com/Kodviva/latchwire/internal/ipc"
+	"github.com/Kodviva/latchwire/internal/ipc/ipctest"
 	"github.com/Kodviva/latchwire/internal/msg"
 )
 
@@ -23,12 +24,7 @@ type fakeDaemon struct {
 
 func startDaemon(t *testing.T, tunnels []ipc.TunnelStatus) *fakeDaemon {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "lw")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	socket := filepath.Join(dir, "s")
+	socket := ipctest.Path(t)
 	l, err := ipc.Listen(socket)
 	if err != nil {
 		t.Fatal(err)
@@ -104,11 +100,22 @@ func TestClientRefusesForeignDaemon(t *testing.T) {
 	d := startDaemon(t, nil)
 	c := &Client{Socket: d.socket, UID: uint32(os.Getuid()) + 1}
 	_, err := c.Status(context.Background())
-	if os.Getuid() == 0 {
-		t.Skip("root is always trusted")
+	if os.Getuid() <= 0 {
+		t.Skip("root and the Windows service are always trusted")
 	}
 	if err == nil || !strings.Contains(err.Error(), "refusing") {
 		t.Fatal(err)
+	}
+}
+
+// A uid the daemon would store as the owner, never the -1 of Windows.
+func TestNewClientUID(t *testing.T) {
+	want := uint32(0)
+	if uid := os.Getuid(); uid > 0 {
+		want = uint32(uid)
+	}
+	if got := NewClient().UID; got != want {
+		t.Fatalf("UID %d, want %d", got, want)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -21,9 +22,16 @@ const (
 	connectTimeout = 3 * time.Minute
 )
 
-// ErrDaemonDown means the daemon cannot be reached. Its text is
-// msg.CLIDaemonNotRunning.
-var ErrDaemonDown = errors.New(msg.CLIDaemonNotRunning)
+// ErrDaemonDown means the daemon cannot be reached. Its text is the one the
+// CLI prints on this platform.
+var ErrDaemonDown = errors.New(daemonDownText())
+
+func daemonDownText() string {
+	if runtime.GOOS == "windows" {
+		return msg.CLIDaemonNotRunningWindows
+	}
+	return msg.CLIDaemonNotRunning
+}
 
 // Client talks to the daemon over the same IPC as the CLI, one connection per
 // call.
@@ -36,7 +44,16 @@ type Client struct {
 }
 
 // NewClient returns a client for the production socket.
-func NewClient() *Client { return &Client{UID: uint32(os.Getuid())} }
+func NewClient() *Client { return &Client{UID: currentUID()} }
+
+// currentUID is this user's uid. Windows has none and os.Getuid returns -1
+// there: 0 tells the daemon to take the owner from the elevated connection.
+func currentUID() uint32 {
+	if uid := os.Getuid(); uid > 0 {
+		return uint32(uid)
+	}
+	return 0
+}
 
 func (c *Client) call(ctx context.Context, timeout time.Duration, method string, params, result any) error {
 	socket := c.Socket
