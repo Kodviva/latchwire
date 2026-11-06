@@ -8,11 +8,11 @@ texts in `THIRD_PARTY_LICENSES.txt`.
 | Module | Version | Licence | Origin |
 | --- | --- | --- | --- |
 | `github.com/go-piv/piv-go/v2` | v2.5.0 | Apache-2.0 AND BSD-3-Clause | Vendored and patched in third_party/piv-go, see PATCHES.md there |
-| `golang.org/x/crypto` | v0.37.0 | BSD-3-Clause | Go module |
-| `golang.org/x/net` | v0.39.0 | BSD-3-Clause | Go module |
-| `golang.org/x/sys` | v0.32.0 | BSD-3-Clause | Go module |
-| `golang.org/x/term` | v0.31.0 | BSD-3-Clause | Go module |
-| `golang.org/x/time` | v0.7.0 | BSD-3-Clause | Go module |
+| `golang.org/x/crypto` | v0.58.0 | BSD-3-Clause | Go module |
+| `golang.org/x/net` | v0.62.0 | BSD-3-Clause | Go module |
+| `golang.org/x/sys` | v0.49.0 | BSD-3-Clause | Go module |
+| `golang.org/x/term` | v0.47.0 | BSD-3-Clause | Go module |
+| `golang.org/x/time` | v0.16.0 | BSD-3-Clause | Go module |
 | `golang.zx2c4.com/wintun` | v0.0.0-20230126152724-0fa3db229ce2 | MIT | Go module, Windows only |
 | `golang.zx2c4.com/wireguard` | 2631ce99a06f | MIT | Vendored and patched in third_party/wireguard-go, see PATCHES.md there |
 

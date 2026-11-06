@@ -2,7 +2,7 @@
 
 | Path | What |
 | --- | --- |
-| `toolchain.env` | Every pinned version |
+| `toolchain.env` | Build image and oldest supported macOS |
 | `version.sh`, `build.sh` | The version stamp, one reproducible binary |
 | `check-reproducible.sh` | Two builds, compared byte by byte |
 | `third-party.sh`, `THIRD_PARTY.md` | Licence list and licence texts |
@@ -13,8 +13,13 @@
 
 ## Build
 
+Builds use the latest stable toolchain: the newest image of the tag in
+`toolchain.env`, the newest nfpm and libpcsclite headers, and on macOS the
+Go on your `PATH`. Each build records what it used in `BUILD-INFO`, next to its
+output. Ship that file with the release.
+
 Linux, on any machine with Docker (cgo needs libpcsclite, so the binary is
-built in the image pinned in `toolchain.env`):
+built in a container):
 
 ```bash
 packaging/linux/build-in-container.sh --arch arm64
@@ -37,7 +42,7 @@ packaging/macos/build-pkg.sh --binary dist/macos/latchwire --licenses dist/macos
 ```
 
 `build-pkg.sh --app PATH` adds a desktop application bundle to `/Applications`
-when one exists (Plan 3). Nothing depends on it.
+when one exists. Nothing depends on it.
 
 ## Check that two builds match
 
@@ -50,14 +55,14 @@ packaging/check-reproducible.sh macos
 ```
 
 Each builds twice, from different paths and with empty build caches. To check
-a published release, build the tag with the same stamps and compare:
+a published release, rebuild the tag with the versions in its `BUILD-INFO`:
 
 ```bash
 git checkout vX.Y.Z
 ```
 
 ```bash
-packaging/linux/build-in-container.sh --arch amd64 --out /tmp/rebuilt
+packaging/linux/build-in-container.sh --arch amd64 --build-info BUILD-INFO --out /tmp/rebuilt
 ```
 
 ```bash
@@ -66,12 +71,13 @@ diff /tmp/rebuilt/SHA256SUMS SHA256SUMS
 
 What is covered:
 
-- Linux: binary, tarball, deb and rpm are identical. The image digest pins
-  Go's C toolchain and glibc. `PCSC_DEV_VERSION` pins the headers; when Debian
-  replaces that version the build stops and asks for an update.
-- macOS: the binary is identical given the same Xcode, which `toolchain.env`
-  does not pin; record it in the release notes. `.pkg` files carry timestamps
-  and are not compared.
+- Linux: binary, tarball, deb and rpm are identical. `BUILD-INFO` holds the
+  image digest (Go, C toolchain, glibc) and the nfpm and libpcsclite-dev
+  versions. Debian may drop an old libpcsclite-dev version from its mirrors;
+  the rebuild then stops and says so.
+- macOS: the binary is identical given the same Go, compiler and SDK, which
+  `BUILD-INFO` records. Set `GOTOOLCHAIN=` to the recorded Go to rebuild.
+  `.pkg` files carry timestamps and are not compared.
 - A Developer ID signature changes the bytes. To compare, remove the signature
   from a copy of the release binary and of your own build first:
   `codesign --remove-signature latchwire`.
@@ -110,4 +116,6 @@ is signed before it goes into the package.
    The URL in it expects the file on the GitHub release `vX.Y.Z`.
 
 The Linux packages are not signed yet: there is no signing key and no
-repository. Publish `SHA256SUMS` with the release.
+repository. Publish `SHA256SUMS` and `BUILD-INFO` with the release. Current
+Fedora's plain `rpm -i` and `rpm -U` refuse an unsigned package ("does not
+verify: no signature"); `dnf install ./latchwire-*.rpm` works.

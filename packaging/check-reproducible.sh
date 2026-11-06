@@ -6,8 +6,7 @@
 #                                                        tarball, deb, rpm
 #   packaging/check-reproducible.sh macos                universal binary
 #
-# On macOS the result also depends on the Xcode version, which toolchain.env
-# does not pin. See packaging/README.md for checking a published release.
+# See packaging/README.md for checking a published release.
 set -eu
 
 die() { echo "check-reproducible.sh: $*" >&2; exit 1; }
@@ -30,11 +29,15 @@ trap cleanup EXIT
 case ${1:-} in
 linux)
 	arch=${2:?usage: check-reproducible.sh linux amd64|arm64}
+	# The second build takes its versions from the first one's BUILD-INFO,
+	# as a rebuild of a release does.
+	info=
 	for n in 1 2; do
 		v=latchwire-repro-$$-$n
 		volumes="$volumes $v"
 		LATCHWIRE_GO_CACHE_VOLUME=$v packaging/linux/build-in-container.sh \
-			--arch "$arch" --out "$work/out$n" --mount "/build/path$n/src" >/dev/null
+			--arch "$arch" --out "$work/out$n" --mount "/build/path$n/src" ${info:+--build-info "$info"} >/dev/null
+		info=$work/out1/BUILD-INFO
 	done
 	sums1=$work/out1/SHA256SUMS
 	sums2=$work/out2/SHA256SUMS

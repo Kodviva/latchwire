@@ -1,5 +1,5 @@
 # Boots systemd for packaging/linux/test/run.sh. openresolv handles DNS.
-FROM debian:12
+FROM debian:stable
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
     systemd systemd-sysv libpam-systemd dbus iputils-ping iproute2 openresolv pcscd procps ca-certificates \

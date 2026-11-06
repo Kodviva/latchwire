@@ -5,19 +5,20 @@ set -eu
 arch=$1
 root=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$root"
-# shellcheck source=packaging/toolchain.env
-. packaging/toolchain.env
+if [ -n "$EXPECT_GO" ] && [ "$(go env GOVERSION)" != "$EXPECT_GO" ]; then
+	echo "container-entry.sh: BUILD-INFO says $EXPECT_GO, the image has $(go env GOVERSION)" >&2
+	exit 1
+fi
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq >/dev/null
-apt-get install -y -qq --no-install-recommends "libpcsclite-dev=$PCSC_DEV_VERSION" >/dev/null || {
-	echo "container-entry.sh: libpcsclite-dev=$PCSC_DEV_VERSION is not available: update PCSC_DEV_VERSION in packaging/toolchain.env (a new version changes the binary)" >&2
+apt-get install -y -qq --no-install-recommends "libpcsclite-dev${PCSC_VERSION:+=$PCSC_VERSION}" >/dev/null || {
+	echo "container-entry.sh: cannot install libpcsclite-dev ${PCSC_VERSION:-}: Debian may have replaced that version" >&2
 	exit 1
 }
 
-# nfpm needs a newer Go than the release is built with. It is a tool here:
-# GOTOOLCHAIN=auto fetches what it asks for, checked against the Go checksum
-# database. Its version is pinned.
+# GOTOOLCHAIN=auto: a tool may ask for a newer Go than the image has. Go
+# checks what it downloads against its checksum database.
 GOTOOLCHAIN=auto GOBIN=/usr/local/bin go install "github.com/goreleaser/nfpm/v2/cmd/nfpm@$NFPM_VERSION" 2>/dev/null
 
 work=$(mktemp -d)
@@ -27,9 +28,17 @@ sh packaging/linux/build-packages.sh "$work/latchwire" "$work/THIRD_PARTY_LICENS
 
 if [ -n "$TEST_BINARIES" ]; then
 	mkdir -p /out/test
-	export GOFLAGS=-buildvcs=false GOTOOLCHAIN="go$GO_VERSION"
+	export GOFLAGS=-buildvcs=false
 	go build -tags e2e -o /out/test/testagent ./test/e2e/linux/testagent
 	go build -tags e2e -o /out/test/testserver ./test/e2e/linux/testserver
 fi
+# Everything a rebuild needs to get the same bytes.
+cat >/out/BUILD-INFO <<INFO
+image=$BUILD_IMAGE
+go=$(go env GOVERSION)
+nfpm=$(go version -m /usr/local/bin/nfpm | awk '$1 == "mod" { print $3 }')
+libpcsclite-dev=$(dpkg-query -W -f='${Version}' libpcsclite-dev)
+INFO
+
 (cd /out && find . -maxdepth 1 -type f ! -name SHA256SUMS | LC_ALL=C sort | sed 's|^\./||' | xargs sha256sum >SHA256SUMS)
 chown -R "$HOST_UID:$HOST_GID" /out

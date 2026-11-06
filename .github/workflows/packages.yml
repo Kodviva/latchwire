@@ -28,10 +28,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {distro: debian, arch: amd64, runner: ubuntu-24.04}
-          - {distro: ubuntu, arch: amd64, runner: ubuntu-24.04}
+          - {distro: debian, arch: amd64, runner: ubuntu-latest}
+          - {distro: ubuntu, arch: amd64, runner: ubuntu-latest}
           - {distro: fedora, arch: arm64, runner: ubuntu-24.04-arm}
-          - {distro: rocky, arch: amd64, runner: ubuntu-24.04}
+          - {distro: rocky, arch: amd64, runner: ubuntu-latest}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
@@ -49,7 +49,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {arch: amd64, runner: ubuntu-24.04}
+          - {arch: amd64, runner: ubuntu-latest}
           - {arch: arm64, runner: ubuntu-24.04-arm}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
@@ -73,17 +73,16 @@ jobs:
 
   macos-package:
     name: macOS package
-    runs-on: macos-15
+    runs-on: macos-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Read pinned versions
-        run: grep -E '^GO_VERSION=' packaging/toolchain.env >>"$GITHUB_ENV"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version: stable
+          check-latest: true
           cache: false
       - name: Lifecycle against stubs
         run: bash packaging/macos/test/lifecycle-test.sh

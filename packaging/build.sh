@@ -3,9 +3,9 @@
 #
 #   packaging/build.sh --goos linux --goarch arm64 --out dist/latchwire
 #
-# Same source, toolchain.env and C toolchain give the same bytes, whatever
-# the checkout path. Linux binaries link libpcsclite through cgo: build them
-# with packaging/linux/build-in-container.sh, which pins the C toolchain.
+# The same source, Go and C toolchain give the same bytes, whatever the
+# checkout path. Linux binaries link libpcsclite through cgo: build them
+# with packaging/linux/build-in-container.sh, which fixes the C toolchain.
 #
 # Stamps: LATCHWIRE_VERSION (default: packaging/version.sh), LATCHWIRE_COMMIT
 # (default: git HEAD). Both are explicit, so a build without .git works too.
@@ -35,10 +35,14 @@ cd "$root"
 ver=${LATCHWIRE_VERSION:-$(sh packaging/version.sh)}
 rev=${LATCHWIRE_COMMIT:-$(git rev-parse HEAD)}
 
-export GOTOOLCHAIN="go$GO_VERSION" GOOS="$goos" GOARCH="$goarch" CGO_ENABLED=1
+export GOOS="$goos" GOARCH="$goarch" CGO_ENABLED=1
 export GOFLAGS=-mod=readonly
 if [ "$goos" = darwin ]; then
+	# In the flags, not only in the environment: the Go build cache ignores
+	# the environment variable and would reuse objects built for this Mac.
 	export MACOSX_DEPLOYMENT_TARGET
+	export CGO_CFLAGS="-mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET"
+	export CGO_LDFLAGS="-mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET"
 fi
 
 # The shipped CLI must not contain the software key.

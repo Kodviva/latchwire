@@ -62,8 +62,9 @@ else
 	OLD=$(echo /pkg/old/*.rpm)
 	NEW=$(echo /pkg/new/*.rpm)
 	pkg_first() { dnf install -y -q "$1"; }
-	pkg_again() { rpm -i "$1"; }
-	pkg_upgrade() { rpm -Uvh --oldpackage "$1"; }
+	# The packages are unsigned, which current rpm refuses by default.
+	pkg_again() { rpm -i --nosignature "$1"; }
+	pkg_upgrade() { rpm -Uvh --oldpackage --nosignature "$1"; }
 	pkg_remove() { rpm -e latchwire; }
 	pkg_purge() { rpm -e latchwire; }
 	pkg_installed() { rpm -q latchwire; }

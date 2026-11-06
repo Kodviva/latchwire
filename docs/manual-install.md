@@ -10,7 +10,8 @@ Build instructions, the check that two builds match and the release steps
 are in `packaging/README.md`. The packages depend on PC/SC, `nft`, `ip` and
 `sysctl`. A pinentry and `pcscd` are recommended; DNS needs systemd-resolved
 or resolvconf. glibc 2.34 or later is required (Debian 12, Ubuntu 22.04,
-RHEL 9 or later).
+RHEL 9 or later). Use `dnf` for the `.rpm`: it is not signed yet, and plain
+`rpm -i` refuses it on current Fedora.
 
 | | Install | Remove, keeping tunnels | Remove with tunnels |
 | --- | --- | --- | --- |

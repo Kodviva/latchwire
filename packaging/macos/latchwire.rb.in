@@ -8,7 +8,7 @@ cask "latchwire" do
   desc "WireGuard-compatible client that keeps the static key in a YubiKey"
   homepage "https://latchwire.com/"
 
-  depends_on macos: :monterey
+  depends_on macos: :ventura
 
   pkg "latchwire-#{version}.pkg"
 

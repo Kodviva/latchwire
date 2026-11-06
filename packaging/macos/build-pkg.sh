@@ -7,7 +7,7 @@
 #
 # For a release, sign the binary first (sign-binary.sh): the package carries
 # what it is given. --app adds a desktop application bundle to /Applications
-# (Plan 3), which is optional.
+# when one exists; it is optional.
 #
 # Files, once installed:
 #   /usr/local/latchwire/bin/latchwire     the program. Not in /usr/local/bin:

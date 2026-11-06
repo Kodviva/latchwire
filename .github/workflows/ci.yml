@@ -18,18 +18,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15]
+        os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Read pinned versions
-        run: grep -E '^GO_VERSION=' packaging/toolchain.env >>"$GITHUB_ENV"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version: stable
+          check-latest: true
           cache: false
       - name: Install PC/SC headers
         if: runner.os == 'Linux'
@@ -40,7 +39,7 @@ jobs:
 
   e2e-linux:
     name: Linux network end-to-end
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -49,29 +48,29 @@ jobs:
       - name: Run the scenarios in a privileged container
         run: |
           . packaging/toolchain.env
+          docker pull --quiet "$GOLANG_IMAGE"
           docker run --rm --privileged --cap-add NET_ADMIN -v "$PWD":/src -w /src \
             "$GOLANG_IMAGE" bash test/e2e/linux/run.sh
 
   wireguard-upstream:
     name: third_party/wireguard-go upstream tests
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Read pinned versions
-        run: grep -E '^GO_VERSION=' packaging/toolchain.env >>"$GITHUB_ENV"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version: stable
+          check-latest: true
           cache: false
       - run: go test ./...
         working-directory: third_party/wireguard-go
 
   dco:
     name: Developer Certificate of Origin
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -98,30 +97,29 @@ jobs:
 
   lint:
     name: Lint scripts, workflows, licence list
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Read pinned versions
-        run: grep -E '^(GO_VERSION|ACTIONLINT_VERSION)=' packaging/toolchain.env >>"$GITHUB_ENV"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version: stable
+          check-latest: true
           cache: false
       - name: shellcheck
         run: |
           find packaging test -type f \( -name '*.sh' -o -path '*/linux/deb/*' -o -path '*/linux/rpm/*' -o -name postinstall \) -print0 |
             xargs -0 shellcheck -x -S warning
       - name: actionlint
-        run: go run "github.com/rhysd/actionlint/cmd/actionlint@$ACTIONLINT_VERSION"
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@latest
       - name: Licence list is up to date
         run: sh packaging/third-party.sh --check
 
   windows-build:
-    name: Windows build (non-blocking until Plan 2b lands)
-    runs-on: windows-2025
+    name: Windows build (non-blocking until the Windows port lands)
+    runs-on: windows-latest
     timeout-minutes: 15
     # Remove this line when the Windows work is on main.
     continue-on-error: true
@@ -131,6 +129,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          go-version: stable
+          check-latest: true
           cache: false
       - run: go build ./...
