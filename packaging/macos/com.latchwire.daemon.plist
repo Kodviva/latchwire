@@ -2,7 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   Latchwire tunnel daemon (root): TUN devices, routes, DNS, kill switch.
-  Install: /Library/LaunchDaemons/com.latchwire.daemon.plist (root:wheel 0644).
+  The .pkg rewrites the binary path to /usr/local/latchwire/bin/latchwire.
+  By hand: /Library/LaunchDaemons/com.latchwire.daemon.plist (root:wheel 0644).
   Create /var/log/latchwire-daemon.log first (root:admin 0640): launchd
   keeps an existing file's mode but creates a missing one world-readable.
   See docs/manual-install.md.
@@ -22,6 +23,9 @@
 	<true/>
 	<key>KeepAlive</key>
 	<true/>
+	<!-- Taking tunnels down runs several commands; launchd's default is 20 s. -->
+	<key>ExitTimeOut</key>
+	<integer>60</integer>
 	<key>StandardErrorPath</key>
 	<string>/var/log/latchwire-daemon.log</string>
 	<key>StandardOutPath</key>
