@@ -413,3 +413,126 @@ Behaviour, with `full` (kill switch `auto`, so on):
       match what you recorded in section 8, `/var/run/latchwire/journal.json`
       has no owners, and `killswitch.state` is gone from the tunnel store.
 - [ ] Remove the test peer from the server.
+
+## 17. Windows (nothing here has ever been run)
+
+Everything Windows-specific was compiled on macOS with `GOOS=windows`, and its
+pure logic was tested there. **No part of it has run on Windows.** Until each
+item below is ticked, none of it is verified. Run it on Windows 10 and 11,
+amd64 (arm64 too if supported), with `wintun.dll` next to `latchwire.exe` in a
+folder only administrators can write. Sections 3 to 7 apply to Windows as well;
+use an elevated prompt where they say `sudo`.
+
+Service and data directory:
+
+- [ ] `latchwire service install` in an elevated prompt installs and starts
+      `Latchwire` as LocalSystem, automatic, depending on `Nsi`, `TcpIp`, `BFE`;
+      `sc qfailure Latchwire` shows the restarts. In a normal prompt it refuses.
+- [ ] `%ProgramData%\Latchwire` exists: `icacls` shows only SYSTEM and
+      Administrators, with inheritance disabled, and the owner is Administrators.
+- [ ] With the service removed, delete that folder, create it as a standard
+      user and start the service: it refuses to start and the Event Log says why.
+      Repeat with a junction at that path: also refused, and its target unchanged.
+- [ ] `sc stop Latchwire` takes tunnels down and lifts the kill switch. A restart
+      or shutdown of Windows does the same. Daemon messages reach the Event Log.
+- [ ] Kill the service process (`taskkill /f`): it is restarted by the recovery
+      action and section "kill switch" below holds across it.
+- [ ] `latchwire service uninstall` stops and removes it and keeps the data.
+
+Named pipe:
+
+- [ ] `latchwire status` as a standard user works once that user's agent runs,
+      and is refused without one. Check that a stopped service gives the "not
+      running" message.
+- [ ] As an administrator in a non-elevated prompt, `latchwire add` is refused;
+      in an elevated prompt it works, and `latchwire policy <name>` shows that
+      user as the allowed user, with `DOMAIN\name`.
+- [ ] Standard user `B`: `up` is refused; after `latchwire policy <name>
+      --allow-user B` (elevated) it works; `--deny-user B` takes it down. `users.json`
+      keeps the same numbers across restarts.
+- [ ] Corrupt `users.json`, restart: standard users are refused, elevated prompts
+      work, the file is untouched.
+- [ ] **Squatting:** with the service stopped, a standard user's program creates
+      `\\.\pipe\latchwire`: `latchwire status` and the agent refuse it and send
+      nothing; the service refuses to start.
+- [ ] **Instances:** with the service running, a standard user's program calling
+      `CreateNamedPipe` on that name gets access denied.
+- [ ] From a low-integrity process, and from another machine, the pipe cannot be
+      opened.
+
+Tunnel and network:
+
+- [ ] `up` creates an adapter with the tunnel's name; the same tunnel reuses it and
+      Windows adds no new network profile. Without `wintun.dll` the error names it.
+- [ ] Addresses, routes and MTU are in place (`netsh interface ipv4 show
+      subinterfaces`, `route print`); traffic flows; a handshake works through
+      `conn` (RIO bind) on Wi-Fi and Ethernet.
+- [ ] An `AllowedIPs` equal to the address's subnet does not fail the connect.
+- [ ] Split tunnel with IPv6: the address is not stuck tentative.
+- [ ] Full tunnel: `0.0.0.0/1` and `128.0.0.0/1` on the tunnel, a `/32` to the
+      endpoint through the gateway by interface index, default route untouched;
+      `::/1` and `8000::/1` for IPv6. Traffic goes through the tunnel.
+- [ ] A physical interface with spaces or non-ASCII letters in its name works.
+- [ ] Change network (Wi-Fi to Ethernet, or another Wi-Fi): the endpoint route
+      moves within seconds. Unplug everything: the route goes to interface 1 and
+      packets to the endpoint are dropped, not looped into the tunnel.
+- [ ] Automatic MTU follows a change of the physical MTU.
+- [ ] **Localized Windows:** repeat the two items above and `latchwire network` on
+      a German or Turkish Windows; compare `route print -4` with the parsers.
+- [ ] After `down` and after a killed service, `route print` and the registry
+      match the state before; a journaled undo whose target is gone does not
+      retry for ever (the journal empties).
+- [ ] Two tunnels up, conflicts refused, as in section 13.
+
+DNS:
+
+- [ ] Full tunnel with DNS: `Get-DnsClientNrptPolicy` shows the `.` rule,
+      `nslookup example.com` goes to the tunnel's server, and a packet capture on
+      the physical interface shows no DNS, with and without the kill switch.
+- [ ] Split tunnel with search domains only those names go to the tunnel;
+      other names use the system's DNS.
+- [ ] Search domains apply on a primary tunnel.
+- [ ] `down` removes the rule; after a killed service it goes at the next start.
+- [ ] A machine with group policy NRPT rules: record what happens to local rules.
+
+Kill switch:
+
+- [ ] While blocking, only tunnels, endpoints and link traffic pass: browse, ping
+      and DNS outside the tunnel fail. `netsh wfp show filters` lists the filters.
+- [ ] A connection opened before the kill switch came on is cut. **Record the
+      result:** this depends on ALE reauthorization.
+- [ ] DHCP renewal, IPv6 SLAAC and neighbour discovery work while blocking,
+      including after several minutes on a switch with MLD snooping.
+- [ ] Pull the card: it keeps blocking. `down` lifts it.
+- [ ] Kill the service process: filters stay and traffic stays blocked until it
+      restarts and blocks again. Crash, then reboot: it blocks after the
+      service starts. Measure what leaks between boot and that moment.
+- [ ] `net stop BFE` and start (or delete a filter): blocking returns within 30
+      seconds and the log says so. Note what passes meanwhile.
+- [ ] Windows Firewall with a default block, and one third-party firewall: the
+      handshake still works and the block still holds.
+- [ ] Hyper-V, WSL and Docker Desktop: record what bypasses the kill switch.
+- [ ] Corrupt the journal: the filters are removed, as documented.
+
+Network identity and on-demand:
+
+- [ ] `latchwire network` gives a stable ID, different on another network, `none`
+      without a gateway, `unknown` with an empty ARP entry; repeat section 12.
+- [ ] Network changes reach the daemon at once (not only at the 30 s check), with
+      no connect and disconnect loop from the tunnel's own routes.
+
+Agent and card:
+
+- [ ] `latchwire agent` in a console window asks there, without echo, and ignores
+      piped input. In Windows Terminal it opens the window instead.
+- [ ] Started at logon with no visible console, the PIN window appears in front,
+      masks input, Enter and Escape work, the warning shows with one attempt left,
+      it closes by itself after 100 s, and no PIN appears in the process list.
+- [ ] `latchwire devices`, `keygen` and `pubkey` work through WinSCard, sharing the
+      card with Yubico Authenticator; section 7 holds.
+- [ ] **Card removal:** pull the only YubiKey. The Smart Card service may stop:
+      `latchwire status` shows `card_removed` within 2 seconds, and `latchwire
+      devices` lists nothing rather than failing. Plug it back in: the PIN is
+      asked and the tunnel returns.
+- [ ] Sleep and wake; fast user switching; an RDP session with a redirected card.
+      Record which session's agent gets the card.
