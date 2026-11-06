@@ -132,7 +132,9 @@
   "road.r5p": "面向 macOS、Windows 和 Linux 的桌面应用",
   "road.r6": "签名版本",
   "road.r6p": "Homebrew、直接下载、.deb、.rpm、Microsoft Store",
-  "foot.lic": "Apache-2.0 许可证 · 由 Kodviva 开发",
+  "foot.lic": "Apache-2.0 许可证",
+  "foot.brand": "Kodviva 旗下品牌",
+  "foot.brandLabel": "Latchwire 是 Kodviva 旗下品牌",
   "foot.tm": "Latchwire 是一个独立的开源项目。WireGuard 是 Jason A. Donenfeld 的注册商标。",
   "foot.sec": "安全政策",
   "e404.title": "找不到页面"

@@ -132,7 +132,9 @@
   "road.r5p": "macOS, Windows, Linux용 데스크톱 앱",
   "road.r6": "서명된 릴리스",
   "road.r6p": "Homebrew, 직접 다운로드, .deb, .rpm, Microsoft Store",
-  "foot.lic": "Apache-2.0 라이선스 · Kodviva 제작",
+  "foot.lic": "Apache-2.0 라이선스",
+  "foot.brand": "Kodviva 브랜드",
+  "foot.brandLabel": "Latchwire는 Kodviva의 브랜드입니다",
   "foot.tm": "Latchwire는 독립적인 오픈 소스 프로젝트입니다. WireGuard는 Jason A. Donenfeld의 등록 상표입니다.",
   "foot.sec": "보안 정책",
   "e404.title": "페이지를 찾을 수 없습니다"

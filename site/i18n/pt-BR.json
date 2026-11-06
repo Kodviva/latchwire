@@ -132,7 +132,9 @@
   "road.r5p": "Aplicativo de desktop para macOS, Windows e Linux",
   "road.r6": "Versões assinadas",
   "road.r6p": "Homebrew, download direto, .deb, .rpm, Microsoft Store",
-  "foot.lic": "Licença Apache-2.0 · Feito pela Kodviva",
+  "foot.lic": "Licença Apache-2.0",
+  "foot.brand": "Uma marca Kodviva",
+  "foot.brandLabel": "Latchwire é uma marca da Kodviva",
   "foot.tm": "O Latchwire é um projeto independente de código aberto. WireGuard é uma marca registrada de Jason A. Donenfeld.",
   "foot.sec": "Política de segurança",
   "e404.title": "Página não encontrada"

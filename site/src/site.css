@@ -162,6 +162,10 @@ pre{direction:ltr;text-align:left;background:var(--surface2);border:1px solid va
 footer{border-top:1px solid var(--line);margin-top:40px;padding-block:32px 56px;color:var(--muted);font-size:.9rem}
 footer p{margin:0 0 6px}
 footer .links a{font-weight:500}
+.foot-legal{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;margin-bottom:6px}
+.kodviva{display:inline-flex;align-items:center;gap:6px;min-height:28px;padding-block:4px;padding-inline:8px 10px;border:1px solid var(--line);border-radius:999px;background:var(--surface);color:var(--muted);font-size:.75rem;line-height:1.2;white-space:nowrap}
+.kodviva:hover{color:var(--text);text-decoration:none;border-color:var(--faint)}
+.kodviva svg{flex:none}
 
 .notfound{padding-block:64px}
 .notfound ul{list-style:none;margin:0;padding:0;display:grid;gap:4px}

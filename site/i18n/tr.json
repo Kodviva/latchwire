@@ -132,7 +132,9 @@
   "road.r5p": "macOS, Windows ve Linux için masaüstü uygulaması",
   "road.r6": "İmzalı sürümler",
   "road.r6p": "Homebrew, doğrudan indirme, .deb, .rpm, Microsoft Store",
-  "foot.lic": "Apache-2.0 lisansı · Kodviva tarafından geliştirildi",
+  "foot.lic": "Apache-2.0 lisansı",
+  "foot.brand": "Bir Kodviva markası",
+  "foot.brandLabel": "Latchwire bir Kodviva markasıdır",
   "foot.tm": "Latchwire bağımsız bir açık kaynak projesidir. WireGuard, Jason A. Donenfeld'in tescilli ticari markasıdır.",
   "foot.sec": "Güvenlik politikası",
   "e404.title": "Sayfa bulunamadı"
