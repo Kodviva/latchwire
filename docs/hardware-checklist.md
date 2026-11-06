@@ -428,6 +428,8 @@ Service and data directory:
 - [ ] `latchwire service install` in an elevated prompt installs and starts
       `Latchwire` as LocalSystem, automatic, depending on `Nsi`, `TcpIp`, `BFE`;
       `sc qfailure Latchwire` shows the restarts. In a normal prompt it refuses.
+- [ ] Run from a folder outside Program Files, `latchwire service install`
+      refuses and creates no service.
 - [ ] `%ProgramData%\Latchwire` exists: `icacls` shows only SYSTEM and
       Administrators, with inheritance disabled, and the owner is Administrators.
 - [ ] With the service removed, delete that folder, create it as a standard

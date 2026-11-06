@@ -371,4 +371,6 @@ runs the daemon:
 	WintunMissingFmt = "cannot load wintun.dll, which must sit next to latchwire.exe: %v"
 	// PolicyNoSuchUser: no user has that uid.
 	PolicyNoSuchUser = "no such user"
+	// ServiceLocationFmt takes the path of the program.
+	ServiceLocationFmt = "refusing to install %s as a service: it would run as SYSTEM, so it must be under Program Files, where only administrators can write"
 )

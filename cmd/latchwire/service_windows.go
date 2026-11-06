@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -137,13 +138,12 @@ func cmdService(_ context.Context, e *env, args []string) error {
 
 // installService creates the service as LocalSystem, restarted when it
 // fails, and starts it. The data directory is claimed first, so nobody can
-// create it before the service's first start. The service runs this very
-// file, so it must sit where only administrators can write.
+// create it before the service's first start.
 func installService() error {
 	if err := datadir.Secure(); err != nil {
 		return err
 	}
-	exe, err := os.Executable()
+	exe, err := serviceExecutable()
 	if err != nil {
 		return err
 	}
@@ -176,6 +176,27 @@ func installService() error {
 		return err
 	}
 	return s.Start()
+}
+
+// serviceExecutable returns this program's path, resolved, if it may become
+// a service. The service runs this very file as SYSTEM and loads wintun.dll
+// from beside it, so whoever can write that folder would own the machine:
+// only Program Files, which only administrators can write by default, is
+// accepted.
+func serviceExecutable() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	if exe, err = filepath.EvalSymlinks(exe); err != nil {
+		return "", err
+	}
+	for _, id := range []*windows.KNOWNFOLDERID{windows.FOLDERID_ProgramFiles, windows.FOLDERID_ProgramFilesX86} {
+		if dir, err := windows.KnownFolderPath(id, 0); err == nil && insideWindowsDir(exe, dir) {
+			return exe, nil
+		}
+	}
+	return "", fmt.Errorf(msg.ServiceLocationFmt, exe)
 }
 
 // removeService stops the service, which takes its tunnels down and lifts

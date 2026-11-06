@@ -676,7 +676,9 @@ unverified; section 5.2 does not yet apply to Windows from observation.
 
 **Distribution.** `wintun.dll` must sit next to `latchwire.exe`, and that folder
 must be writable only by administrators, since the service runs from it as
-SYSTEM and loads the DLL from there. Signing and Store packaging are not done
+SYSTEM and loads the DLL from there. `latchwire service install` refuses a
+program outside Program Files; it trusts that folder's default permissions and
+does not inspect them, and a service created by other means is not checked. Signing and Store packaging are not done
 (spec section 12, item 4).
 
 ## 6. Why the cached `ss` alone cannot build a tunnel
