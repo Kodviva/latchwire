@@ -1,5 +1,3 @@
-//go:build darwin || linux
-
 package netcfg
 
 import (
@@ -59,12 +57,17 @@ func (e execRunner) RunCombined(ctx context.Context, name string, args []string,
 }
 
 func (e execRunner) run(ctx context.Context, name string, args []string, stdin []byte, combined bool) ([]byte, error) {
-	if name == "" || strings.ContainsRune(name, filepath.Separator) {
+	// Windows takes either slash and drive-relative names: a command name
+	// is a bare name on every system.
+	if name == "" || strings.ContainsAny(name, `/\:`) {
 		return nil, fmt.Errorf("%s: %w", name, exec.ErrNotFound)
+	}
+	if fn := builtin(name); fn != nil {
+		return fn(ctx, args)
 	}
 	path := ""
 	for _, d := range e.dirs {
-		p := filepath.Join(d, name)
+		p := filepath.Join(d, exeFile(name))
 		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() {
 			path = p
 			break
@@ -85,7 +88,7 @@ func (e execRunner) run(ctx context.Context, name string, args []string, stdin [
 	}
 	// A minimal environment: no inherited variables, a fixed locale and the
 	// fixed directories as PATH (for tools that run other tools).
-	cmd.Env = []string{"LC_ALL=C", "PATH=" + strings.Join(e.dirs, ":")}
+	cmd.Env = execEnv(e.dirs)
 	cmd.WaitDelay = execWaitDelay
 	if len(stdin) > 0 {
 		cmd.Stdin = bytes.NewReader(stdin)
@@ -97,6 +100,11 @@ func (e execRunner) run(ctx context.Context, name string, args []string, stdin [
 	if err := cmd.Run(); err != nil {
 		if s := strings.TrimSpace(stderr.buf.String()); s != "" {
 			return out(), fmt.Errorf("%w: %s", err, s)
+		}
+		if failureOnStdout {
+			if s := strings.TrimSpace(string(stdout.Bytes()[:min(stdout.Len(), maxStderr)])); s != "" {
+				return out(), fmt.Errorf("%w: %s", err, s)
+			}
 		}
 		return out(), err
 	}

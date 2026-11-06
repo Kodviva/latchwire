@@ -11,24 +11,11 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
 	"github.com/Kodviva/latchwire/internal/config"
 )
-
-// DefaultSocket is the daemon's socket path.
-const DefaultSocket = "/var/run/latchwire.sock"
-
-// DefaultStoreDir returns where tunnel configurations are kept on this
-// platform.
-func DefaultStoreDir() string {
-	if runtime.GOOS == "darwin" {
-		return "/Library/Application Support/Latchwire/tunnels"
-	}
-	return "/etc/latchwire/tunnels"
-}
 
 const confExt = ".conf"
 
@@ -201,7 +188,7 @@ func (s *store) loadEndpoints(name string) (map[string]cachedEndpoint, error) {
 	switch {
 	case !fi.Mode().IsRegular():
 		return nil, fmt.Errorf("%s: not a regular file", p)
-	case fi.Mode().Perm()&0o022 != 0:
+	case writableByOthers(fi):
 		return nil, fmt.Errorf("%s: writable by group or others (mode %v)", p, fi.Mode().Perm())
 	case fi.Size() > maxEndpointsFile:
 		return nil, fmt.Errorf("%s: larger than %d bytes", p, maxEndpointsFile)
@@ -302,7 +289,7 @@ func (s *store) loadKillSwitchTunnels() ([]ksTunnel, error) {
 	switch {
 	case !fi.Mode().IsRegular():
 		return nil, fmt.Errorf("%s: not a regular file", p)
-	case fi.Mode().Perm()&0o022 != 0:
+	case writableByOthers(fi):
 		return nil, fmt.Errorf("%s: writable by group or others (mode %v)", p, fi.Mode().Perm())
 	case fi.Size() > maxKSTunnelsFile:
 		return nil, fmt.Errorf("%s: larger than %d bytes", p, maxKSTunnelsFile)

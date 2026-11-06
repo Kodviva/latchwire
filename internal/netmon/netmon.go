@@ -25,7 +25,8 @@ var errUnsupported = errors.ErrUnsupported
 const maxDebounceFactor = 10
 
 // Source delivers raw network change notifications from the operating
-// system (an AF_ROUTE socket on macOS, a NETLINK_ROUTE socket on Linux).
+// system (an AF_ROUTE socket on macOS, a NETLINK_ROUTE socket on Linux, IP
+// helper callbacks on Windows).
 //
 // Next blocks until the next notification and returns the name of the
 // interface it concerns, or "" when the notification names none (or the name

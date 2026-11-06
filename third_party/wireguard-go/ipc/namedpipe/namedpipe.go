@@ -114,7 +114,7 @@ func (s pipeAddress) String() string {
 }
 
 // tryDialPipe attempts to dial the specified pipe until cancellation or timeout.
-func tryDialPipe(ctx context.Context, path *string) (windows.Handle, error) {
+func tryDialPipe(ctx context.Context, path *string, access, impersonation uint32) (windows.Handle, error) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -124,7 +124,7 @@ func tryDialPipe(ctx context.Context, path *string) (windows.Handle, error) {
 			if err != nil {
 				return 0, err
 			}
-			h, err := windows.CreateFile(path16, windows.GENERIC_READ|windows.GENERIC_WRITE, 0, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OVERLAPPED|windows.SECURITY_SQOS_PRESENT|windows.SECURITY_ANONYMOUS, 0)
+			h, err := windows.CreateFile(path16, access, 0, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OVERLAPPED|windows.SECURITY_SQOS_PRESENT|impersonation, 0)
 			if err == nil {
 				return h, nil
 			}
@@ -141,6 +141,17 @@ func tryDialPipe(ctx context.Context, path *string) (windows.Handle, error) {
 // DialConfig exposes various options for use in Dial and DialContext.
 type DialConfig struct {
 	ExpectedOwner *windows.SID // If non-nil, the pipe is verified to be owned by this SID.
+
+	// Identification (Latchwire patch) lets the server read this client's
+	// token (SECURITY_IDENTIFICATION) instead of hiding it
+	// (SECURITY_ANONYMOUS, the default). The server cannot act as the
+	// client at this level; it can only ask who the client is.
+	//
+	// It also opens the pipe without GENERIC_WRITE, which on a pipe holds
+	// FILE_CREATE_PIPE_INSTANCE: a server that grants clients write access
+	// must leave that right out, or they could serve the pipe themselves,
+	// and asking for it would then be refused.
+	Identification bool
 }
 
 // DialTimeout connects to the specified named pipe by path, timing out if the
@@ -163,7 +174,12 @@ func (config *DialConfig) DialTimeout(path string, timeout time.Duration) (net.C
 func (config *DialConfig) DialContext(ctx context.Context, path string) (net.Conn, error) {
 	var err error
 	var h windows.Handle
-	h, err = tryDialPipe(ctx, &path)
+	access, impersonation := uint32(windows.GENERIC_READ|windows.GENERIC_WRITE), uint32(windows.SECURITY_ANONYMOUS)
+	if config.Identification {
+		access = windows.GENERIC_READ | windows.FILE_WRITE_DATA | windows.FILE_WRITE_ATTRIBUTES | windows.FILE_WRITE_EA
+		impersonation = windows.SECURITY_IDENTIFICATION
+	}
+	h, err = tryDialPipe(ctx, &path, access, impersonation)
 	if err != nil {
 		return nil, err
 	}

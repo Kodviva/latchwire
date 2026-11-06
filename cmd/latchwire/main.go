@@ -1,6 +1,6 @@
 // Command latchwire is the Latchwire command line: it generates keys on a
-// YubiKey, runs the user agent and the root daemon, and drives tunnels
-// through the daemon.
+// YubiKey, runs the user agent and the root daemon (a service on Windows),
+// and drives tunnels through the daemon.
 package main
 
 import (
@@ -87,7 +87,7 @@ func defaultEnv() *env {
 			return c, nil
 		},
 		dial:    dialDaemon,
-		geteuid: os.Geteuid,
+		geteuid: effectiveUID,
 		runAgent: func(ctx context.Context) error {
 			return agent.New(daemon.DefaultSocket, piv.Backend{}, agent.NewPrompter(), agentPoll).Run(ctx)
 		},
@@ -116,6 +116,9 @@ func dialDaemon(ctx context.Context) (rpcConn, error) {
 }
 
 func main() {
+	if code, ok := runAsService(); ok {
+		os.Exit(code)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	code := run(ctx, defaultEnv(), os.Args[1:])
 	stop()
@@ -145,7 +148,7 @@ type command struct {
 }
 
 func commands() map[string]command {
-	return map[string]command{
+	cmds := map[string]command{
 		"devices": {"devices", cmdDevices},
 		"keygen":  {keygenSynopsis, cmdKeygen},
 		"pubkey":  {"pubkey <keyref>", cmdPubkey},
@@ -159,23 +162,25 @@ func commands() map[string]command {
 		"policy":  {policySynopsis, cmdPolicy},
 		"network": {"network", cmdNetwork},
 	}
+	addPlatformCommands(cmds)
+	return cmds
 }
 
 // run executes one command line and returns the process exit code.
 func run(ctx context.Context, e *env, args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(e.stderr, msg.CLIUsage)
+		fmt.Fprintln(e.stderr, usage)
 		return exitUsage
 	}
 	name, rest := args[0], args[1:]
 	switch name {
 	case "help", "-h", "--help":
-		fmt.Fprintln(e.stdout, msg.CLIUsage)
+		fmt.Fprintln(e.stdout, usage)
 		return exitOK
 	}
 	cmd, ok := commands()[name]
 	if !ok {
-		fmt.Fprintf(e.stderr, "latchwire: %s\n%s\n", fmt.Sprintf(msg.CLIUnknownCommandFmt, name), msg.CLIUsage)
+		fmt.Fprintf(e.stderr, "latchwire: %s\n%s\n", fmt.Sprintf(msg.CLIUnknownCommandFmt, name), usage)
 		return exitUsage
 	}
 
@@ -236,7 +241,7 @@ func cmdDaemon(ctx context.Context, e *env, args []string) error {
 		return err
 	}
 	if e.geteuid() != 0 {
-		return errors.New(msg.DaemonMustBeRoot)
+		return errors.New(daemonMustBeRoot)
 	}
 	fmt.Fprintf(e.stderr, msg.DaemonStartedFmt+"\n", daemon.DefaultSocket)
 	return stopped(e.runDaemon(ctx))
@@ -258,11 +263,11 @@ func daemonErr(err error) error {
 	case errors.As(err, &ie):
 		return errors.New(ie.Message)
 	case errors.Is(err, syscall.ENOENT), errors.Is(err, syscall.ECONNREFUSED):
-		return errors.New(msg.CLIDaemonNotRunning)
+		return errors.New(daemonNotRunning)
 	}
 	var ne net.Error
 	if errors.As(err, &ne) && ne.Timeout() {
-		return errors.New(msg.CLIDaemonNotRunning)
+		return errors.New(daemonNotRunning)
 	}
 	return err
 }

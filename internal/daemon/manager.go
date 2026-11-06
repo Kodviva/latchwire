@@ -38,6 +38,7 @@ import (
 	"golang.zx2c4.com/wireguard/tun"
 
 	"github.com/Kodviva/latchwire/internal/config"
+	"github.com/Kodviva/latchwire/internal/datadir"
 	"github.com/Kodviva/latchwire/internal/ipc"
 	"github.com/Kodviva/latchwire/internal/keyprovider"
 	"github.com/Kodviva/latchwire/internal/keyprovider/wgadapter"
@@ -103,18 +104,18 @@ type Options struct {
 	// Firewall is the kill switch; nil = killswitch.New(Runner, journal),
 	// made the first time the kill switch is needed.
 	Firewall killswitch.Firewall
+	// Users is the table of Windows users; nil = ipc.Users(), read by Serve
+	// once the data directory is safe (nil on Unix).
+	Users *ipc.UserTable
 }
 
 // DefaultTUN returns the factory that creates kernel TUN devices (utunN on
-// macOS, the tunnel's name on Linux) configured with the platform's network
-// commands, run by r and journaled in j.
+// macOS, the tunnel's name on Linux, a Wintun adapter of that name on
+// Windows) configured with the platform's network commands, run by r and
+// journaled in j.
 func DefaultTUN(r netcfg.Runner, j *netcfg.Journal) TUNFactory {
 	return func(name string, mtu int) (tun.Device, netcfg.Configurer, error) {
-		ifname := name
-		if runtime.GOOS == "darwin" {
-			ifname = "utun"
-		}
-		d, err := tun.CreateTUN(ifname, mtu)
+		d, err := createTUN(name, mtu)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -146,6 +147,7 @@ type Manager struct {
 	jpath   string
 	bind    func() conn.Bind
 	isAdmin func(uint32) (bool, error)
+	users   *ipc.UserTable // Windows: SIDs to uids; nil elsewhere
 	// resolve looks up an endpoint host; mark != 0 marks its queries
 	// (SO_MARK, Linux) so they leave outside a full tunnel.
 	resolve func(ctx context.Context, host string, mark uint32) ([]netip.Addr, error)
@@ -315,13 +317,14 @@ func NewManager(o Options) *Manager {
 		jpath:       o.JournalPath,
 		bind:        o.Bind,
 		isAdmin:     o.IsAdmin,
+		users:       o.Users,
 		ops:         defaultOps,
 		agentGrace:  agentGrace,
 		ctx:         context.Background(),
 		tunnels:     map[string]*tunnel{},
 		agents:      map[*ipc.Conn]*agentState{},
 		resolve:     lookupHost,
-		fullTunnel:  runtime.GOOS == "linux" || runtime.GOOS == "darwin",
+		fullTunnel:  runtime.GOOS == "linux" || runtime.GOOS == "darwin" || runtime.GOOS == "windows",
 		netSource:   netmon.NewSource,
 		netDebounce: netDebounce,
 		verifyEvery: o.VerifyEvery,
@@ -387,6 +390,14 @@ func (m *Manager) Serve(ctx context.Context) error {
 	m.mu.Lock()
 	m.ctx = ctx
 	m.mu.Unlock()
+	// Nothing below may be read from a data directory that is not safe:
+	// the journal holds commands to run as SYSTEM.
+	if err := datadir.Secure(); err != nil {
+		return err
+	}
+	if m.users == nil {
+		m.users = ipc.Users()
+	}
 	// Undo what a crashed run left in the system before anything is
 	// loaded, except an active kill switch: it keeps blocking (fail
 	// closed) until its tunnels are taken down.
@@ -821,7 +832,7 @@ func (m *Manager) handle(c *ipc.Conn) {
 		if err := decode(params, &p); err != nil {
 			return nil, err
 		}
-		return nil, m.add(p.Name, p.Config, p.Owner)
+		return nil, m.add(p.Name, p.Config, addOwner(p.Owner, c.ElevatedUser()))
 	})
 	c.Handle(ipc.MethodTunnelRemove, func(_ context.Context, uid uint32, params json.RawMessage) (any, error) {
 		if !m.admin(uid) {
@@ -880,6 +891,7 @@ func (m *Manager) handle(c *ipc.Conn) {
 		return m.setPolicy(p)
 	})
 	m.handleNetwork(c)
+	m.handleUsers(c)
 }
 
 // add stores a new tunnel and its policy: the default one, with owner (the
@@ -2669,7 +2681,7 @@ func (m *Manager) startKillSwitch(held, recovered bool) {
 		}
 	default:
 		// A record left behind by a run whose kill switch is gone
-		// (a reboot clears the journal).
+		// (a reboot clears the journal on Unix).
 		if err := m.store.removeKillSwitchTunnels(); err != nil {
 			log.Printf("daemon: kill switch: removing a stale record of its tunnels: %v", err)
 		}

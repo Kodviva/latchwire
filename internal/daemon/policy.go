@@ -137,7 +137,7 @@ func (s *store) loadPolicy(name string) (Policy, error) {
 	switch {
 	case !fi.Mode().IsRegular():
 		return Policy{}, fmt.Errorf("%s: not a regular file", p)
-	case fi.Mode().Perm()&0o022 != 0:
+	case writableByOthers(fi):
 		return Policy{}, fmt.Errorf("%s: writable by group or others (mode %v)", p, fi.Mode().Perm())
 	case fi.Size() > maxPolicyFile:
 		return Policy{}, fmt.Errorf("%s: larger than %d bytes", p, maxPolicyFile)

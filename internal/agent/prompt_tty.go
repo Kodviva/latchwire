@@ -11,6 +11,7 @@ import (
 
 	"github.com/Kodviva/latchwire/internal/keyprovider"
 	"github.com/Kodviva/latchwire/internal/msg"
+	"github.com/Kodviva/latchwire/internal/ttyio"
 )
 
 // ttyPrompter asks on the controlling terminal (/dev/tty) with echo off.
@@ -22,14 +23,14 @@ type ttyPrompter struct{}
 func NewTTYPrompter() Prompter { return ttyPrompter{} }
 
 func (ttyPrompter) PIN(d keyprovider.Description, retriesLeft int) (string, error) {
-	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	tty, err := ttyio.Open()
 	if err != nil {
 		return "", errors.New(msg.AgentNoTTY)
 	}
 	defer tty.Close()
-	fmt.Fprintf(tty, msg.AgentPINPromptFmt, d.Serial, d.Slot, retriesLeft)
-	b, err := term.ReadPassword(int(tty.Fd()))
-	fmt.Fprintln(tty)
+	fmt.Fprintf(tty.Out, msg.AgentPINPromptFmt, d.Serial, d.Slot, retriesLeft)
+	b, err := term.ReadPassword(int(tty.In.Fd()))
+	fmt.Fprintln(tty.Out)
 	defer clear(b)
 	if err != nil {
 		// The error is about the terminal; it never contains input.
@@ -40,7 +41,7 @@ func (ttyPrompter) PIN(d keyprovider.Description, retriesLeft int) (string, erro
 
 func (ttyPrompter) Warn(m string) {
 	var w io.Writer = os.Stderr
-	if tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0); err == nil {
+	if tty, err := ttyio.OpenOutput(); err == nil {
 		defer tty.Close()
 		w = tty
 	}

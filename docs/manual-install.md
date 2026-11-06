@@ -99,6 +99,31 @@ Remove:
     sudo rm /etc/systemd/user/latchwire-agent.service /etc/systemd/system/latchwire-daemon.service
     sudo systemctl daemon-reload
 
+## Windows
+
+**This has never been run:** see section 17 of the
+[hardware checklist](hardware-checklist.md).
+
+Put `latchwire.exe` and `wintun.dll` in a folder only administrators can write,
+such as `C:\Program Files\Latchwire`: the service runs from it as SYSTEM and
+loads the DLL from there. In an elevated prompt:
+
+```
+latchwire service install
+```
+
+That claims `%ProgramData%\Latchwire` and starts the `Latchwire` service.
+Administrator commands (`add`, `remove`, `policy` with changes) need an elevated
+prompt, the counterpart of `sudo`. To run the agent at logon as the user, with
+no console:
+
+```
+schtasks /create /tn "Latchwire agent" /sc onlogon /rl limited /tr "\"C:\Program Files\Latchwire\latchwire.exe\" agent"
+```
+
+The task's console may flash at logon until packaging provides a build without
+one. To remove the service, keeping tunnels: `latchwire service uninstall`.
+
 ## Upgrading from an earlier version (Plan 1)
 
 Two things change for tunnels stored by a version without tunnel policies

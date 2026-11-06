@@ -443,3 +443,68 @@ func TestMACFromNeighbours(t *testing.T) {
 		t.Errorf("linux: %q", got)
 	}
 }
+
+const windowsRoutes = `IPv4 Route Table
+===========================================================================
+Active Routes:
+Network Destination        Netmask          Gateway       Interface  Metric
+          0.0.0.0          0.0.0.0      192.168.1.1     192.168.1.5     35
+`
+
+const windowsArp = `
+Interface: 192.168.1.5 --- 0xc
+  Internet Address      Physical Address      Type
+  192.168.1.1           a4-2b-b0-01-02-03     dynamic
+`
+
+func TestNetworkIDWindows(t *testing.T) {
+	r := &scriptedRunner{out: map[string]string{"route print -4": windowsRoutes, "arp -a 192.168.1.1": windowsArp}}
+	got, err := networkID(context.Background(), r, "windows")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The same gateway read on Linux gives the same ID.
+	linux := &scriptedRunner{out: map[string]string{
+		"ip route show default":     linuxRoute,
+		"ip neigh show 192.168.1.1": linuxNeigh,
+	}}
+	want, err := networkID(context.Background(), linux, "linux")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want || len(got) != 16 {
+		t.Fatalf("%q, %q", got, want)
+	}
+}
+
+func TestNetworkIDWindowsLocalized(t *testing.T) {
+	r := &scriptedRunner{out: map[string]string{
+		"route print -4":     "Aktive Routen:\n Netzwerkziel Netzwerkmaske Gateway Schnittstelle Metrik\n 0.0.0.0 0.0.0.0 192.168.1.1 192.168.1.5 25\n",
+		"arp -a 192.168.1.1": "Schnittstelle: 192.168.1.5 --- 0xc\n  Internetadresse  Physische Adresse  Typ\n  192.168.1.1  a4-2b-b0-01-02-03  dynamisch\n",
+	}}
+	got, err := networkID(context.Background(), r, "windows")
+	if err != nil || got == NoNetwork || got == UnknownNetwork {
+		t.Fatal(got, err)
+	}
+}
+
+func TestNetworkIDWindowsNoGateway(t *testing.T) {
+	r := &scriptedRunner{out: map[string]string{"route print -4": "Active Routes:\nNone\n"}}
+	if got, err := networkID(context.Background(), r, "windows"); err != nil || got != NoNetwork {
+		t.Fatal(got, err)
+	}
+}
+
+func TestNetworkIDWindowsNoNeighbour(t *testing.T) {
+	r := &scriptedRunner{out: map[string]string{"route print -4": windowsRoutes, "arp -a 192.168.1.1": "No ARP Entries Found.\n"}}
+	if got, err := networkID(context.Background(), r, "windows"); err != nil || got != UnknownNetwork {
+		t.Fatal(got, err)
+	}
+}
+
+func TestNetworkIDWindowsArpOfOtherHostIgnored(t *testing.T) {
+	r := &scriptedRunner{out: map[string]string{"route print -4": windowsRoutes, "arp -a 192.168.1.1": "  192.168.1.9  a4-2b-b0-01-02-03  dynamic\n"}}
+	if got, _ := networkID(context.Background(), r, "windows"); got != UnknownNetwork {
+		t.Fatal(got)
+	}
+}

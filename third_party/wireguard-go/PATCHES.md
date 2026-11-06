@@ -50,6 +50,17 @@ exclusive lock, as upstream `SetPrivateKey` did for its DH.
   `staticIdentity.privateKey` now use `staticIdentity.publicKey` and
   `staticIdentity.key.(softStaticKey).sk`.
 
+- `ipc/namedpipe/namedpipe.go`: `DialConfig.Identification` (a new option,
+  off by default). `tryDialPipe` takes the impersonation level instead of the
+  fixed `SECURITY_ANONYMOUS`, and the access mask instead of the fixed
+  `GENERIC_READ|GENERIC_WRITE`. Reason: the Latchwire daemon identifies each
+  client from its token (`ImpersonateNamedPipeClient`, `OpenThreadToken`),
+  which an anonymous client does not have, and its pipe grants clients write
+  access without `FILE_CREATE_PIPE_INSTANCE`, which `GENERIC_WRITE` holds on a
+  pipe and which would let a client serve the pipe itself.
+  `SECURITY_IDENTIFICATION` lets the server read who the client is but not act
+  as it.
+
 ## Not changed
 
 - UAPI `private_key=` (set) still installs a software key, replacing any other

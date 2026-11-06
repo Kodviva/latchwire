@@ -13,12 +13,15 @@ import (
 
 	"github.com/Kodviva/latchwire/internal/keyprovider"
 	"github.com/Kodviva/latchwire/internal/msg"
+	"github.com/Kodviva/latchwire/internal/ttyio"
 )
 
 // PIN prompts without a terminal. When the agent runs as a login item
-// (launchd LaunchAgent, systemd user unit) it has no controlling terminal,
-// so the PIN is asked with the desktop's own dialog program: osascript on
-// macOS, pinentry on Linux. Rules for these dialogs:
+// (launchd LaunchAgent, systemd user unit, a logon task) it has no terminal
+// the user can see, so the PIN is asked with the desktop's own dialog
+// program: osascript on macOS, pinentry on Linux, and on Windows a window of
+// its own, since Windows has no such program (prompt_windows.go; of the
+// rules below, the last two apply). Rules for these dialogs:
 //   - The PIN never appears in a child's arguments or environment. The
 //     osascript program comes on stdin and only non-secret display text is
 //     passed as arguments; the PIN comes back on the child's stdout (or as
@@ -46,8 +49,8 @@ const (
 )
 
 // NewPrompter returns the Prompter for the way the agent was started: the
-// terminal when /dev/tty can be opened (started from a shell), otherwise
-// the system's PIN dialog (osascript on macOS, pinentry on Linux).
+// terminal when there is one (started from a shell), otherwise the system's
+// PIN dialog (osascript on macOS, pinentry on Linux, a window on Windows).
 func NewPrompter() Prompter { return choosePrompter(haveTTY, newGUIPrompter) }
 
 func choosePrompter(tty func() bool, gui func() Prompter) Prompter {
@@ -57,15 +60,8 @@ func choosePrompter(tty func() bool, gui func() Prompter) Prompter {
 	return gui()
 }
 
-// haveTTY reports whether the controlling terminal can be opened.
-func haveTTY() bool {
-	f, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
-	if err != nil {
-		return false
-	}
-	f.Close()
-	return true
-}
+// haveTTY reports whether there is a terminal to ask on.
+func haveTTY() bool { return ttyio.Interactive() }
 
 // dialogText is the body of a PIN dialog. With one attempt left it carries
 // the last-retry warning too, since a dialog user does not see the log.
