@@ -15,9 +15,6 @@ import (
 	"time"
 )
 
-// DefaultJournalPath is where the daemon keeps its journal.
-const DefaultJournalPath = "/var/run/latchwire/journal.json"
-
 // Step is one system command. Stdin carries data that must not appear in the
 // arguments; secrets never belong in a Step, because the journal is a file.
 //
