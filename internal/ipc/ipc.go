@@ -1,7 +1,8 @@
 // Package ipc is the local transport between the Latchwire daemon, the
-// per-user agent and the CLI. One unix socket carries newline-delimited JSON
-// in both directions; every request is authorized by the peer's uid, which
-// the kernel reports for the socket.
+// per-user agent and the CLI. One unix socket (a named pipe on Windows)
+// carries newline-delimited JSON in both directions; every request is
+// authorized by the peer's uid, which the kernel reports for the socket. On
+// Windows the uid comes from the client's token: see usertable.go.
 //
 // The package is transport only. It never logs message bodies: params and
 // results can carry X25519 output.
@@ -15,7 +16,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -74,6 +74,9 @@ type Conn struct {
 	nc  net.Conn
 	r   *bufio.Reader
 	uid uint32
+	// elevatedUser is the user behind an elevated Windows client, whose uid
+	// is 0 (see classifyPeer); 0 otherwise.
+	elevatedUser uint32
 
 	wmu sync.Mutex // serialises writes
 
@@ -88,90 +91,27 @@ type Conn struct {
 	closeOnce sync.Once
 }
 
-func newConn(uc *net.UnixConn) (*Conn, error) {
-	uid, err := PeerUID(uc)
-	if err != nil {
-		uc.Close()
-		return nil, fmt.Errorf("ipc: peer credentials: %w", err)
-	}
+func newConn(nc net.Conn, uid, elevatedUser uint32) *Conn {
 	return &Conn{
-		nc:       uc,
-		r:        bufio.NewReaderSize(uc, 4096),
-		uid:      uid,
-		pending:  make(map[uint64]chan Message),
-		handlers: make(map[string]Handler),
-		inflight: make(chan struct{}, maxInflight),
-		done:     make(chan struct{}),
-	}, nil
-}
-
-// Dial connects to the unix socket at path. PeerUID of the result is the
-// server's uid, which lets a client check it is talking to root.
-func Dial(path string) (*Conn, error) {
-	d := net.Dialer{Timeout: dialTimeout}
-	nc, err := d.Dial("unix", path)
-	if err != nil {
-		return nil, err
+		nc:           nc,
+		r:            bufio.NewReaderSize(nc, 4096),
+		uid:          uid,
+		elevatedUser: elevatedUser,
+		pending:      make(map[uint64]chan Message),
+		handlers:     make(map[string]Handler),
+		inflight:     make(chan struct{}, maxInflight),
+		done:         make(chan struct{}),
 	}
-	return newConn(nc.(*net.UnixConn))
-}
-
-// Listen creates a unix socket listener at path with mode 0666; callers are
-// told apart by peer credentials, not file permissions. A stale socket file
-// (nothing accepts connections on it) is replaced. A live one, or a path that
-// is not a socket, is left untouched and an error is returned.
-func Listen(path string) (net.Listener, error) {
-	fi, err := os.Lstat(path)
-	switch {
-	case err == nil:
-		if fi.Mode()&os.ModeSocket == 0 {
-			return nil, fmt.Errorf("ipc: %s exists and is not a socket", path)
-		}
-		c, derr := net.DialTimeout("unix", path, dialTimeout)
-		if derr == nil {
-			c.Close()
-			return nil, fmt.Errorf("%w: %s", ErrAddrInUse, path)
-		}
-		if !errors.Is(derr, syscall.ECONNREFUSED) && !errors.Is(derr, syscall.ENOENT) {
-			return nil, fmt.Errorf("ipc: probing %s: %w", path, derr)
-		}
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return nil, err
-		}
-	case errors.Is(err, os.ErrNotExist):
-	default:
-		return nil, err
-	}
-
-	l, err := net.Listen("unix", path)
-	if err != nil {
-		return nil, err
-	}
-	if err := os.Chmod(path, 0o666); err != nil {
-		l.Close()
-		return nil, err
-	}
-	return l, nil
-}
-
-// Accept accepts one connection from l, which must be a unix listener, and
-// reads the peer's credentials.
-func Accept(l net.Listener) (*Conn, error) {
-	nc, err := l.Accept()
-	if err != nil {
-		return nil, err
-	}
-	uc, ok := nc.(*net.UnixConn)
-	if !ok {
-		nc.Close()
-		return nil, errors.New("ipc: not a unix connection")
-	}
-	return newConn(uc)
 }
 
 // PeerUID returns the uid of the process at the other end of c, as reported
 // by the kernel.
 func (c *Conn) PeerUID() uint32 { return c.uid }
+
+// ElevatedUser returns the uid of the user behind an elevated Windows client
+// (PeerUID 0), the counterpart of the SUDO_UID a Unix CLI sends. It is 0
+// everywhere else.
+func (c *Conn) ElevatedUser() uint32 { return c.elevatedUser }
 
 // Done is closed when the connection is closed.
 func (c *Conn) Done() <-chan struct{} { return c.done }

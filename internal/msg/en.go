@@ -344,4 +344,9 @@ are never tried automatically.`
 	NetworkUntrustableNoteFmt = "note: %s names no particular network (no default gateway, or its hardware address is not known yet) and cannot be trusted"
 	// CLIUntrustedDaemonFmt takes the uid of the socket's owner process.
 	CLIUntrustedDaemonFmt = "refusing the service socket: it is served by uid %d, not by root or this user"
+	// Windows.
+	// DataDirUntrustedFmt takes the path of the data directory.
+	DataDirUntrustedFmt = "refusing %s: it is not a directory owned by SYSTEM or Administrators; another user may have created it. Delete it as an administrator and start the service again"
+	// IPCUntrustedPipeFmt takes the SID that owns the pipe.
+	IPCUntrustedPipeFmt = "refusing the service pipe: it is owned by %s, not by SYSTEM or Administrators"
 )

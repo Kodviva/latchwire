@@ -19,6 +19,10 @@ const (
 	MethodTunnelPolicySet  = "tunnel.policy.set"
 
 	MethodNetworkCurrent = "network.current"
+
+	// Windows only: the mapping of SIDs to uids (see UserTable).
+	MethodUserID  = "user.id"
+	MethodUserSID = "user.sid"
 )
 
 // Error codes carried in Error.Code.
@@ -127,6 +131,13 @@ type TunnelPolicySet struct {
 	Untrust     []string `json:"untrust,omitempty"`
 	Allow       []uint32 `json:"allow,omitempty"`
 	Deny        []uint32 `json:"deny,omitempty"`
+}
+
+// UserInfo is the params and the result of user.id (SID set) and user.sid
+// (UID set): one entry of the daemon's user table.
+type UserInfo struct {
+	UID uint32 `json:"uid,omitempty"`
+	SID string `json:"sid,omitempty"`
 }
 
 // NetworkCurrent is the result of network.current: the ID of the network
