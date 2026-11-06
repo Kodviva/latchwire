@@ -1,0 +1,13 @@
+#!/bin/sh
+# dpkg: remove keeps the tunnels in /etc/latchwire, purge deletes them.
+set -e
+case $1 in
+remove | purge)
+	if [ -d /run/systemd/system ]; then
+		systemctl daemon-reload || :
+	fi
+	;;
+esac
+if [ "$1" = purge ]; then
+	rm -rf /etc/latchwire
+fi

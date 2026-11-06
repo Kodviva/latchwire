@@ -390,7 +390,7 @@
       }
     }
   },
-  "CLIUsage": "usage: latchwire <command> [arguments]\n\ncommands:\n  devices                       list connected YubiKeys\n  keygen --serial N [--slot 82] [--force] [--address IP]\n                                generate an X25519 key on a YubiKey\n  pubkey <keyref>               print the public key of a key on a YubiKey\n  agent                         run the user agent (asks for the PIN)\n  daemon                        run the tunnel daemon (root)\n  add <name> <file>             add a tunnel configuration (administrator)\n  remove <name>                 remove a tunnel (administrator)\n  up <name>                     connect a tunnel\n  down <name>                   disconnect a tunnel\n  status [name]                 show tunnels\n  policy <name> [--kill-switch auto|on|off] [--auto-connect=true|false]\n         [--on-demand=true|false] [--trust-network ID]\n         [--trust-current-network] [--untrust-network ID]\n         [--allow-user NAME] [--deny-user NAME]\n                                show a tunnel's policy, or change it\n                                (administrator); a trusted network is\n                                recognised only by its gateway's IP and MAC\n                                address, which anyone there can copy\n  network                       print the ID of the current network",
+  "CLIUsage": "usage: latchwire <command> [arguments]\n\ncommands:\n  devices                       list connected YubiKeys\n  keygen --serial N [--slot 82] [--force] [--address IP]\n                                generate an X25519 key on a YubiKey\n  pubkey <keyref>               print the public key of a key on a YubiKey\n  agent                         run the user agent (asks for the PIN)\n  daemon                        run the tunnel daemon (root)\n  add <name> <file>             add a tunnel configuration (administrator)\n  remove <name>                 remove a tunnel (administrator)\n  up <name>                     connect a tunnel\n  down <name>                   disconnect a tunnel\n  status [name]                 show tunnels\n  policy <name> [--kill-switch auto|on|off] [--auto-connect=true|false]\n         [--on-demand=true|false] [--trust-network ID]\n         [--trust-current-network] [--untrust-network ID]\n         [--allow-user NAME] [--deny-user NAME]\n                                show a tunnel's policy, or change it\n                                (administrator); a trusted network is\n                                recognised only by its gateway's IP and MAC\n                                address, which anyone there can copy\n  network                       print the ID of the current network\n  version                       print the version of this program",
   "@CLIUsage": {
     "section": "Command line. None of these formats take a PIN, PUK or key; the ones that\nshow a public key say so in their name."
   },
@@ -827,5 +827,59 @@
   "UITrayDisconnect": "Disconnect {name}",
   "UITrayConnected": "{count, plural, =0 {No tunnel connected} one {# tunnel connected} other {# tunnels connected}}",
   "UIQuitTitle": "Quit Latchwire?",
-  "UIQuitBody": "{count, plural, one {# tunnel is connected.} other {# tunnels are connected.}} Quitting stops the key agent, and connected tunnels close about 10 seconds later."
+  "UIQuitBody": "{count, plural, one {# tunnel is connected.} other {# tunnels are connected.}} Quitting stops the key agent, and connected tunnels close about 10 seconds later.",
+  "VersionFmt": "latchwire {version} ({commit}, {goversion} {goos}/{goarch})",
+  "@VersionFmt": {
+    "description": "VersionFmt: version, commit, Go version, operating system, architecture."
+  },
+  "DataDirUntrustedFmt": "refusing {path}: it is not a directory owned by SYSTEM or Administrators; another user may have created it. Delete it as an administrator and start the service again",
+  "@DataDirUntrustedFmt": {
+    "description": "DataDirUntrustedFmt takes the path of the data directory."
+  },
+  "IPCUntrustedPipeFmt": "refusing the service pipe: it is owned by {sid}, not by SYSTEM or Administrators",
+  "@IPCUntrustedPipeFmt": {
+    "description": "IPCUntrustedPipeFmt takes the SID that owns the pipe."
+  },
+  "CLIUsageWindows": "\nWindows: run the administrator commands in an elevated prompt. The service\nruns the daemon:\n  service install               install and start the service (administrator)\n  service uninstall             stop and remove the service (administrator)",
+  "@CLIUsageWindows": {
+    "description": "CLIUsageWindows follows CLIUsage on Windows."
+  },
+  "CLIDaemonNotRunningWindows": "the Latchwire service is not running (start it from an elevated prompt with: latchwire service install, or: sc start Latchwire)",
+  "@CLIDaemonNotRunningWindows": {
+    "description": "CLIDaemonNotRunningWindows is CLIDaemonNotRunning on Windows."
+  },
+  "DaemonMustBeElevated": "the daemon creates network interfaces and must run elevated: use an administrator prompt, or the service (latchwire service install)",
+  "@DaemonMustBeElevated": {
+    "description": "DaemonMustBeElevated is DaemonMustBeRoot on Windows."
+  },
+  "ServiceInstalledFmt": "service {name} installed and started",
+  "@ServiceInstalledFmt": {
+    "description": "ServiceInstalledFmt and ServiceRemovedFmt take the service name."
+  },
+  "ServiceRemovedFmt": "service {name} stopped and removed",
+  "ServiceDisplayName": "Latchwire",
+  "@ServiceDisplayName": {
+    "description": "ServiceDisplayName and ServiceDescription are shown in services.msc."
+  },
+  "ServiceDescription": "Keeps WireGuard-compatible tunnels whose key stays on a YubiKey",
+  "ServiceSynopsis": "service install|uninstall",
+  "@ServiceSynopsis": {
+    "description": "ServiceSynopsis is the usage line of the service command."
+  },
+  "WintunMissingFmt": "cannot load wintun.dll, which must sit next to latchwire.exe: {err}",
+  "@WintunMissingFmt": {
+    "placeholders": {
+      "err": {
+        "verb": "%v"
+      }
+    }
+  },
+  "PolicyNoSuchUser": "no such user",
+  "@PolicyNoSuchUser": {
+    "description": "PolicyNoSuchUser: no user has that uid."
+  },
+  "ServiceLocationFmt": "refusing to install {path} as a service: it would run as SYSTEM, so it must be under Program Files, where only administrators can write",
+  "@ServiceLocationFmt": {
+    "description": "ServiceLocationFmt takes the path of the program."
+  }
 }

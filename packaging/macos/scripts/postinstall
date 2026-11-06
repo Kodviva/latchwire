@@ -1,0 +1,6 @@
+#!/bin/sh
+# $3 is the target volume. Installing onto another volume starts nothing:
+# launchd there is not running.
+[ "$3" = / ] || exit 0
+/bin/sh /usr/local/latchwire/lifecycle.sh post-install
+exit 0

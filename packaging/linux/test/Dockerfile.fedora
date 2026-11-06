@@ -1,0 +1,8 @@
+# Boots systemd for packaging/linux/test/run.sh. systemd-resolved handles DNS.
+FROM fedora:latest
+RUN dnf install -y -q --setopt=install_weak_deps=False \
+    systemd systemd-pam systemd-resolved dbus-daemon iputils iproute pcsc-lite procps-ng util-linux \
+    && systemctl enable systemd-resolved \
+    && rm -f /etc/machine-id
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]

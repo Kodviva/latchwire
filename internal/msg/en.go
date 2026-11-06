@@ -219,7 +219,8 @@ commands:
                                 (administrator); a trusted network is
                                 recognised only by its gateway's IP and MAC
                                 address, which anyone there can copy
-  network                       print the ID of the current network`
+  network                       print the ID of the current network
+  version                       print the version of this program`
 	CLIUnknownCommandFmt = "unknown command %q"
 	CLIUsageErrorFmt     = "usage: latchwire %s"
 	CLIErrorFmt          = "latchwire: %v"
@@ -334,7 +335,8 @@ are never tried automatically.`
 	NetworkUntrustableNoteFmt = "note: %s names no particular network (no default gateway, or its hardware address is not known yet) and cannot be trusted"
 	// CLIUntrustedDaemonFmt takes the uid of the socket's owner process.
 	CLIUntrustedDaemonFmt = "refusing the service socket: it is served by uid %d, not by root or this user"
-	// Windows.
+	// VersionFmt: version, commit, Go version, operating system, architecture.
+	VersionFmt = "latchwire %s (%s, %s %s/%s)"
 	// DataDirUntrustedFmt takes the path of the data directory.
 	DataDirUntrustedFmt = "refusing %s: it is not a directory owned by SYSTEM or Administrators; another user may have created it. Delete it as an administrator and start the service again"
 	// IPCUntrustedPipeFmt takes the SID that owns the pipe.
@@ -356,8 +358,7 @@ runs the daemon:
 	ServiceDisplayName = "Latchwire"
 	ServiceDescription = "Keeps WireGuard-compatible tunnels whose key stays on a YubiKey"
 	// ServiceSynopsis is the usage line of the service command.
-	ServiceSynopsis = "service install|uninstall"
-	// WintunMissingFmt takes the system's error.
+	ServiceSynopsis  = "service install|uninstall"
 	WintunMissingFmt = "cannot load wintun.dll, which must sit next to latchwire.exe: %v"
 	// PolicyNoSuchUser: no user has that uid.
 	PolicyNoSuchUser = "no such user"

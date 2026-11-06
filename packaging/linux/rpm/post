@@ -1,0 +1,8 @@
+#!/bin/sh
+# rpm: $1 is the number of installed versions after this one: 1 on a first
+# installation.
+if [ "$1" -eq 1 ]; then
+	sh /usr/lib/latchwire/lifecycle.sh post-install
+else
+	sh /usr/lib/latchwire/lifecycle.sh post-upgrade
+fi

@@ -1,0 +1,23 @@
+# Homebrew cask, filled in by packaging/macos/render-cask.sh for a release.
+cask "latchwire" do
+  version "@VERSION@"
+  sha256 "@SHA256@"
+
+  url "https://github.com/Kodviva/latchwire/releases/download/v#{version}/latchwire-#{version}.pkg"
+  name "Latchwire"
+  desc "WireGuard-compatible client that keeps the static key in a YubiKey"
+  homepage "https://latchwire.com/"
+
+  depends_on macos: :ventura
+
+  pkg "latchwire-#{version}.pkg"
+
+  uninstall script:  {
+              executable: "/usr/local/latchwire/lifecycle.sh",
+              args:       ["uninstall"],
+              sudo:       true,
+            },
+            pkgutil: "com.latchwire.pkg"
+
+  zap delete: "/Library/Application Support/Latchwire"
+end

@@ -1,0 +1,6 @@
+#!/bin/sh
+# rpm: $1 is 0 on a removal; on an upgrade the old package's script runs with
+# 1 and post has already decided.
+if [ "$1" -eq 0 ]; then
+	sh /usr/lib/latchwire/lifecycle.sh pre-remove
+fi

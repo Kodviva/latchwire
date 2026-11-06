@@ -1,0 +1,10 @@
+#!/bin/sh
+# dpkg: configure <previous version>. preinst says whether this is an upgrade.
+set -e
+[ "$1" = configure ] || exit 0
+if [ -e /run/latchwire-upgrading ]; then
+	rm -f /run/latchwire-upgrading
+	sh /usr/lib/latchwire/lifecycle.sh post-upgrade
+else
+	sh /usr/lib/latchwire/lifecycle.sh post-install
+fi

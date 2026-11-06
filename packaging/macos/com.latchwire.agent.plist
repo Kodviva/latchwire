@@ -3,7 +3,8 @@
 <!--
   Latchwire user agent: holds the YubiKey and asks for its PIN (osascript
   dialog). Runs in each GUI login session as that user.
-  Install: /Library/LaunchAgents/com.latchwire.agent.plist (root:wheel 0644).
+  The .pkg rewrites the binary path to /usr/local/latchwire/bin/latchwire.
+  By hand: /Library/LaunchAgents/com.latchwire.agent.plist (root:wheel 0644).
   See docs/manual-install.md.
 -->
 <plist version="1.0">

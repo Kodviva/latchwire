@@ -1,0 +1,5 @@
+#!/bin/sh
+# rpm has no purge: /etc/latchwire stays, see docs/manual-install.md.
+if [ -d /run/systemd/system ]; then
+	systemctl daemon-reload || :
+fi
