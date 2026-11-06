@@ -349,4 +349,26 @@ are never tried automatically.`
 	DataDirUntrustedFmt = "refusing %s: it is not a directory owned by SYSTEM or Administrators; another user may have created it. Delete it as an administrator and start the service again"
 	// IPCUntrustedPipeFmt takes the SID that owns the pipe.
 	IPCUntrustedPipeFmt = "refusing the service pipe: it is owned by %s, not by SYSTEM or Administrators"
+	// CLIUsageWindows follows CLIUsage on Windows.
+	CLIUsageWindows = `
+Windows: run the administrator commands in an elevated prompt. The service
+runs the daemon:
+  service install               install and start the service (administrator)
+  service uninstall             stop and remove the service (administrator)`
+	// CLIDaemonNotRunningWindows is CLIDaemonNotRunning on Windows.
+	CLIDaemonNotRunningWindows = "the Latchwire service is not running (start it from an elevated prompt with: latchwire service install, or: sc start Latchwire)"
+	// DaemonMustBeElevated is DaemonMustBeRoot on Windows.
+	DaemonMustBeElevated = "the daemon creates network interfaces and must run elevated: use an administrator prompt, or the service (latchwire service install)"
+	// ServiceInstalledFmt and ServiceRemovedFmt take the service name.
+	ServiceInstalledFmt = "service %s installed and started"
+	ServiceRemovedFmt   = "service %s stopped and removed"
+	// ServiceDisplayName and ServiceDescription are shown in services.msc.
+	ServiceDisplayName = "Latchwire"
+	ServiceDescription = "Keeps WireGuard-compatible tunnels whose key stays on a YubiKey"
+	// ServiceSynopsis is the usage line of the service command.
+	ServiceSynopsis = "service install|uninstall"
+	// WintunMissingFmt takes the system's error.
+	WintunMissingFmt = "cannot load wintun.dll, which must sit next to latchwire.exe: %v"
+	// PolicyNoSuchUser: no user has that uid.
+	PolicyNoSuchUser = "no such user"
 )
