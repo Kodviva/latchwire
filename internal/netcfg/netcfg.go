@@ -1,9 +1,10 @@
 // Package netcfg configures a tunnel interface's addresses and routes by
 // running the platform's network commands (ifconfig/route on macOS, ip on
-// Linux). Linux routes full tunnels (0.0.0.0/0, ::/0) with fwmark policy
-// routing; macOS with /1 routes and endpoint host routes that follow the
-// default gateway (Refresh). DNS goes through systemd-resolved or resolvconf
-// (Linux), or configd's dynamic store with scutil (macOS).
+// Linux, netsh on Windows). Linux routes full tunnels (0.0.0.0/0, ::/0) with
+// fwmark policy routing; macOS and Windows with /1 routes and endpoint host
+// routes that follow the default gateway (Refresh). DNS goes through
+// systemd-resolved or resolvconf (Linux), configd's dynamic store with
+// scutil (macOS), or interface servers and NRPT rules (Windows).
 //
 // Every change to the system is written to a Journal before it is made, so
 // that a crash leaves the commands that undo it; Cleanup runs them at start.
@@ -100,12 +101,16 @@ type Configurer interface {
 // macOS endpoint host route: Refresh moves it, and a route to the endpoint
 // that exists already is left alone (the step is skipped). dnsPrimary marks
 // the macOS step that writes the primary service's DNS: Refresh moves it.
+// onFail, when set, decides about a failed step: a nil result skips it like
+// a host route left alone, any other error stands (Windows, whose tools
+// give no error text worth reading).
 type step struct {
 	do         Step
 	undo       *Step
 	missing    string
 	hostRoute  bool
 	dnsPrimary bool
+	onFail     func(ctx context.Context, r Runner, do Step, err error) error
 }
 
 // planner turns a Plan into the commands for one platform.
@@ -134,8 +139,9 @@ type configurer struct {
 	// carried are persistent undo steps an earlier configurer of the same
 	// owner could not run; they stay journaled ahead of this one's.
 	carried []Step
-	dn      darwinFollow     // macOS: what Refresh follows
-	now     func() time.Time // nil: time.Now
+	dn      darwinFollow       // macOS, Windows: what Refresh follows
+	now     func() time.Time   // nil: time.Now
+	ifaces  func() []ifaceInfo // Windows: the interfaces
 	// dnsPlan is the applied Plan's DNS part (Iface, DNS, DNSSearch,
 	// DNSRole) and dnsHow its Applied.DNS, for SetDNSRole.
 	dnsPlan Plan
@@ -172,6 +178,7 @@ func (c *configurer) Apply(ctx context.Context, p Plan) (Applied, error) {
 		return Applied{}, err
 	}
 	c.dn = darwinFollow{iface: p.Iface, mtu: p.MTU, mtuAuto: p.MTUAuto}
+	c.dn.fam[0], c.dn.fam[1] = planFamilies(p)
 	res := Applied{MTU: p.MTU, FullTunnel: full}
 	steps := c.plan(p)
 	if full {
@@ -382,6 +389,10 @@ func (c *configurer) applyStepLocked(ctx context.Context, s step) (ran bool, err
 		switch {
 		case s.missing != "" && errors.Is(err, exec.ErrNotFound):
 			log.Print(s.missing)
+		case s.onFail != nil:
+			if err := s.onFail(ctx, c.run, s.do, err); err != nil {
+				return false, err
+			}
 		case s.hostRoute && routeExists(err):
 			retry, herr := existingHostRoute(ctx, c.run, s.do, c.dn.iface)
 			if herr != nil {
@@ -587,8 +598,10 @@ func releasePrimaryDNSUnless(owner string, left []Step) {
 // isDNSUndo reports whether s undoes a DNS change.
 func isDNSUndo(s Step) bool {
 	switch s.Name {
-	case scutilCmd, "resolvectl", "resolvconf":
+	case scutilCmd, "resolvectl", "resolvconf", regCmd, "ipconfig":
 		return true
+	case netshCmd:
+		return slices.Contains(s.Args, "dnsservers")
 	}
 	return false
 }

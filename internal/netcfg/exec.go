@@ -57,7 +57,9 @@ func (e execRunner) RunCombined(ctx context.Context, name string, args []string,
 }
 
 func (e execRunner) run(ctx context.Context, name string, args []string, stdin []byte, combined bool) ([]byte, error) {
-	if name == "" || strings.ContainsRune(name, filepath.Separator) {
+	// Windows takes either slash and drive-relative names: a command name
+	// is a bare name on every system.
+	if name == "" || strings.ContainsAny(name, `/\:`) {
 		return nil, fmt.Errorf("%s: %w", name, exec.ErrNotFound)
 	}
 	if fn := builtin(name); fn != nil {

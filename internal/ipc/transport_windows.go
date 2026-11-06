@@ -37,7 +37,14 @@ const (
 	// logons are not authenticated users and the pipe rejects remote
 	// clients (FILE_PIPE_REJECT_REMOTE_CLIENTS, set by namedpipe). The
 	// default integrity label keeps out low-integrity processes.
-	pipeDACL = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)"
+	//
+	// 0x0012019B is FILE_GENERIC_READ | FILE_GENERIC_WRITE without
+	// FILE_APPEND_DATA, which on a pipe means FILE_CREATE_PIPE_INSTANCE.
+	// GW would hold it, and a user could then add an instance of this pipe
+	// and answer its clients, whose owner check would still pass: the
+	// owner belongs to the pipe, not to the instance. Dial asks for no
+	// more than this.
+	pipeDACL = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x0012019B;;;AU)"
 )
 
 var impersonateNamedPipeClient = windows.NewLazySystemDLL("advapi32.dll").NewProc("ImpersonateNamedPipeClient")

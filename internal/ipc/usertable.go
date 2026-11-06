@@ -27,6 +27,8 @@ const (
 	firstUserID = 1000
 	// maxUsers bounds the table. Only accounts that can log on get here.
 	maxUsers = 4096
+	// maxUserID keeps Next far from wrapping around to a used number.
+	maxUserID = 1 << 31
 
 	systemSID = "S-1-5-18"
 )
@@ -85,7 +87,7 @@ func (f *userTableFile) validate() error {
 	if f.Version != userTableVersion {
 		return fmt.Errorf("unsupported version %d", f.Version)
 	}
-	if f.Next < firstUserID || len(f.Users) > maxUsers {
+	if f.Next < firstUserID || f.Next > maxUserID || len(f.Users) > maxUsers {
 		return errors.New("bad counters")
 	}
 	seen := map[uint32]bool{}
@@ -132,7 +134,7 @@ func (t *UserTable) Assign(sid string) (uint32, error) {
 	if id, ok := t.f.Users[sid]; ok {
 		return id, nil
 	}
-	if len(t.f.Users) >= maxUsers {
+	if len(t.f.Users) >= maxUsers || t.f.Next >= maxUserID {
 		return 0, fmt.Errorf("%w: full", ErrUserTable)
 	}
 	id := t.f.Next

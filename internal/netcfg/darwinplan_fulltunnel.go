@@ -343,6 +343,9 @@ func undoTargetOurs(ctx context.Context, r Runner, s Step) (bool, error) {
 	if s.Name == scutilCmd {
 		return scutilUndoOurs(ctx, r, s)
 	}
+	if s.Name == netshCmd || s.Name == regCmd {
+		return windowsUndoOurs(ctx, r, s), nil
+	}
 	var (
 		want  netip.Prefix
 		query string
@@ -445,6 +448,9 @@ type darwinFollow struct {
 	eps  [2][]netip.Addr
 	gw   [2]netip.Addr
 	phys [2]string
+	// fam says which families the tunnel uses (Windows sets the MTU per
+	// family).
+	fam [2]bool
 	// failGW is the gateway a move to failed at failAt (failed set): it
 	// is not tried again before moveBackoff.
 	failed [2]bool
