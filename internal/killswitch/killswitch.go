@@ -3,8 +3,8 @@
 // the tunnels' endpoints and what a link needs to come up (DHCP, IPv6
 // neighbour discovery and MLD) pass; DNS goes through the tunnels only.
 // Linux uses one nftables table (inet latchwire), macOS one pf anchor
-// (com.apple/250.latchwire) and an enable reference of its own; other
-// platforms have none.
+// (com.apple/250.latchwire) and an enable reference of its own, Windows WFP
+// filters in a sublayer of their own; other platforms have none.
 //
 // Every change is journaled (owner JournalOwner) before it is made, so a
 // crash leaves the command that removes the rules; whether startup keeps or
