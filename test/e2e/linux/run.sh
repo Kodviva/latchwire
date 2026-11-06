@@ -8,7 +8,7 @@
 # Run it from the repository root on the host:
 #
 #   docker run --rm --privileged --cap-add NET_ADMIN -v "$PWD":/src -w /src \
-#       golang:1.25 bash test/e2e/linux/run.sh
+#       golang:1.27 bash test/e2e/linux/run.sh
 #
 # Never add --network host, --pid host or other mounts: the test assumes
 # that the container's network and mount namespaces are its own.
