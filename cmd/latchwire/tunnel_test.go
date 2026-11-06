@@ -194,7 +194,7 @@ func TestDaemonNotRunning(t *testing.T) {
 	if code := run(context.Background(), te.env, []string{"status"}); code != 1 {
 		t.Fatalf("exit %d", code)
 	}
-	if !strings.Contains(te.errOut.String(), msg.CLIDaemonNotRunning) {
+	if !strings.Contains(te.errOut.String(), daemonNotRunning) {
 		t.Errorf("stderr: %s", te.errOut)
 	}
 }
@@ -305,7 +305,7 @@ func TestDaemonRefusesNonRoot(t *testing.T) {
 	if started {
 		t.Error("daemon started as non-root")
 	}
-	if !strings.Contains(te.errOut.String(), msg.DaemonMustBeRoot) {
+	if !strings.Contains(te.errOut.String(), daemonMustBeRoot) {
 		t.Errorf("stderr: %s", te.errOut)
 	}
 

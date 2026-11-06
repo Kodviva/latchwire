@@ -23,6 +23,7 @@ import (
 	"github.com/Kodviva/latchwire/internal/agent"
 	"github.com/Kodviva/latchwire/internal/config"
 	"github.com/Kodviva/latchwire/internal/ipc"
+	"github.com/Kodviva/latchwire/internal/ipc/ipctest"
 	"github.com/Kodviva/latchwire/internal/keyref"
 	"github.com/Kodviva/latchwire/internal/killswitch"
 	"github.com/Kodviva/latchwire/internal/msg"
@@ -264,6 +265,9 @@ func TestLoadPolicy(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if runtime.GOOS == "windows" {
+		return // no mode bits: the data directory's ACL protects the file
+	}
 	if err := os.Chmod(path, 0o666); err != nil {
 		t.Fatal(err)
 	}
@@ -453,7 +457,7 @@ func TestStartupKeepsKillSwitchBlocking(t *testing.T) {
 	}
 	r := &cmdRunner{}
 	fw := &fakeFirewall{}
-	m := NewManager(Options{Socket: filepath.Join(dir, "s"), StoreDir: stdir, JournalPath: jpath, Runner: r,
+	m := NewManager(Options{Socket: ipctest.Path(t), StoreDir: stdir, JournalPath: jpath, Runner: r,
 		TUN: (&netFactory{}).make, Firewall: fw})
 	serveManager(t, m)
 
@@ -524,7 +528,7 @@ func TestStartupUnusableRecordReleases(t *testing.T) {
 		t.Fatal(err)
 	}
 	fw := &fakeFirewall{}
-	m := NewManager(Options{Socket: filepath.Join(dir, "s"), StoreDir: stdir, JournalPath: jpath,
+	m := NewManager(Options{Socket: ipctest.Path(t), StoreDir: stdir, JournalPath: jpath,
 		Runner: &cmdRunner{}, TUN: (&netFactory{}).make, Firewall: fw})
 	serveManager(t, m)
 	if sets := fw.all(); len(sets) != 1 || sets[0].Block {
@@ -542,7 +546,7 @@ func TestLoadKillSwitchTunnels(t *testing.T) {
 		t.Fatal(err)
 	}
 	fi, err := os.Stat(filepath.Join(s.dir, ksTunnelsFile))
-	if err != nil || fi.Mode().Perm() != 0o600 {
+	if err != nil || (runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600) {
 		t.Fatalf("record mode %v, %v; want 0600", fi.Mode(), err)
 	}
 	if got, err := s.loadKillSwitchTunnels(); err != nil || !slices.Equal(got, want) {
@@ -564,6 +568,9 @@ func TestLoadKillSwitchTunnels(t *testing.T) {
 	}
 	if err := os.WriteFile(p, []byte(`{"version":1,"tunnels":[]}`), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	if runtime.GOOS == "windows" {
+		return // no mode bits: the data directory's ACL protects the file
 	}
 	if err := os.Chmod(p, 0o666); err != nil {
 		t.Fatal(err)
@@ -612,7 +619,7 @@ func TestRestartRestoresKillSwitchTunnelAndReconnects(t *testing.T) {
 		t.Fatal(err)
 	}
 	fw := &fakeFirewall{}
-	sock := filepath.Join(dir, "s")
+	sock := ipctest.Path(t)
 	m := NewManager(Options{Socket: sock, StoreDir: stdir, JournalPath: jpath, Runner: &cmdRunner{},
 		TUN: (&netFactory{addrs: []netip.Addr{netip.MustParseAddr("10.0.0.2")}}).make, Firewall: fw,
 		IsAdmin: func(uint32) (bool, error) { return false, nil }})
@@ -822,7 +829,7 @@ func TestStartupWithoutKillSwitchLeavesFirewall(t *testing.T) {
 		t.Fatal(err)
 	}
 	fw := &fakeFirewall{}
-	m := NewManager(Options{Socket: filepath.Join(dir, "s"), StoreDir: stdir, JournalPath: filepath.Join(dir, "journal.json"),
+	m := NewManager(Options{Socket: ipctest.Path(t), StoreDir: stdir, JournalPath: filepath.Join(dir, "journal.json"),
 		Runner: &cmdRunner{}, TUN: (&netFactory{}).make, Firewall: fw})
 	stop := serveManager(t, m)
 	m.mu.Lock()
@@ -854,7 +861,7 @@ func TestStartupReleasesKillSwitchAfterCorruptJournal(t *testing.T) {
 	stdir := filepath.Join(dir, "tunnels")
 	writeFullTunnel(t, stdir, [32]byte{1})
 	fw := &fakeFirewall{}
-	m := NewManager(Options{Socket: filepath.Join(dir, "s"), StoreDir: stdir, JournalPath: jpath,
+	m := NewManager(Options{Socket: ipctest.Path(t), StoreDir: stdir, JournalPath: jpath,
 		Runner: &cmdRunner{}, TUN: (&netFactory{}).make, Firewall: fw})
 	serveManager(t, m)
 	if sets := fw.all(); len(sets) != 1 || sets[0].Block {
@@ -877,7 +884,7 @@ func TestStartupCorruptJournalReleasesPlatformObjects(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := &cmdRunner{}
-	m := NewManager(Options{Socket: filepath.Join(dir, "s"), StoreDir: filepath.Join(dir, "tunnels"), JournalPath: jpath,
+	m := NewManager(Options{Socket: ipctest.Path(t), StoreDir: filepath.Join(dir, "tunnels"), JournalPath: jpath,
 		Runner: r, TUN: (&netFactory{}).make})
 	serveManager(t, m)
 	r.mu.Lock()

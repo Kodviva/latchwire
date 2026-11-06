@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -423,14 +424,15 @@ func TestJournalFileMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fi.Mode().Perm() != 0o600 {
+	windows := runtime.GOOS == "windows" // no mode bits
+	if !windows && fi.Mode().Perm() != 0o600 {
 		t.Errorf("journal mode %v, want 0600", fi.Mode().Perm())
 	}
 	di, err := os.Stat(filepath.Dir(path))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if di.Mode().Perm() != 0o700 {
+	if !windows && di.Mode().Perm() != 0o700 {
 		t.Errorf("journal dir mode %v, want 0700", di.Mode().Perm())
 	}
 	// Atomic write: the temporary file was renamed away, nothing is left.
@@ -445,7 +447,7 @@ func TestJournalFileMode(t *testing.T) {
 	if err := j.Record("b", nil); err != nil {
 		t.Fatal(err)
 	}
-	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
+	if fi, _ := os.Stat(path); !windows && fi.Mode().Perm() != 0o600 {
 		t.Errorf("rewritten journal mode %v, want 0600", fi.Mode().Perm())
 	}
 	j2, err := OpenJournal(path)
@@ -562,6 +564,9 @@ func TestOpenJournalReadErrorFails(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root reads any file")
 	}
+	if runtime.GOOS == "windows" {
+		t.Skip("Chmod does not take read access away on Windows")
+	}
 	path := writeJournalFile(t, `{"version":1,"owners":{}}`)
 	if err := os.Chmod(path, 0); err != nil {
 		t.Fatal(err)
@@ -584,6 +589,9 @@ func TestOpenJournalReadErrorFails(t *testing.T) {
 // root does not own, is refused. (geteuid and trustedUID are faked so the
 // test needs no root.)
 func TestOpenJournalRejectsUntrusted(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the service's data directory is protected by its ACL, not by modes")
+	}
 	oldEuid, oldUID := geteuid, trustedUID
 	t.Cleanup(func() { geteuid, trustedUID = oldEuid, oldUID })
 	geteuid = func() int { return 0 }

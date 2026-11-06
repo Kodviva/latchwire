@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -18,6 +19,7 @@ import (
 	"golang.zx2c4.com/wireguard/tun"
 
 	"github.com/Kodviva/latchwire/internal/ipc"
+	"github.com/Kodviva/latchwire/internal/ipc/ipctest"
 	"github.com/Kodviva/latchwire/internal/keyref"
 	"github.com/Kodviva/latchwire/internal/killswitch"
 	"github.com/Kodviva/latchwire/internal/msg"
@@ -46,7 +48,7 @@ func TestPolicyDefaultsAndPersistence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fi.Mode().Perm() != 0o600 {
+	if !modeIs(fi, 0o600) {
 		t.Errorf("mode %v, want 0600", fi.Mode().Perm())
 	}
 	ents, err := os.ReadDir(s.dir)
@@ -101,7 +103,7 @@ func TestAddRecordsOwnerAsAllowedUser(t *testing.T) {
 	if want := (Policy{KillSwitch: KillSwitchAuto, AllowedUsers: []uint32{uidB}}); err != nil || !reflect.DeepEqual(p, want) {
 		t.Fatalf("policy after add: %+v, %v; want %+v", p, err, want)
 	}
-	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
+	if fi, err := os.Stat(path); err != nil || !modeIs(fi, 0o600) {
 		t.Fatalf("policy file: %v, %v", fi, err)
 	}
 	if err := e.call(ipc.MethodTunnelRemove, ipc.TunnelName{Name: tunName}, nil); err != nil {
@@ -115,7 +117,11 @@ func TestAddRecordsOwnerAsAllowedUser(t *testing.T) {
 		t.Fatal(err)
 	}
 	p, err = e.m.store.loadPolicy(tunName)
-	if want := (Policy{KillSwitch: KillSwitchAuto}); err != nil || !reflect.DeepEqual(p, want) {
+	want := Policy{KillSwitch: KillSwitchAuto}
+	if runtime.GOOS == "windows" && len(p.AllowedUsers) == 1 {
+		want.AllowedUsers = p.AllowedUsers // the user behind an elevated client
+	}
+	if err != nil || !reflect.DeepEqual(p, want) {
 		t.Fatalf("policy after add without owner: %+v, %v; want %+v", p, err, want)
 	}
 	if _, err := os.Lstat(path); err != nil {
@@ -718,7 +724,7 @@ func TestRevokeArmedErrorTunnelUnbinds(t *testing.T) {
 	if err := j.Record(killswitch.JournalOwner, []netcfg.Step{{Name: "nft", Args: []string{"-f", "-"}, Stdin: []byte("x"), Persistent: true}}); err != nil {
 		t.Fatal(err)
 	}
-	m := NewManager(Options{Socket: filepath.Join(dir, "s2"), StoreDir: e.store, JournalPath: filepath.Join(dir, "journal.json"),
+	m := NewManager(Options{Socket: ipctest.Path(t), StoreDir: e.store, JournalPath: filepath.Join(dir, "journal.json"),
 		Runner: &cmdRunner{}, TUN: (&netFactory{}).make, Firewall: &fakeFirewall{},
 		IsAdmin: func(uid uint32) (bool, error) { return onlyAdmin(uid), nil }})
 	serveManager(t, m)

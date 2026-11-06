@@ -127,11 +127,11 @@ func TestNetworkChangeSkipsDisconnected(t *testing.T) {
 	}
 }
 
-// macOS routes full tunnels too, without a routing table or fwmark; Linux
-// keeps its table.
+// macOS and Windows route full tunnels too, without a routing table or
+// fwmark; Linux keeps its table.
 func TestFullTunnelPlatforms(t *testing.T) {
 	m := NewManager(Options{})
-	if want := runtime.GOOS == "darwin" || runtime.GOOS == "linux"; m.fullTunnel != want {
+	if want := runtime.GOOS == "darwin" || runtime.GOOS == "linux" || runtime.GOOS == "windows"; m.fullTunnel != want {
 		t.Errorf("fullTunnel = %v on %s, want %v", m.fullTunnel, runtime.GOOS, want)
 	}
 	if got, want := m.pickTable != nil, runtime.GOOS == "linux"; got != want {

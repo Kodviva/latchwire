@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -206,7 +207,10 @@ func TestRunChildEnvAndCaps(t *testing.T) {
 	if lines[0] != "stdin=script-on-stdin" {
 		t.Fatalf("child read %q", lines[0])
 	}
-	gotEnv := lines[1:]
+	// os/exec adds SYSTEMROOT on Windows: a process cannot start without it.
+	gotEnv := slices.DeleteFunc(lines[1:], func(v string) bool {
+		return runtime.GOOS == "windows" && strings.HasPrefix(v, "SYSTEMROOT=")
+	})
 	slices.Sort(gotEnv)
 	wantEnv := slices.Clone(env)
 	slices.Sort(wantEnv)
@@ -363,6 +367,9 @@ func TestPinentryErrors(t *testing.T) {
 }
 
 func TestFindPinentryFixedDirs(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("pinentry is the Linux prompt, and it relies on execute bits")
+	}
 	d1, d2 := t.TempDir(), t.TempDir()
 	mk := func(dir, name string, mode os.FileMode) {
 		t.Helper()

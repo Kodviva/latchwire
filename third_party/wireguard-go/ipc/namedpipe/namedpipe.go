@@ -359,10 +359,12 @@ func (l *pipeListener) makeConnectedServerPipe() (*file, error) {
 		// Abort the connect request by closing the handle.
 		p.Close()
 		p = nil
-		err = <-ch
-		if err == nil || err == os.ErrClosed {
-			err = net.ErrClosed
-		}
+		// The listener is done whatever the connect returned. A connect that
+		// the close cancels on its way into the kernel returns
+		// ERROR_OPERATION_ABORTED directly: anything but net.ErrClosed here
+		// keeps listenerRoutine running and Close waits for it forever.
+		<-ch
+		err = net.ErrClosed
 	}
 	return p, err
 }
