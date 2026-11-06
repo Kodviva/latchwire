@@ -1,0 +1,81 @@
+# deb and rpm. packaging/linux/build-packages.sh fills the @...@ fields (nfpm
+# expands variables only in some fields) and rewrites the binary path of the
+# units in the stage directory.
+name: latchwire
+arch: @ARCH@
+platform: linux
+version: @VERSION@
+version_schema: semver
+release: "1"
+section: net
+priority: optional
+maintainer: Latchwire <security@kodviva.com>
+vendor: Latchwire
+homepage: https://latchwire.com
+license: Apache-2.0
+description: |
+  WireGuard-compatible client that keeps the static key in a YubiKey.
+  The X25519 private key is generated on the token and never leaves it.
+  Includes the root tunnel daemon and the per-user agent.
+mtime: "@BUILD_TIME@"
+
+contents:
+  # rpm removes only the directories a package owns.
+  - dst: /usr/lib/latchwire
+    type: dir
+    file_info: {mode: 0755, owner: root, group: root}
+  - dst: /usr/share/doc/latchwire
+    type: dir
+    file_info: {mode: 0755, owner: root, group: root}
+  - src: @STAGE@/latchwire
+    dst: /usr/bin/latchwire
+    file_info: {mode: 0755, owner: root, group: root}
+  - src: @STAGE@/latchwire-daemon.service
+    dst: /usr/lib/systemd/system/latchwire-daemon.service
+    file_info: {mode: 0644, owner: root, group: root}
+  - src: @STAGE@/latchwire-agent.service
+    dst: /usr/lib/systemd/user/latchwire-agent.service
+    file_info: {mode: 0644, owner: root, group: root}
+  - src: @STAGE@/lifecycle.sh
+    dst: /usr/lib/latchwire/lifecycle.sh
+    file_info: {mode: 0755, owner: root, group: root}
+  - src: @STAGE@/LICENSE
+    dst: /usr/share/doc/latchwire/LICENSE
+    file_info: {mode: 0644, owner: root, group: root}
+  - src: @STAGE@/THIRD_PARTY_LICENSES.txt
+    dst: /usr/share/doc/latchwire/THIRD_PARTY_LICENSES.txt
+    file_info: {mode: 0644, owner: root, group: root}
+
+overrides:
+  deb:
+    depends:
+      - libc6 (>= 2.34)
+      - libpcsclite1
+      - systemd
+      - iproute2
+      - nftables
+      - procps
+    recommends:
+      - pcscd
+      - pinentry-gnome3 | pinentry-qt | pinentry-gtk2
+    suggests:
+      - openresolv
+    scripts:
+      preinstall: @STAGE@/deb/preinst
+      postinstall: @STAGE@/deb/postinst
+      preremove: @STAGE@/deb/prerm
+      postremove: @STAGE@/deb/postrm
+  rpm:
+    depends:
+      - pcsc-lite-libs
+      - systemd
+      - iproute
+      - nftables
+      - procps-ng
+    recommends:
+      - pcsc-lite
+      - pinentry-gnome3
+    scripts:
+      postinstall: @STAGE@/rpm/post
+      preremove: @STAGE@/rpm/preun
+      postremove: @STAGE@/rpm/postun

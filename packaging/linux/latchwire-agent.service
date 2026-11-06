@@ -1,15 +1,33 @@
 # Latchwire user agent: holds the YubiKey and asks for its PIN (pinentry).
-# Install: /etc/systemd/user/latchwire-agent.service, then as the user:
+#
+# Packages install this file with the binary path /usr/bin/latchwire and
+# enable it for every user. By hand: /etc/systemd/user/latchwire-agent.service,
+# then as the user:
 #   systemctl --user enable --now latchwire-agent.service
 # See docs/manual-install.md.
+#
+# Sandboxing is light on purpose. The agent runs as the user, and pinentry
+# (a GUI program) runs as its child, so it needs the session: the X11 socket
+# in /tmp (no PrivateTmp), Wayland and D-Bus in /run/user, and the PC/SC
+# socket of pcscd. Toolkits may need writable and executable memory, so there
+# is no MemoryDenyWriteExecute. AF_INET stays for DISPLAY over TCP.
 [Unit]
 Description=Latchwire user agent (YubiKey PIN prompts)
+Documentation=https://github.com/Kodviva/latchwire/blob/main/docs/manual-install.md
 
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/latchwire agent
 Restart=on-failure
 RestartSec=2
+
+NoNewPrivileges=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
 
 [Install]
 WantedBy=default.target

@@ -1,17 +1,19 @@
 # Latchwire tunnel daemon (root): TUN devices, routes, rules, nftables,
 # DNS, kill switch.
-# Install: /etc/systemd/system/latchwire-daemon.service, then:
+#
+# Packages install this file with the binary path /usr/bin/latchwire. By
+# hand: /etc/systemd/system/latchwire-daemon.service, then
 #   systemctl enable --now latchwire-daemon.service
 # See docs/manual-install.md.
 #
-# No sandboxing options on purpose: the daemon needs /dev/net/tun, netlink,
-# nft, ip, sysctl writes under /proc/sys/net and writes to resolv.conf /
-# resolvconf / systemd-resolved, and options such as ProtectSystem=,
-# ProtectKernelTunables=, CapabilityBoundingSet= or NoNewPrivileges= (which
-# blocks SELinux domain transitions of the helpers it runs) can break those.
-# Hardening is left to Plan 5, with a real-system test.
+# The sandbox below keeps what the daemon and its helpers (ip, nft, sysctl,
+# resolvconf, resolvectl) need, and only that. packaging/linux/test runs a
+# real full tunnel with kill switch under this exact unit, with openresolv
+# and with systemd-resolved: run it after any change here. The YubiKey is
+# not reached from here: PC/SC runs in the user agent.
 [Unit]
 Description=Latchwire WireGuard tunnel daemon
+Documentation=https://github.com/Kodviva/latchwire/blob/main/docs/manual-install.md
 After=network.target
 
 [Service]
@@ -20,6 +22,51 @@ User=root
 ExecStart=/usr/local/bin/latchwire daemon
 Restart=on-failure
 RestartSec=2
+# Taking tunnels down runs up to a few commands of at most 10 s each.
+TimeoutStopSec=60
+
+# The journal must outlive the process: it is how a crash gets cleaned up
+# and how the kill switch stays on. Never remove RuntimeDirectoryPreserve.
+RuntimeDirectory=latchwire
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+ConfigurationDirectory=latchwire
+ConfigurationDirectoryMode=0700
+
+# Filesystem. /run holds the socket (/run/latchwire.sock) and the state of
+# resolvconf; /etc/resolv.conf is what resolvconf rewrites; /proc/sys/net is
+# where src_valid_mark is set for a full tunnel.
+ProtectSystem=strict
+ReadWritePaths=/run -/etc/resolv.conf -/etc/resolvconf -/proc/sys/net
+ProtectHome=yes
+PrivateTmp=yes
+
+# Kernel and devices. /dev/net/tun is the only device needed.
+DevicePolicy=closed
+DeviceAllow=/dev/net/tun rw
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+
+# Privileges. CAP_NET_ADMIN: TUN, routes, rules, nftables, SO_MARK.
+# CAP_NET_RAW: the same for helpers on older kernels. CAP_NET_BIND_SERVICE:
+# a ListenPort below 1024. With NoNewPrivileges the helpers stay in the
+# daemon's SELinux domain; not yet tried under an enforcing policy.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@mount @reboot @swap @debug @module @obsolete @cpu-emulation
+SystemCallErrorNumber=EPERM
 
 [Install]
 WantedBy=multi-user.target

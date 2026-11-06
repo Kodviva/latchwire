@@ -1,0 +1,9 @@
+#!/bin/sh
+# dpkg: install, install <old version>, upgrade <old version>. Only "upgrade"
+# means a working installation is being replaced: after "apt remove", dpkg
+# keeps the package in state config-files and postinst gets the old version
+# although nothing is enabled any more. postinst reads this marker.
+set -e
+if [ "$1" = upgrade ]; then
+	: >/run/latchwire-upgrading
+fi

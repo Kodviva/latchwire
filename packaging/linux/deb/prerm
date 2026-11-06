@@ -1,0 +1,6 @@
+#!/bin/sh
+# dpkg: remove, upgrade <new>, deconfigure, failed-upgrade. Only a removal
+# stops anything; an upgrade decides in postinst.
+set -e
+[ "$1" = remove ] || exit 0
+sh /usr/lib/latchwire/lifecycle.sh pre-remove
