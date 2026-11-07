@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -233,6 +234,7 @@ type daemon struct {
 	t        *testing.T
 	l        net.Listener
 	path     string
+	users    *ipc.UserTable // Windows: never the machine's
 	conns    chan *ipc.Conn
 	register chan ipc.AgentRegister
 	events   chan ipc.AgentEvent
@@ -243,6 +245,7 @@ func newDaemon(t *testing.T) *daemon {
 	d := &daemon{
 		t:        t,
 		path:     ipctest.Path(t),
+		users:    ipc.OpenUserTable(filepath.Join(t.TempDir(), "users.json")),
 		conns:    make(chan *ipc.Conn, 4),
 		register: make(chan ipc.AgentRegister, 16),
 		events:   make(chan ipc.AgentEvent, 64),
@@ -252,7 +255,7 @@ func newDaemon(t *testing.T) *daemon {
 }
 
 func (d *daemon) listen() {
-	l, err := ipc.Listen(d.path)
+	l, err := ipc.ListenUsers(d.path, d.users)
 	if err != nil {
 		d.t.Fatal(err)
 	}

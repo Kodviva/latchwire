@@ -109,6 +109,14 @@ type Options struct {
 	Users *ipc.UserTable
 }
 
+// secureDataDir and hostUsers are the service's data directory and table
+// of users. The tests of this package point both at a scratch directory, so
+// that no test changes them on the machine it runs on.
+var (
+	secureDataDir = datadir.Secure
+	hostUsers     = ipc.Users
+)
+
 // DefaultTUN returns the factory that creates kernel TUN devices (utunN on
 // macOS, the tunnel's name on Linux, a Wintun adapter of that name on
 // Windows) configured with the platform's network commands, run by r and
@@ -392,11 +400,11 @@ func (m *Manager) Serve(ctx context.Context) error {
 	m.mu.Unlock()
 	// Nothing below may be read from a data directory that is not safe:
 	// the journal holds commands to run as SYSTEM.
-	if err := datadir.Secure(); err != nil {
+	if err := secureDataDir(); err != nil {
 		return err
 	}
 	if m.users == nil {
-		m.users = ipc.Users()
+		m.users = hostUsers()
 	}
 	// Undo what a crashed run left in the system before anything is
 	// loaded, except an active kill switch: it keeps blocking (fail
@@ -418,7 +426,7 @@ func (m *Manager) Serve(ctx context.Context) error {
 		return err
 	}
 	m.startKillSwitch(ksHeld, j.RecoveredFromCorruption())
-	l, err := ipc.Listen(m.socket)
+	l, err := ipc.ListenUsers(m.socket, m.users)
 	if err != nil {
 		return err
 	}

@@ -118,6 +118,7 @@ func pipeSD() (*windows.SECURITY_DESCRIPTOR, error) {
 // that connects and says nothing cannot hold up the others.
 type authListener struct {
 	l     net.Listener
+	users *UserTable
 	conns chan *Conn
 	done  chan struct{}
 	once  sync.Once
@@ -125,8 +126,12 @@ type authListener struct {
 
 // Listen creates the pipe at path. A pipe of that name that exists already,
 // whoever made it, is an error: the first instance decides who owns the
-// name.
-func Listen(path string) (net.Listener, error) {
+// name. Clients get their uids from the service's table, Users.
+func Listen(path string) (net.Listener, error) { return ListenUsers(path, nil) }
+
+// ListenUsers is Listen with the table of users that gives clients their
+// uids; nil = Users(). Tests give it one of theirs.
+func ListenUsers(path string, users *UserTable) (net.Listener, error) {
 	sd, err := pipeSD()
 	if err != nil {
 		return nil, err
@@ -139,7 +144,7 @@ func Listen(path string) (net.Listener, error) {
 		}
 		return nil, err
 	}
-	al := &authListener{l: l, conns: make(chan *Conn), done: make(chan struct{})}
+	al := &authListener{l: l, users: users, conns: make(chan *Conn), done: make(chan struct{})}
 	go al.acceptLoop()
 	return al, nil
 }
@@ -168,7 +173,7 @@ func (al *authListener) acceptLoop() {
 		}
 		go func() {
 			defer func() { <-slots }()
-			c, err := identify(nc)
+			c, err := identify(nc, al.users)
 			if err != nil {
 				log.Printf("ipc: refusing a client: %v", err)
 				nc.Close()
@@ -206,8 +211,9 @@ func Accept(l net.Listener) (*Conn, error) {
 	}
 }
 
-// identify reads the client's hello and its token.
-func identify(nc net.Conn) (*Conn, error) {
+// identify reads the client's hello and its token, and gives the client
+// its uid from users (nil = Users()).
+func identify(nc net.Conn, users *UserTable) (*Conn, error) {
 	nc.SetReadDeadline(time.Now().Add(helloTimeout))
 	var b [1]byte
 	if _, err := io.ReadFull(nc, b[:]); err != nil {
@@ -238,7 +244,10 @@ func identify(nc net.Conn) (*Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	uid, elevated, err := classifyPeer(user.User.Sid.String(), admin, Users())
+	if users == nil {
+		users = Users()
+	}
+	uid, elevated, err := classifyPeer(user.User.Sid.String(), admin, users)
 	if err != nil {
 		return nil, err
 	}
