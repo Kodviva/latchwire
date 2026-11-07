@@ -53,11 +53,17 @@ func (f ServerForm) Conf() (string, error) {
 	if err != nil || len(addrs) == 0 {
 		return "", invalid("address", "Address")
 	}
+	var dns []string
 	for _, d := range f.DNS {
 		d = strings.TrimSpace(d)
-		if _, err := netip.ParseAddr(d); err != nil && !validDNSName(d) {
+		if d == "" {
+			continue
+		}
+		n, ok := normalizeDNS(d)
+		if !ok {
 			return "", invalid("dns", "DNS")
 		}
+		dns = append(dns, n)
 	}
 	if f.MTU != 0 && (f.MTU < 1280 || f.MTU > 9000) {
 		return "", &FieldError{Field: "mtu", Err: fmt.Errorf("%s", msg.ConfigMTURange)}
@@ -68,24 +74,27 @@ func (f ServerForm) Conf() (string, error) {
 
 	var b strings.Builder
 	b.WriteString("[Interface]\nAddress = " + strings.Join(addrs, ", ") + "\n")
-	if dns := cleanList(f.DNS); len(dns) > 0 {
+	if len(dns) > 0 {
 		b.WriteString("DNS = " + strings.Join(dns, ", ") + "\n")
 	}
 	if f.MTU != 0 {
 		b.WriteString("MTU = " + strconv.Itoa(f.MTU) + "\n")
 	}
 
-	seen := map[string]bool{}
+	seen := map[[32]byte]bool{}
 	for i, p := range f.Peers {
 		field := func(name string) string { return fmt.Sprintf("peers[%d].%s", i, name) }
 		if !validEndpoint(p.Endpoint) {
 			return "", invalid(field("endpoint"), "Endpoint")
 		}
-		if !validKey(p.PublicKey) || seen[p.PublicKey] {
+		// Compared as bytes, like the parser: base64 has non-canonical
+		// spellings of one key.
+		pub, ok := decodeKey(p.PublicKey)
+		if !ok || seen[pub] {
 			return "", invalid(field("publickey"), "PublicKey")
 		}
-		seen[p.PublicKey] = true
-		if p.PresharedKey != "" && !validKey(p.PresharedKey) {
+		seen[pub] = true
+		if _, ok := decodeKey(p.PresharedKey); p.PresharedKey != "" && !ok {
 			return "", invalid(field("presharedkey"), "PresharedKey")
 		}
 		allowed := "0.0.0.0/0, ::/0"
@@ -150,9 +159,31 @@ func prefixList(in []string) ([]string, error) {
 	return out, nil
 }
 
-func validKey(s string) bool {
+func decodeKey(s string) (k [32]byte, ok bool) {
 	b, err := base64.StdEncoding.DecodeString(s)
-	return err == nil && len(b) == 32
+	if err != nil || len(b) != len(k) {
+		return k, false
+	}
+	copy(k[:], b)
+	return k, true
+}
+
+// normalizeDNS returns the text that may be written for one DNS entry: an
+// address in canonical form without a zone, or a valid search domain. Anything
+// that could alter the config's structure is refused.
+func normalizeDNS(s string) (string, bool) {
+	for _, r := range s {
+		if r <= ' ' || r == 0x7f || strings.ContainsRune("#[=,", r) {
+			return "", false
+		}
+	}
+	if a, err := netip.ParseAddr(s); err == nil {
+		if a.Zone() != "" {
+			return "", false
+		}
+		return a.String(), true
+	}
+	return s, validDNSName(s)
 }
 
 // validEndpoint wants host:port with a port in 1-65535 and no character that

@@ -106,3 +106,35 @@ func TestServerFormErrorHidesPSK(t *testing.T) {
 		}
 	}
 }
+
+func TestServerFormDuplicateKeyByValue(t *testing.T) {
+	// The last base64 character carries unused bits: both spell the same key.
+	alt := serverKeyB[:len(serverKeyB)-2] + "J="
+	f := ServerForm{Address: "10.8.0.2/32", Peers: []ServerPeer{
+		{Endpoint: "a.example.com:1", PublicKey: serverKeyB, AllTraffic: true},
+		{Endpoint: "b.example.com:1", PublicKey: alt, Networks: []string{"10.0.0.0/8"}},
+	}}
+	_, err := f.Conf()
+	var fe *FieldError
+	if !errors.As(err, &fe) || fe.Field != "peers[1].publickey" {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestServerFormDNSNormalized(t *testing.T) {
+	for _, bad := range []string{"fe80::1%eth0\n[Peer]", "fe80::1%eth0", "10.0.0.1#x", "[::1]", "a=b", "1.1.1.1,[Peer]", "a b"} {
+		f := onePeer(ServerPeer{Endpoint: "h:1", PublicKey: srvPub, AllTraffic: true})
+		f.DNS = []string{bad}
+		text, err := f.Conf()
+		var fe *FieldError
+		if !errors.As(err, &fe) || fe.Field != "dns" || text != "" {
+			t.Errorf("%q: got %q, %v", bad, text, err)
+		}
+	}
+	f := onePeer(ServerPeer{Endpoint: "h:1", PublicKey: srvPub, AllTraffic: true})
+	f.DNS = []string{" 2001:DB8:0::1 ", "", "corp.example.com"}
+	text, err := f.Conf()
+	if err != nil || !strings.Contains(text, "DNS = 2001:db8::1, corp.example.com\n") {
+		t.Fatalf("%q, %v", text, err)
+	}
+}
