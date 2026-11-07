@@ -25,7 +25,7 @@ type fakeDaemon struct {
 func startDaemon(t *testing.T, tunnels []ipc.TunnelStatus) *fakeDaemon {
 	t.Helper()
 	socket := ipctest.Path(t)
-	l, err := ipc.Listen(socket)
+	l, err := ipc.ListenUsers(socket, ipc.OpenUserTable(filepath.Join(t.TempDir(), "users.json")))
 	if err != nil {
 		t.Fatal(err)
 	}

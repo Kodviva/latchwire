@@ -43,8 +43,10 @@ func trusted(sid *windows.SID) bool {
 // and changed through that handle: a name that is swapped for a junction
 // between a check and a change could otherwise hand the change to whatever
 // the junction points at.
-func Secure() error {
-	dir := Dir()
+func Secure() error { return SecureDir(Dir()) }
+
+// SecureDir is Secure for the directory dir: tests give it one of theirs.
+func SecureDir(dir string) error {
 	sd, err := windows.SecurityDescriptorFromString(dirSDDL)
 	if err != nil {
 		return err

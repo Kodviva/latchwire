@@ -7,3 +7,6 @@ func Dir() string { return "" }
 
 // Secure does nothing on Unix.
 func Secure() error { return nil }
+
+// SecureDir does nothing on Unix.
+func SecureDir(string) error { return nil }
