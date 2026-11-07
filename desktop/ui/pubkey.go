@@ -166,7 +166,7 @@ func (u *UI) showQR() { u.showQRText(u.peerText()) }
 func (u *UI) showQRText(text string) {
 	code, err := qr.Encode(text, qr.M)
 	if err != nil {
-		u.setNotice(u.translate(err))
+		u.setNotice(u.t(msg.UIShareQRTooLong))
 		return
 	}
 	img := canvas.NewImageFromImage(qrImage(code))

@@ -931,6 +931,7 @@
   "UIShareSent": "I sent it",
   "UIShareOpen": "Send the key to the administrator",
   "UIShareMailFailed": "Could not open your e-mail program. Copy the message instead.",
+  "UIShareQRTooLong": "This text is too long for a QR code. Use Copy or e-mail instead.",
   "UIStateConnected": "Connected",
   "UIStateConnecting": "Connecting…",
   "UIStateDisconnected": "Not connected",

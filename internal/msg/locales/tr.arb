@@ -396,6 +396,7 @@
   "UIShareSent": "Gönderdim",
   "UIShareOpen": "Anahtarı yöneticiye gönderin",
   "UIShareMailFailed": "E-posta programınız açılamadı. Bunun yerine mesajı kopyalayın.",
+  "UIShareQRTooLong": "Bu metin bir QR koduna sığmayacak kadar uzun. Bunun yerine Kopyala ya da e-posta seçeneğini kullanın.",
   "UIStateConnected": "Bağlı",
   "UIStateConnecting": "Bağlanıyor…",
   "UIStateDisconnected": "Bağlı değil",

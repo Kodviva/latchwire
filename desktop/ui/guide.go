@@ -76,6 +76,9 @@ func guideFor(k desktop.ServerKind) serverGuide {
 
 // tunnelAddr is the tunnel IP typed for key i, if it is a valid address.
 func (u *UI) tunnelAddr(i int) (netip.Addr, bool) {
+	if i >= len(u.session.addrs) {
+		return netip.Addr{}, false
+	}
 	a, err := netip.ParseAddr(strings.TrimSpace(u.session.addrs[i]))
 	return a, err == nil
 }

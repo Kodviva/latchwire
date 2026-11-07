@@ -571,6 +571,7 @@ const (
 	UIShareSent                 ID = "UIShareSent"
 	UIShareOpen                 ID = "UIShareOpen"
 	UIShareMailFailed           ID = "UIShareMailFailed"
+	UIShareQRTooLong            ID = "UIShareQRTooLong"
 	UIStateConnected            ID = "UIStateConnected"
 	UIStateConnecting           ID = "UIStateConnecting"
 	UIStateDisconnected         ID = "UIStateDisconnected"

@@ -43,3 +43,24 @@ func TestShareCopiesPublicValuesOnly(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestShareQRTwoKeysAndShortAddrs(t *testing.T) {
+	u, _ := startGuided(t, invitedSurvey())
+	k2 := fixedKey()
+	k2.Public[0] = 99
+	u.session.keys = []desktop.Key{fixedKey(), k2}
+	u.session.addrs = []string{"10.8.0.2"} // shorter than keys
+	u.show(screenShare)
+	if strings.Contains(u.peerBlocks(), "piv://") || strings.Count(u.peerBlocks(), "[Peer]") != 2 {
+		t.Fatal(u.peerBlocks())
+	}
+	u.notice = ""
+	tap(t, u, en(msg.UIShowQR))
+	if u.notice != "" && u.notice != en(msg.UIShareQRTooLong) {
+		t.Fatalf("raw or wrong notice: %q", u.notice)
+	}
+	u.showQRText(strings.Repeat("x", 5000))
+	if u.notice != en(msg.UIShareQRTooLong) {
+		t.Fatalf("notice %q", u.notice)
+	}
+}

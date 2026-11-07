@@ -26,6 +26,17 @@ func (u *UI) adminMessage() (subject, body string) {
 	return desktop.AdminMessage(u.lang, s.keys, addrs)
 }
 
+// peerBlocks is the [Peer] block of every key: what the administrator
+// needs, and short enough for a QR code.
+func (u *UI) peerBlocks() string {
+	var blocks []string
+	for i, k := range u.session.keys {
+		a, _ := u.tunnelAddr(i)
+		blocks = append(blocks, desktop.PeerBlock(u.lang, k, a))
+	}
+	return strings.Join(blocks, "\n\n")
+}
+
 // renderShare is the step where the user sends the public key to whoever
 // runs the server.
 func (u *UI) renderShare() {
@@ -45,7 +56,7 @@ func (u *UI) renderShare() {
 			u.setNotice(u.t(msg.UIShareMailFailed))
 		}
 	})
-	qrBtn := widget.NewButton(u.t(msg.UIShowQR), func() { u.showQRText(text) })
+	qrBtn := widget.NewButton(u.t(msg.UIShowQR), func() { u.showQRText(u.peerBlocks()) })
 	sent := widget.NewButton(u.t(msg.UIShareSent), func() {
 		u.markStep(desktop.StepPubkeyShared)
 		u.show(screenRoadmap)
