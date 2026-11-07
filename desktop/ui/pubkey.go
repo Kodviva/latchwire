@@ -230,40 +230,50 @@ func (u *UI) importConf(file string, data []byte) {
 	add := widget.NewButton(u.t(msg.UIImportAdd), nil)
 	add.Importance = widget.HighImportance
 	add.OnTapped = func() {
-		var backup *desktop.Backup
-		if backupIP != nil {
-			ip, err := netip.ParseAddr(strings.TrimSpace(backupIP.Text))
-			if err != nil {
-				showErr(u.t(msg.UITunnelIPInvalid))
-				return
-			}
-			backup = &desktop.Backup{Key: s.keys[1], Address: ip}
-		}
-		cfg, err := desktop.Bind(text, s.keys[0], backup)
-		if err != nil {
-			showErr(u.translate(err))
-			return
-		}
-		add.Disable()
-		tunnel := strings.TrimSpace(name.Text)
-		go func() {
-			err := u.b.Add(context.Background(), tunnel, cfg)
-			fyne.Do(func() {
-				add.Enable()
-				if err != nil {
-					showErr(u.translate(err))
-					return
-				}
-				pop.Hide()
-				u.notice = u.tr(msg.UIImportAdded, msg.Args{"name": tunnel})
-				u.selected = tunnel
-				u.show(screenTunnels)
-			})
-			u.pollOnce(context.Background())
-		}()
+		u.addTunnel(text, strings.TrimSpace(name.Text), backupIP, add, func() { pop.Hide() }, showErr, showErr)
 	}
 	cancel := widget.NewButton(u.t(msg.UICancel), func() { pop.Hide() })
 	rows = append(rows, errText, container.NewHBox(layout.NewSpacer(), cancel, add))
 	pop = modal(u.win, 480, container.NewVBox(rows...))
 	pop.Show()
+}
+
+// addTunnel is the step both ways of adding a tunnel end in: it reads the
+// backup card's tunnel IP from backupIP (nil when there is no backup card),
+// binds text to the session's keys, adds the tunnel and, on success, closes
+// the form and shows the tunnel list. The caller shows errors its own way:
+// ipErr for a bad backup IP, showErr for everything else. add is disabled
+// while the daemon works.
+func (u *UI) addTunnel(text, tunnel string, backupIP *widget.Entry, add *widget.Button, closeForm func(), ipErr, showErr func(string)) {
+	s := &u.session
+	var backup *desktop.Backup
+	if backupIP != nil {
+		ip, err := netip.ParseAddr(strings.TrimSpace(backupIP.Text))
+		if err != nil {
+			ipErr(u.t(msg.UITunnelIPInvalid))
+			return
+		}
+		backup = &desktop.Backup{Key: s.keys[1], Address: ip}
+	}
+	cfg, err := desktop.Bind(text, s.keys[0], backup)
+	if err != nil {
+		showErr(u.translate(err))
+		return
+	}
+	add.Disable()
+	go func() {
+		err := u.b.Add(context.Background(), tunnel, cfg)
+		fyne.Do(func() {
+			add.Enable()
+			if err != nil {
+				showErr(u.translate(err))
+				return
+			}
+			closeForm()
+			u.notice = u.tr(msg.UIImportAdded, msg.Args{"name": tunnel})
+			u.selected = tunnel
+			u.show(screenTunnels)
+		})
+		u.pollOnce(context.Background())
+	}()
 }

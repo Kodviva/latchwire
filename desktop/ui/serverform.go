@@ -1,9 +1,7 @@
 package ui
 
 import (
-	"context"
 	"errors"
-	"net/netip"
 	"strconv"
 	"strings"
 
@@ -218,15 +216,6 @@ func (u *UI) showServerForm() {
 	add.Importance = widget.HighImportance
 	add.OnTapped = func() {
 		clearErrors()
-		var backup *desktop.Backup
-		if backupIP != nil {
-			ip, err := netip.ParseAddr(strings.TrimSpace(backupIP.Text))
-			if err != nil {
-				setErr(backupErr, u.t(msg.UITunnelIPInvalid))
-				return
-			}
-			backup = &desktop.Backup{Key: s.keys[1], Address: ip}
-		}
 		form := desktop.ServerForm{Address: addr.Text, DNS: strings.Split(dns.Text, ",")}
 		if v := strings.TrimSpace(mtu.Text); v != "" {
 			n, err := strconv.Atoi(v)
@@ -238,7 +227,9 @@ func (u *UI) showServerForm() {
 			form.MTU = n
 		}
 		var psks [][]byte
+		wiped := false
 		defer func() {
+			wiped = true
 			for _, k := range psks {
 				clear(k)
 			}
@@ -267,6 +258,9 @@ func (u *UI) showServerForm() {
 			form.Peers = append(form.Peers, p)
 		}
 		restore := func() {
+			if wiped {
+				return // an error that arrives after the form call returned
+			}
 			for i, k := range psks {
 				for _, r := range string(k) {
 					rows[i].psk.TypedRune(r)
@@ -279,12 +273,6 @@ func (u *UI) showServerForm() {
 			fail(err)
 			return
 		}
-		cfg, err := desktop.Bind(conf, s.keys[0], backup)
-		if err != nil {
-			restore()
-			setErr(errText, u.translate(err))
-			return
-		}
 		tunnel := strings.TrimSpace(name.Text)
 		if tunnel == "" {
 			host := form.Peers[0].Endpoint
@@ -295,22 +283,8 @@ func (u *UI) showServerForm() {
 				tunnel = "vpn"
 			}
 		}
-		add.Disable()
-		go func() {
-			err := u.b.Add(context.Background(), tunnel, cfg)
-			fyne.Do(func() {
-				add.Enable()
-				if err != nil {
-					setErr(errText, u.translate(err))
-					return
-				}
-				pop.Hide()
-				u.notice = u.tr(msg.UIImportAdded, msg.Args{"name": tunnel})
-				u.selected = tunnel
-				u.show(screenTunnels)
-			})
-			u.pollOnce(context.Background())
-		}()
+		u.addTunnel(conf, tunnel, backupIP, add, pop.Hide,
+			func(m string) { restore(); setErr(backupErr, m) }, func(m string) { restore(); setErr(errText, m) })
 	}
 	cancel := widget.NewButton(u.t(msg.UICancel), hide)
 	content = append(content, errText, container.NewHBox(layout.NewSpacer(), cancel, add))
