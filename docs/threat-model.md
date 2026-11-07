@@ -712,8 +712,17 @@ everything in this section is on top of the limits above.
   dropped while reading, the file's bytes are wiped, and the form says so. The
   key stays in the file on your disk until you delete it, and copies can remain
   in memory until it is reused. The app does not touch the file.
-- **The clipboard** only ever receives public keys and `[Peer]` blocks. The QR
-  code holds the same text.
+- **The clipboard** only ever receives public values: public keys, `[Peer]`
+  blocks, allowed-IP entries, the message for a server administrator, and
+  setup commands for a server that are built from those same values. The QR
+  code holds the same kind of text.
+- **The server-details form** treats a preshared key the way `.conf` import
+  does: it is typed into a field that shows only dots and takes no paste, and
+  the field and the buffers built from it are wiped once the tunnel is added or
+  the form closes. On the way to the daemon it also passes through Go strings,
+  which cannot be wiped, as on the import path. The message for an
+  administrator, whether copied or handed to the e-mail program, holds public
+  values only: never a preshared key, a PIN or a key reference.
 - **Status is polled** every 2 seconds, so a removed card appears on screen up
   to about 3 seconds later, even though the daemon closes the tunnel sooner.
 - **Quitting stops the agent.** Tunnels then close after the 10-second grace
