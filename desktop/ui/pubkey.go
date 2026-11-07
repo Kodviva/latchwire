@@ -131,6 +131,7 @@ func (u *UI) otherDevice() (desktop.Device, bool) {
 // fillBackup draws the backup offer (spec goal 4).
 func (u *UI) fillBackup() {
 	s := &u.session
+	u.markStep(desktop.StepBackupOffered)
 	rows := []fyne.CanvasObject{rich(u.t(msg.UIBackupTitle), nameAmber, "", fyne.TextStyle{Bold: true})}
 	if len(s.keys) > 1 {
 		rows = append(rows, warnText(u.tr(msg.UIBackupReady, msg.Args{"serial": s.keys[1].Ref.Serial})))
@@ -270,6 +271,7 @@ func (u *UI) addTunnel(text, tunnel string, backupIP *widget.Entry, add *widget.
 				return
 			}
 			closeForm()
+			u.markStep(desktop.StepServerInfo)
 			u.notice = u.tr(msg.UIImportAdded, msg.Args{"name": tunnel})
 			u.selected = tunnel
 			u.show(screenTunnels)

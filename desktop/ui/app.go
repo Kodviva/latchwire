@@ -273,7 +273,7 @@ func (u *UI) render() {
 	case screenSurvey:
 		u.renderSurvey()
 	case screenRoadmap:
-		u.renderPlaceholder(msg.UIRoadmapTitle)
+		u.renderRoadmap()
 	case screenExplore:
 		u.renderPlaceholder(msg.UIExploreTitle)
 	}
@@ -318,7 +318,12 @@ func strip(o fyne.CanvasObject) fyne.CanvasObject {
 }
 
 func (u *UI) renderSidebar() {
-	rows := []fyne.CanvasObject{section(u.t(msg.UITunnelsHeader))}
+	var rows []fyne.CanvasObject
+	if u.roadmapOpen() {
+		row := container.NewBorder(nil, nil, nil, nil, strong(u.t(msg.UIRoadmapTitle)))
+		rows = append(rows, newTapCard(row, u.screen == screenRoadmap, true, func() { u.show(screenRoadmap) }))
+	}
+	rows = append(rows, section(u.t(msg.UITunnelsHeader)))
 	for _, st := range u.statuses {
 		name := st.Name
 		lit := st.State == daemon.StateConnected
@@ -337,6 +342,9 @@ func (u *UI) renderSidebar() {
 	}
 	sel.OnChanged = func(string) { u.setLanguage(codes[sel.SelectedIndex()]) }
 	foot := container.NewVBox(add, widget.NewSeparator(), small(u.t(msg.UILanguage)), sel)
+	if u.survey.Help != "" {
+		foot.Add(u.helpSelect())
+	}
 	u.sidebar.Objects = []fyne.CanvasObject{container.NewBorder(container.NewVBox(rows...), foot, nil, nil)}
 	u.sidebar.Refresh()
 }

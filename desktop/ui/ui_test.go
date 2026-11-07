@@ -222,7 +222,7 @@ func TestOnboardShowsCardsAndSlots(t *testing.T) {
 	wantText(t, u, "The PIV PIN will be asked")
 	var sel *widget.Select
 	walk(u, func(o fyne.CanvasObject) {
-		if s, ok := o.(*widget.Select); ok && s.Selected != "English" {
+		if s, ok := o.(*widget.Select); ok && s.Selected != "English" && s.Selected != en(msg.UIHelpExpert) {
 			sel = s
 		}
 	})
@@ -242,7 +242,7 @@ func TestOccupiedSlotIsNotOffered(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 	found := false
 	walk(u, func(o fyne.CanvasObject) {
-		if s, ok := o.(*widget.Select); ok && s.Selected != "English" {
+		if s, ok := o.(*widget.Select); ok && s.Selected != "English" && s.Selected != en(msg.UIHelpExpert) {
 			found = true
 			if slices.Contains(s.Options, "Retired slot 82 (recommended)") || len(s.Options) != 19 {
 				t.Fatalf("offers %v", s.Options)

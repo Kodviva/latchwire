@@ -107,6 +107,8 @@ func (u *UI) toggle(name string, connect bool) {
 			delete(u.pending, name)
 			if err != nil {
 				u.setNotice(u.translate(err))
+			} else if connect {
+				u.markStep(desktop.StepConnected)
 			}
 			u.shownView = nil
 		})

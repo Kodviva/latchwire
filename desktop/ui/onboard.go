@@ -189,6 +189,8 @@ func (u *UI) startKeygen() {
 // useKey opens the public key screen for a key. With backup set on the
 // session the key joins it as the second card.
 func (u *UI) useKey(k desktop.Key, created bool) {
+	u.markStep(desktop.StepCardReady)
+	u.markStep(desktop.StepKeyCreated)
 	if u.card.backup && len(u.session.keys) > 0 && u.session.keys[0].Ref.Serial != k.Ref.Serial {
 		u.session.keys = append(u.session.keys[:1], k)
 		u.session.shown = 1
