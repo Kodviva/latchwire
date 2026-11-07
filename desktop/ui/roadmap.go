@@ -99,6 +99,9 @@ func (u *UI) renderRoadmap() {
 	}
 	cur, _ := u.progress.Current(steps)
 	rows := []fyne.CanvasObject{h1(u.t(msg.UIRoadmapTitle))}
+	if u.survey.Card == desktop.CardNone {
+		rows = append(rows, u.waitCard())
+	}
 	for i, id := range steps {
 		rows = append(rows, u.stepRow(i+1, id, id == cur))
 	}
@@ -111,6 +114,8 @@ func (u *UI) stepRow(n int, id desktop.StepID, current bool) fyne.CanvasObject {
 	text := []fyne.CanvasObject{strong(fmt.Sprintf("%d. %s", n, u.t(txt.title)))}
 	if done {
 		text = append(text, small(u.t(txt.done)))
+	} else if id == desktop.StepCardReady && u.survey.Card == desktop.CardUnsure {
+		text = append(text, small(u.t(msg.UIRoadmapUnsure)))
 	}
 	var side fyne.CanvasObject = container.NewCenter(dot(done))
 	if current {

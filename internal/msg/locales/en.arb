@@ -865,6 +865,32 @@
   "UIHelpHints": "Short hints",
   "UIHelpExpert": "Expert",
   "UIExploreTitle": "What Latchwire does",
+  "UIExplorePageFmt": "Page {n} of {total}",
+  "@UIExplorePageFmt": {
+    "placeholders": {
+      "n": {
+        "verb": "%d"
+      },
+      "total": {
+        "verb": "%d"
+      }
+    }
+  },
+  "UIExploreWhatTitle": "What Latchwire does",
+  "UIExploreWhat": "Latchwire connects this computer to a WireGuard server, a private VPN that you or someone you trust runs. It is a desktop app for the tunnel: it creates the key, keeps it on a YubiKey and starts and stops the connection.",
+  "UIExploreWhyTitle": "Why the key cannot be copied",
+  "UIExploreWhy": "The key is created inside the YubiKey and the card does the key math itself, so the private key never reaches this computer's disk or a backup. A stolen or imaged laptop without the card cannot complete a handshake. This stops copying, not using: while the card is plugged in and unlocked, malware running as you could still use the key.",
+  "UIExploreNeedTitle": "What you need",
+  "UIExploreNeed": "A YubiKey with firmware 5.7 or newer, which supports X25519 in its PIV application, and a WireGuard server you can reach. A server administrator has to add your public key to the server; Latchwire does not connect to the server for you.",
+  "UIExploreNext": "Next",
+  "UIExploreBack": "Back",
+  "UIExploreReady": "Ready, let's start",
+  "UIExploreSite": "Read more at latchwire.com",
+  "UIRoadmapWaitTitle": "Continue when your YubiKey arrives",
+  "UIRoadmapWait": "Latchwire needs a YubiKey with firmware 5.7 or newer; older ones cannot do X25519 in PIV. Check the model's details before you get one. Yubico's product page lists the current models. Everything below waits until you have one.",
+  "UIRoadmapWaitLink": "Open Yubico's product page",
+  "UIRoadmapWaitHave": "I have a YubiKey now",
+  "UIRoadmapUnsure": "Not sure your YubiKey will work? It needs firmware 5.7 or newer, which supports X25519 in PIV. Plug it in: Latchwire shows its firmware on the next screen, and an older key is not offered for key creation.",
   "UIExplainOnboardLong": "What happens here: Latchwire creates a new WireGuard key inside the YubiKey, in an empty slot. The card does the key math itself and never gives the private key out, so nobody can copy it off the card. The card's PIN unlocks the key; Latchwire asks for it and does not store it. While the card is plugged in and unlocked, programs on this computer can use the key, but none can take a copy of it.",
   "UIExplainOnboardShort": "The key is made inside the card and cannot be copied off it; the PIN unlocks it.",
   "UIExplainPubkeyLong": "What happens here: a WireGuard key has two halves. The public key below is not secret: the server needs it to recognize this computer, and you can send it by e-mail or chat. The private key stays inside the card. The tunnel IP is this computer's address inside the tunnel. It must be a free address in the server's tunnel network, for example 10.8.0.2 when the server is 10.8.0.1.",

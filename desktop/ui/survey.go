@@ -67,6 +67,7 @@ func (u *UI) finishSurvey(s desktop.Survey) {
 	case s.Help == desktop.HelpExpert:
 		u.show(screenTunnels)
 	case s.Path == desktop.PathExplore:
+		u.explorePage = 0
 		u.show(screenExplore)
 	default:
 		u.show(screenRoadmap)
@@ -114,6 +115,8 @@ func (u *UI) questionTitle() (msg.ID, []option) {
 func (u *UI) answer(o option) {
 	o.pick(&u.draft)
 	switch {
+	case u.step == askWhy && u.draft.Path == desktop.PathExplore:
+		u.finishSurvey(desktop.Survey{Path: desktop.PathExplore, Help: desktop.HelpGuided})
 	case u.step == askHelp && u.draft.Path == desktop.PathOwner && u.draft.Help != desktop.HelpExpert:
 		u.step = askServer
 		u.render()
@@ -137,9 +140,4 @@ func (u *UI) renderSurvey() {
 	skip.Importance = widget.LowImportance
 	rows = append(rows, container.NewHBox(skip))
 	u.setMain(page(container.NewVBox(rows...)))
-}
-
-// renderPlaceholder stands in for a screen a later change fills in.
-func (u *UI) renderPlaceholder(title msg.ID) {
-	u.setMain(page(container.NewVBox(h1(u.t(title)))))
 }

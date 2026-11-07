@@ -289,7 +289,7 @@
   "UITunnelsHeader": "TÜNELLER",
   "UITunnelsEmpty": "Henüz tünel yok. Kartında bir anahtar oluştur, sonra sunucunun .conf dosyasını içe aktar.",
   "UINewTunnel": "+ Yeni tünel",
-  "UISurveySkip": "Atla, uzman modunda başla",
+  "UISurveySkip": "Atlayın, uzman modunda başlayın",
   "UISurveyWhyTitle": "Latchwire'ı neden kuruyorsunuz?",
   "UISurveyWhyInvited": "Biri benden kurmamı istedi",
   "UISurveyWhyOwner": "Kendi sunucuma bağlanacağım",
@@ -330,6 +330,32 @@
   "UIHelpHints": "Kısa ipuçları",
   "UIHelpExpert": "Uzman",
   "UIExploreTitle": "Latchwire ne yapar",
+  "UIExplorePageFmt": "Sayfa {n} / {total}",
+  "@UIExplorePageFmt": {
+    "placeholders": {
+      "n": {
+        "verb": "%d"
+      },
+      "total": {
+        "verb": "%d"
+      }
+    }
+  },
+  "UIExploreWhatTitle": "Latchwire ne yapar",
+  "UIExploreWhat": "Latchwire, bu bilgisayarı bir WireGuard sunucusuna bağlar; bu, sizin ya da güvendiğiniz birinin işlettiği özel bir VPN'dir. Tünel için bir masaüstü uygulamasıdır: anahtarı oluşturur, YubiKey'de tutar, bağlantıyı başlatır ve durdurur.",
+  "UIExploreWhyTitle": "Anahtar neden kopyalanamaz",
+  "UIExploreWhy": "Anahtar YubiKey'in içinde oluşturulur ve anahtar hesabını kartın kendisi yapar; bu yüzden özel anahtar bu bilgisayarın diskine ya da bir yedeğe hiç ulaşmaz. Kartı olmadan çalınan ya da imajı alınan bir dizüstü bilgisayar el sıkışmayı tamamlayamaz. Bu, kopyalamayı engeller, kullanmayı değil: kart takılı ve kilidi açıkken sizin adınıza çalışan bir zararlı yazılım anahtarı yine de kullanabilir.",
+  "UIExploreNeedTitle": "Neye ihtiyacınız var",
+  "UIExploreNeed": "Firmware'i 5.7 ya da daha yeni, yani PIV uygulamasında X25519 destekleyen bir YubiKey ve ulaşabildiğiniz bir WireGuard sunucusu. Açık anahtarınızı sunucuya bir yönetici eklemelidir; Latchwire sizin yerinize sunucuya bağlanmaz.",
+  "UIExploreNext": "İleri",
+  "UIExploreBack": "Geri",
+  "UIExploreReady": "Hazırım, başlayalım",
+  "UIExploreSite": "latchwire.com'da daha fazlasını okuyun",
+  "UIRoadmapWaitTitle": "YubiKey'iniz gelince devam edin",
+  "UIRoadmapWait": "Latchwire, firmware'i 5.7 ya da daha yeni bir YubiKey ister; eskileri PIV'de X25519 yapamaz. Almadan önce modelin ayrıntılarına bakın. Güncel modelleri Yubico'nun ürün sayfasında bulabilirsiniz. Aşağıdaki her şey, elinize bir tane geçene kadar bekler.",
+  "UIRoadmapWaitLink": "Yubico'nun ürün sayfasını açın",
+  "UIRoadmapWaitHave": "Artık bir YubiKey'im var",
+  "UIRoadmapUnsure": "YubiKey'inizin işe yarayacağından emin değil misiniz? Firmware'i 5.7 ya da daha yeni olmalı; bu sürüm PIV'de X25519 destekler. Takın: Latchwire firmware sürümünü bir sonraki ekranda gösterir ve eski bir anahtarda anahtar oluşturmayı sunmaz.",
   "UIExplainOnboardLong": "Burada olan şu: Latchwire, YubiKey'in içinde boş bir slotta yeni bir WireGuard anahtarı oluşturur. Anahtar hesabını kartın kendisi yapar ve özel anahtarı hiçbir zaman dışarı vermez; bu yüzden kimse onu karttan kopyalayamaz. Anahtarın kilidini kartın PIN'i açar; Latchwire PIN'i sizden ister ama saklamaz. Kart takılı ve kilidi açıkken bu bilgisayardaki programlar anahtarı kullanabilir, ancak hiçbiri kopyasını alamaz.",
   "UIExplainOnboardShort": "Anahtar kartın içinde oluşur ve karttan kopyalanamaz; kilidini PIN açar.",
   "UIExplainPubkeyLong": "Burada olan şu: bir WireGuard anahtarının iki yarısı vardır. Aşağıdaki açık anahtar sır değildir: sunucu bu bilgisayarı onunla tanır, e-postayla ya da mesajla gönderebilirsiniz. Özel anahtar kartın içinde kalır. Tünel IP'si bu bilgisayarın tünel içindeki adresidir. Sunucunun tünel ağında boş bir adres olmalıdır; örneğin sunucu 10.8.0.1 ise 10.8.0.2.",

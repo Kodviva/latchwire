@@ -111,8 +111,6 @@ func TestSurveyInvitedSkipsServerKind(t *testing.T) {
 func TestSurveyExploreAndExpertRouting(t *testing.T) {
 	u, _ := startFirstRun(t, "en")
 	tap(t, u, en(msg.UISurveyWhyExplore))
-	tap(t, u, en(msg.UISurveyCardUnsure))
-	tap(t, u, en(msg.UISurveyHelpGuided))
 	if u.screen != screenExplore {
 		t.Fatalf("screen = %v, want explore", u.screen)
 	}

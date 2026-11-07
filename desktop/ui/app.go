@@ -110,12 +110,13 @@ type UI struct {
 	// survey holds the stored answers; its Help is empty until there are
 	// some. known is set by the first successful reading of the daemon, asked
 	// once the survey was shown. draft and step are the survey under way.
-	survey   desktop.Survey
-	progress desktop.Progress
-	known    bool
-	asked    bool
-	draft    desktop.Survey
-	step     int
+	survey      desktop.Survey
+	progress    desktop.Progress
+	known       bool
+	asked       bool
+	draft       desktop.Survey
+	step        int
+	explorePage int
 	// guideOpen is set once a hints user opened the server guide's steps.
 	guideOpen bool
 }
@@ -279,7 +280,7 @@ func (u *UI) render() {
 	case screenRoadmap:
 		u.renderRoadmap()
 	case screenExplore:
-		u.renderPlaceholder(msg.UIExploreTitle)
+		u.renderExplore()
 	case screenGuide:
 		u.renderGuide()
 	case screenShare:
