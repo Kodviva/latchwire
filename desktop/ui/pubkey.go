@@ -113,6 +113,9 @@ func (u *UI) renderPubkey() {
 	if u.helping() && u.survey.Path == desktop.PathOwner {
 		buttons.Objects = append([]fyne.CanvasObject{widget.NewButton(u.t(msg.UIGuideOpen), func() { u.show(screenGuide) })}, buttons.Objects...)
 	}
+	if u.helping() && u.survey.Path == desktop.PathInvited {
+		buttons.Objects = append([]fyne.CanvasObject{widget.NewButton(u.t(msg.UIShareOpen), func() { u.show(screenShare) })}, buttons.Objects...)
+	}
 	right := container.NewBorder(s.backupBox, buttons, nil, nil)
 	u.setMain(page(split(270, 24, container.NewVScroll(container.NewVBox(left...)), right)))
 }
@@ -157,8 +160,11 @@ func (u *UI) fillBackup() {
 	s.backupBox.Refresh()
 }
 
-func (u *UI) showQR() {
-	code, err := qr.Encode(u.peerText(), qr.M)
+func (u *UI) showQR() { u.showQRText(u.peerText()) }
+
+// showQRText shows text as a QR code; it must hold public values only.
+func (u *UI) showQRText(text string) {
+	code, err := qr.Encode(text, qr.M)
 	if err != nil {
 		u.setNotice(u.translate(err))
 		return

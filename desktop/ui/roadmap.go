@@ -67,8 +67,10 @@ func (u *UI) openStep(id desktop.StepID) {
 // stepScreen is the screen of every step that has one of its own.
 func (u *UI) stepScreen(id desktop.StepID) screen {
 	switch id {
-	case desktop.StepBackupOffered, desktop.StepPubkeyShared:
+	case desktop.StepBackupOffered:
 		return screenPubkey
+	case desktop.StepPubkeyShared:
+		return screenShare
 	case desktop.StepServerAdded:
 		return screenGuide
 	case desktop.StepConnected:

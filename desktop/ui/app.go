@@ -73,6 +73,7 @@ const (
 	screenRoadmap
 	screenExplore
 	screenGuide
+	screenShare
 )
 
 // UI is the app. Its fields are touched on the Fyne goroutine only.
@@ -281,6 +282,8 @@ func (u *UI) render() {
 		u.renderPlaceholder(msg.UIExploreTitle)
 	case screenGuide:
 		u.renderGuide()
+	case screenShare:
+		u.renderShare()
 	}
 }
 

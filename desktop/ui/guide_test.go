@@ -184,7 +184,7 @@ func TestGuideDoneAndSomeoneElse(t *testing.T) {
 		t.Fatalf("screen %v, want guide", u.screen)
 	}
 	tap(t, u, en(msg.UIGuideSomeoneElse))
-	if u.screen != screenPubkey || u.progress[desktop.StepServerAdded] {
+	if u.screen != screenShare || u.progress[desktop.StepServerAdded] {
 		t.Fatalf("screen %v, progress %v", u.screen, u.progress)
 	}
 	u.show(screenGuide)
