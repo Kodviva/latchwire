@@ -29,7 +29,7 @@ called() { grep -q -- "$1" "$root/calls"; }
 # stop), unless $root/stuck exists.
 fresh() {
 	root=$(mktemp -d)
-	mkdir -p "$root/bin" "$root/sbin" "$root/usr/sbin" "$root/usr/local/latchwire/bin" "$root/var/run" "$root/var/log" \
+	mkdir -p "$root/bin" "$root/sbin" "$root/usr/bin" "$root/usr/sbin" "$root/usr/local/latchwire/bin" "$root/var/run" "$root/var/log" \
 		"$root/Library/LaunchDaemons" "$root/Library/LaunchAgents" "$root/etc/newsyslog.d" \
 		"$root/Library/Application Support/Latchwire/tunnels"
 	touch "$root/Library/LaunchDaemons/com.latchwire.daemon.plist" "$root/Library/LaunchAgents/com.latchwire.agent.plist" \
@@ -55,7 +55,8 @@ exit 0
 STUB
 	printf '#!/bin/bash\necho "pfctl $*" >>"%s/calls"\n' "$root" >"$root/sbin/pfctl"
 	printf '#!/bin/bash\necho "pkgutil $*" >>"%s/calls"\n' "$root" >"$root/usr/sbin/pkgutil"
-	chmod +x "$root/bin/launchctl" "$root/sbin/pfctl" "$root/usr/sbin/pkgutil"
+	printf '#!/bin/bash\necho "pkill $*" >>"%s/calls"\n' "$root" >"$root/usr/bin/pkill"
+	chmod +x "$root/bin/launchctl" "$root/sbin/pfctl" "$root/usr/sbin/pkgutil" "$root/usr/bin/pkill"
 	: >"$root/calls"
 }
 journal_with_steps() {
@@ -148,6 +149,29 @@ run uninstall
 check "releases the pf reference from the journal" called 'pfctl -X 12345'
 check "warns" grep -q 'could not be undone' "$root/out"
 check "keeps the journal for the record" test -e "$root/var/run/latchwire/journal.json"
+rm -rf "$root"
+
+# fake_app ID: an application bundle at /Applications/Latchwire.app.
+fake_app() {
+	mkdir -p "$root/Applications/Latchwire.app/Contents"
+	plutil -create xml1 "$root/Applications/Latchwire.app/Contents/Info.plist"
+	plutil -insert CFBundleIdentifier -string "$1" "$root/Applications/Latchwire.app/Contents/Info.plist"
+}
+
+echo "== uninstall removes the desktop application"
+fresh
+fake_app com.latchwire.desktop
+run uninstall
+check "quits it" called 'pkill -x latchwire-desktop'
+refute "application removed" test -e "$root/Applications/Latchwire.app"
+rm -rf "$root"
+
+echo "== keeps an application that is not ours"
+fresh
+fake_app com.example.other
+run uninstall
+refute "not quit" called pkill
+check "foreign application kept" test -e "$root/Applications/Latchwire.app"
 rm -rf "$root"
 
 echo "== refuses a link that is not ours"

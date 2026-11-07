@@ -24,6 +24,7 @@ fi
 LAUNCHCTL=$ROOT/bin/launchctl
 PFCTL=$ROOT/sbin/pfctl
 PKGUTIL=$ROOT/usr/sbin/pkgutil
+PKILL=$ROOT/usr/bin/pkill
 DAEMON_LABEL=com.latchwire.daemon
 AGENT_LABEL=com.latchwire.agent
 DAEMON_PLIST=$ROOT/Library/LaunchDaemons/$DAEMON_LABEL.plist
@@ -36,6 +37,8 @@ RUNDIR=$ROOT/var/run/latchwire
 JOURNAL=$RUNDIR/journal.json
 SOCKET=$ROOT/var/run/latchwire.sock
 SUPPORTDIR="$ROOT/Library/Application Support/Latchwire"
+APP="$ROOT/Applications/Latchwire.app"
+APP_ID=com.latchwire.desktop
 PF_ANCHOR=com.apple/250.latchwire
 PKG_ID=com.latchwire.pkg
 
@@ -134,6 +137,12 @@ uninstall() {
 	clean_leftovers
 
 	rm -f "$DAEMON_PLIST" "$AGENT_PLIST" "$NEWSYSLOG" "$LOGFILE"
+	# The desktop application, if the package put it there. A bundle with
+	# another identifier under the same name is not ours to delete.
+	if [ "$(plutil -extract CFBundleIdentifier raw -o - "$APP/Contents/Info.plist" 2>/dev/null)" = "$APP_ID" ]; then
+		"$PKILL" -x latchwire-desktop >/dev/null 2>&1
+		rm -rf "$APP"
+	fi
 	# Leave the link alone if someone replaced it with something else.
 	if [ "$(readlink "$CLI_LINK" 2>/dev/null)" = /usr/local/latchwire/bin/latchwire ]; then
 		rm -f "$CLI_LINK"

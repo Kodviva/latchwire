@@ -10,6 +10,7 @@ on:
       - packaging/**
       - .github/workflows/packages.yml
       - cmd/**
+      - desktop/**
       - go.mod
       - go.sum
   workflow_dispatch:
@@ -95,9 +96,11 @@ jobs:
           version=$(sh packaging/version.sh)
           echo "VERSION=$version" >>"$GITHUB_ENV"
           packaging/macos/build-universal.sh --out dist/macos/latchwire
+          packaging/macos/build-app.sh --out dist/macos/Latchwire.app
           packaging/third-party.sh --licenses dist/macos/THIRD_PARTY_LICENSES.txt
           packaging/macos/build-pkg.sh --binary dist/macos/latchwire \
-            --licenses dist/macos/THIRD_PARTY_LICENSES.txt --out "dist/macos/latchwire-$version.pkg"
+            --licenses dist/macos/THIRD_PARTY_LICENSES.txt --app dist/macos/Latchwire.app \
+            --out "dist/macos/latchwire-$version.pkg"
       - name: Cask template renders to valid Ruby
         run: |
           packaging/macos/render-cask.sh "$VERSION" "dist/macos/latchwire-$VERSION.pkg" >latchwire.rb
@@ -113,9 +116,12 @@ jobs:
             sleep 1
           done
           /usr/local/bin/latchwire version
+          test "$(lipo -archs /Applications/Latchwire.app/Contents/MacOS/latchwire-desktop)" = "x86_64 arm64"
+          codesign --verify --strict /Applications/Latchwire.app
           sudo /usr/local/bin/latchwire status
           sudo /usr/local/latchwire/lifecycle.sh uninstall --purge
           test ! -e /usr/local/latchwire
+          test ! -e /Applications/Latchwire.app
           test ! -e /Library/LaunchDaemons/com.latchwire.daemon.plist
           test ! -e /var/run/latchwire.sock
           if sudo launchctl print system/com.latchwire.daemon >/dev/null 2>&1; then exit 1; fi
