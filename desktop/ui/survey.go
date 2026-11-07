@@ -24,22 +24,28 @@ type option struct {
 	pick  func(*desktop.Survey)
 }
 
-// needsSurvey reports whether the first-run survey is due: nothing is stored,
-// the first reading of the daemon is in and shows no tunnel, and the user
-// has not been asked yet. Until that reading the answer is no, so the survey
-// does not flash up for someone who has tunnels.
+// needsSurvey reports whether the first-run survey is due: nothing is stored
+// (or the user stopped on the explore pages last time), the first reading
+// of the daemon is in and shows no tunnel, and the user has not been asked
+// yet. Until that reading the answer is no, so the survey does not flash up
+// for someone who has tunnels.
 func (u *UI) needsSurvey() bool {
-	return u.survey.Help == "" && u.known && !u.asked && len(u.statuses) == 0
+	return u.surveyOpen() && u.known && !u.asked && len(u.statuses) == 0
 }
+
+// surveyOpen reports whether the survey is still to be answered.
+func (u *UI) surveyOpen() bool { return u.survey.Help == "" || u.reask }
 
 // decideFirstRun runs after each reading until the survey question is
 // settled. A user with tunnels is an existing user: they get expert mode
-// and no questions.
+// and no questions. An explorer with tunnels keeps their answers.
 func (u *UI) decideFirstRun() {
-	if u.survey.Help != "" || !u.known || u.asked {
+	if !u.surveyOpen() || !u.known || u.asked {
 		return
 	}
 	switch {
+	case len(u.statuses) > 0 && u.reask:
+		u.reask = false
 	case len(u.statuses) > 0:
 		u.saveSurvey(expertSurvey())
 	case u.screen == screenTunnels:
@@ -56,7 +62,7 @@ func expertSurvey() desktop.Survey {
 }
 
 func (u *UI) saveSurvey(s desktop.Survey) {
-	u.survey = s
+	u.survey, u.reask = s, false
 	u.app.Preferences().SetString(prefSurvey, s.Encode())
 }
 
@@ -77,6 +83,7 @@ func (u *UI) finishSurvey(s desktop.Survey) {
 func (u *UI) loadGuide() {
 	if s, ok := desktop.DecodeSurvey(u.app.Preferences().String(prefSurvey)); ok {
 		u.survey = s
+		u.reask = s.Path == desktop.PathExplore && s.Help != desktop.HelpExpert
 	}
 	u.progress = desktop.DecodeProgress(u.app.Preferences().String(prefProgress))
 }

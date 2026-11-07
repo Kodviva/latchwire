@@ -110,10 +110,13 @@ type UI struct {
 	// survey holds the stored answers; its Help is empty until there are
 	// some. known is set by the first successful reading of the daemon, asked
 	// once the survey was shown. draft and step are the survey under way.
-	survey      desktop.Survey
-	progress    desktop.Progress
-	known       bool
-	asked       bool
+	survey   desktop.Survey
+	progress desktop.Progress
+	known    bool
+	asked    bool
+	// reask is set at launch for someone who stopped on the explore pages:
+	// with no tunnel, they get the survey again.
+	reask       bool
 	draft       desktop.Survey
 	step        int
 	explorePage int
@@ -227,6 +230,7 @@ func (u *UI) apply(devs []desktop.Device, sts []ipc.TunnelStatus, err error) {
 	u.devices, u.statuses, u.daemonErr = devs, sts, e
 	u.known = u.known || err == nil
 	u.decideFirstRun()
+	u.markHandshake()
 	if u.selected == "" && len(sts) > 0 {
 		u.selected = sts[0].Name
 	}

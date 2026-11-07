@@ -95,3 +95,23 @@ func TestReadConfLimit(t *testing.T) {
 		t.Fatal(u.notice)
 	}
 }
+
+func TestDropIgnoredWhilePopupOpen(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "office.conf")
+	os.WriteFile(p, []byte(conf), 0o600)
+	for name, open := range map[string]func(u *UI){
+		"server form": func(u *UI) { u.showServerForm() },
+		"import":      func(u *UI) { u.importConf("vpn.conf", []byte(conf)) },
+		"glossary":    func(u *UI) { u.showTerm(msg.UIGlossaryPeer) },
+	} {
+		u, _ := start(t, "en")
+		openPubkey(t, u)
+		open(u)
+		n := len(u.win.Canvas().Overlays().List())
+		u.dropped([]fyne.URI{storage.NewFileURI(p)})
+		u.dropped([]fyne.URI{storage.NewFileURI(filepath.Join(filepath.Dir(p), "a.txt"))})
+		if got := len(u.win.Canvas().Overlays().List()); got != n || u.notice != "" {
+			t.Fatalf("%s: overlays %d (was %d), notice %q", name, got, n, u.notice)
+		}
+	}
+}

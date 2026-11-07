@@ -64,10 +64,13 @@ func setErr(t *widget.RichText, s string) {
 }
 
 // showServerForm asks for the server's details and builds the tunnel from
-// them, for users who cannot write a .conf.
+// them, for users who cannot write a .conf. The keys live only in memory:
+// after a restart there are none, and the key screen, whose "Use this key"
+// leads back here, opens instead.
 func (u *UI) showServerForm() {
 	s := &u.session
 	if len(s.keys) == 0 {
+		u.show(screenOnboard)
 		return
 	}
 	allText, onlyText := u.t(msg.UIAllTraffic), u.t(msg.UIOnlyNetworks)

@@ -57,8 +57,14 @@ func (u *UI) renderShare() {
 		}
 	})
 	qrBtn := widget.NewButton(u.t(msg.UIShowQR), func() { u.showQRText(u.peerBlocks()) })
+	// An owner comes here when someone else adds the key to their server:
+	// for them, sending it finishes that step of their roadmap.
+	step := desktop.StepPubkeyShared
+	if u.survey.Path == desktop.PathOwner {
+		step = desktop.StepServerAdded
+	}
 	sent := widget.NewButton(u.t(msg.UIShareSent), func() {
-		u.markStep(desktop.StepPubkeyShared)
+		u.markStep(step)
 		u.show(screenRoadmap)
 	})
 	sent.Importance = widget.HighImportance

@@ -37,6 +37,20 @@ func (u *UI) markStep(id desktop.StepID) {
 	}
 }
 
+// markHandshake finishes the roadmap once a tunnel has had a handshake: a
+// connect that returned proves nothing until the server has answered.
+func (u *UI) markHandshake() {
+	if len(u.steps()) == 0 {
+		return
+	}
+	for _, st := range u.statuses {
+		if st.LastHandshake != "" {
+			u.markStep(desktop.StepConnected)
+			return
+		}
+	}
+}
+
 // setHelp changes the help level and redraws the open screen in place.
 func (u *UI) setHelp(h desktop.HelpLevel) {
 	if h == u.survey.Help || u.survey.Help == "" {
@@ -47,6 +61,10 @@ func (u *UI) setHelp(h desktop.HelpLevel) {
 	u.saveSurvey(s)
 	if u.screen == screenRoadmap && len(u.steps()) == 0 {
 		u.show(screenTunnels)
+		return
+	}
+	if h == desktop.HelpExpert && (u.screen == screenGuide || u.screen == screenShare) {
+		u.show(screenPubkey) // expert mode has no guides
 		return
 	}
 	u.render()

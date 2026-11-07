@@ -1,6 +1,9 @@
 package ui
 
 import (
+	"context"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"fyne.io/fyne/v2"
@@ -8,6 +11,7 @@ import (
 
 	"github.com/Kodviva/latchwire/desktop/demo"
 	"github.com/Kodviva/latchwire/internal/desktop"
+	"github.com/Kodviva/latchwire/internal/ipc"
 	"github.com/Kodviva/latchwire/internal/msg"
 )
 
@@ -121,6 +125,7 @@ func TestStepScreens(t *testing.T) {
 		desktop.StepBackupOffered: screenOnboard, // no session yet: pubkey falls back
 		desktop.StepPubkeyShared:  screenOnboard,
 		desktop.StepServerAdded:   screenOnboard,
+		desktop.StepServerInfo:    screenOnboard, // keys are gone after a restart
 		desktop.StepConnected:     screenTunnels,
 	} {
 		u.show(screenRoadmap)
@@ -128,5 +133,63 @@ func TestStepScreens(t *testing.T) {
 		if u.screen != want {
 			t.Errorf("%s: screen %v, want %v", id, u.screen, want)
 		}
+	}
+}
+
+// shakeless hides the handshake from Status until shake is set, like a
+// tunnel that is up but has not heard from its server yet.
+type shakeless struct {
+	*demo.Backend
+	shake atomic.Bool
+}
+
+func (s *shakeless) Status(ctx context.Context) ([]ipc.TunnelStatus, error) {
+	sts, err := s.Backend.Status(ctx)
+	if !s.shake.Load() {
+		for i := range sts {
+			sts[i].LastHandshake = ""
+		}
+	}
+	return sts, err
+}
+
+func TestConnectedNeedsHandshake(t *testing.T) {
+	t.Setenv("LATCHWIRE_LANG", "en")
+	a := test.NewApp()
+	t.Cleanup(func() { a.Quit() })
+	a.Preferences().SetString(prefSurvey, ownerSurvey(desktop.HelpGuided).Encode())
+	b := &shakeless{Backend: demo.NewEmpty()}
+	if err := b.Add(context.Background(), "office", "x"); err != nil {
+		t.Fatal(err)
+	}
+	u := New(a, Options{Backend: b})
+	u.win.Resize(fyne.NewSize(1000, 680))
+	sync(u)
+	u.selected = "office"
+	u.show(screenTunnels)
+	tap(t, u, "Connect")
+	eventually(t, "connected", func() bool { return strings.Contains(screenText(u), "Disconnect") })
+	sync(u)
+	if u.progress[desktop.StepConnected] || storedProgress(u)[desktop.StepConnected] {
+		t.Fatal("connected marked before the first handshake")
+	}
+	b.shake.Store(true)
+	sync(u)
+	if !u.progress[desktop.StepConnected] || !storedProgress(u)[desktop.StepConnected] {
+		t.Fatalf("handshake not recorded: %v", u.progress)
+	}
+}
+
+func TestExpertSwitchLeavesGuideAndShare(t *testing.T) {
+	for _, sc := range []screen{screenGuide, screenShare} {
+		u, _ := startGuided(t, ownerSurvey(desktop.HelpGuided))
+		openFixedPubkey(u, "10.8.0.2")
+		u.show(sc)
+		u.setHelp(desktop.HelpExpert)
+		if u.screen != screenPubkey {
+			t.Fatalf("from %v: screen %v, want pubkey", sc, u.screen)
+		}
+		noText(t, u, en(msg.UIGuideTitle))
+		noText(t, u, en(msg.UIShareTitle))
 	}
 }

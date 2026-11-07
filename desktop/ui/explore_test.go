@@ -3,6 +3,10 @@ package ui
 import (
 	"testing"
 
+	"fyne.io/fyne/v2/test"
+
+	"github.com/Kodviva/latchwire/desktop/demo"
+
 	"github.com/Kodviva/latchwire/internal/desktop"
 	"github.com/Kodviva/latchwire/internal/msg"
 )
@@ -84,5 +88,39 @@ func TestExploreTurkishIsPolite(t *testing.T) {
 		if s := msg.Render("tr", id, nil); s == "" || s == msg.Render("en", id, nil) {
 			t.Fatalf("%v not translated: %q", id, s)
 		}
+	}
+}
+
+// Someone who closed the app on the explore pages is asked again.
+func TestExploreAskedAgainOnLaunch(t *testing.T) {
+	u, _ := startGuided(t, desktop.Survey{Path: desktop.PathExplore, Help: desktop.HelpGuided})
+	if u.screen != screenSurvey || u.step != askWhy {
+		t.Fatalf("screen %v, step %d", u.screen, u.step)
+	}
+	wantText(t, u, en(msg.UISurveyWhyTitle))
+}
+
+func TestExploreWithTunnelsNotAsked(t *testing.T) {
+	t.Setenv("LATCHWIRE_LANG", "en")
+	a := test.NewApp()
+	t.Cleanup(func() { a.Quit() })
+	s := desktop.Survey{Path: desktop.PathExplore, Help: desktop.HelpGuided}
+	a.Preferences().SetString(prefSurvey, s.Encode())
+	u := New(a, Options{Backend: demo.New()})
+	sync(u)
+	if u.screen != screenTunnels || storedSurvey(t, u) != s {
+		t.Fatalf("screen %v, stored %+v", u.screen, storedSurvey(t, u))
+	}
+}
+
+// Within the session the explore pages stay put: the survey comes back on
+// the next launch only.
+func TestExploreNotAskedAgainInSession(t *testing.T) {
+	u, _ := startFirstRun(t, "en")
+	tap(t, u, en(msg.UISurveyWhyExplore))
+	u.show(screenTunnels)
+	sync(u)
+	if u.screen != screenTunnels {
+		t.Fatalf("screen %v", u.screen)
 	}
 }

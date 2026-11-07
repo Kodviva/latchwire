@@ -64,3 +64,19 @@ func TestShareQRTwoKeysAndShortAddrs(t *testing.T) {
 		t.Fatalf("notice %q", u.notice)
 	}
 }
+
+// An owner whose administrator adds the key: "Sent" finishes the owner's
+// own step, which the roadmap shows, not the invited user's.
+func TestOwnerShareMarksServerAdded(t *testing.T) {
+	u, _ := startGuided(t, ownerSurvey(desktop.HelpGuided))
+	openFixedPubkey(u, "10.8.0.2")
+	u.show(screenGuide)
+	tap(t, u, en(msg.UIGuideSomeoneElse))
+	if u.screen != screenShare {
+		t.Fatalf("screen %v, want share", u.screen)
+	}
+	tap(t, u, en(msg.UIShareSent))
+	if !storedProgress(u)[desktop.StepServerAdded] || u.screen != screenRoadmap {
+		t.Fatalf("screen %v, stored %v", u.screen, storedProgress(u))
+	}
+}

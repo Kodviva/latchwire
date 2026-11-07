@@ -76,9 +76,10 @@ func (u *UI) pickConfFyne() {
 }
 
 // dropped imports the first .conf file dropped on the window. Only the
-// public key screen takes drops.
+// public key screen takes drops, and only while no form or dialog is open
+// over it.
 func (u *UI) dropped(uris []fyne.URI) {
-	if u.screen != screenPubkey || len(uris) == 0 {
+	if u.screen != screenPubkey || len(uris) == 0 || u.win.Canvas().Overlays().Top() != nil {
 		return
 	}
 	for _, uri := range uris {
