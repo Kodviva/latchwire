@@ -72,6 +72,7 @@ const (
 	screenSurvey
 	screenRoadmap
 	screenExplore
+	screenGuide
 )
 
 // UI is the app. Its fields are touched on the Fyne goroutine only.
@@ -114,6 +115,8 @@ type UI struct {
 	asked    bool
 	draft    desktop.Survey
 	step     int
+	// guideOpen is set once a hints user opened the server guide's steps.
+	guideOpen bool
 }
 
 // New creates the app. Call Run to start it.
@@ -276,6 +279,8 @@ func (u *UI) render() {
 		u.renderRoadmap()
 	case screenExplore:
 		u.renderPlaceholder(msg.UIExploreTitle)
+	case screenGuide:
+		u.renderGuide()
 	}
 }
 

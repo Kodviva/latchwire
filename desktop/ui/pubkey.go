@@ -68,6 +68,7 @@ func (u *UI) renderPubkey() {
 		h1(u.t(title)),
 		body(u.tr(msg.UIPubBody, msg.Args{"serial": k.Ref.Serial})),
 	}
+	left = prependExplain(left, 2, u.explain(msg.UIExplainPubkeyLong, msg.UIExplainPubkeyShort))
 	if len(s.keys) > 1 {
 		var names []string
 		for _, key := range s.keys {
@@ -99,8 +100,8 @@ func (u *UI) renderPubkey() {
 	}
 	peerHead := container.NewBorder(nil, nil, nil,
 		container.NewHBox(u.copyButton(u.peerText), widget.NewButton(u.t(msg.UIShowQR), u.showQR)),
-		label(u.t(msg.UIPeerBlockLabel)))
-	left = append(left, label(u.t(msg.UITunnelIPLabel)), ip, peerHead, card(s.peer))
+		u.withTerm(label(u.t(msg.UIPeerBlockLabel)), msg.UIGlossaryPeer))
+	left = append(left, u.withTerm(label(u.t(msg.UITunnelIPLabel)), msg.UIGlossaryAllowedIPs), ip, peerHead, card(s.peer))
 
 	s.backupBox = container.NewStack()
 	u.fillBackup()
@@ -108,7 +109,11 @@ func (u *UI) renderPubkey() {
 	imp := widget.NewButton(u.t(msg.UIImportConf), u.pickConf)
 	imp.Importance = widget.HighImportance
 	finish := widget.NewButton(u.t(msg.UIFinish), func() { u.show(screenTunnels) })
-	right := container.NewBorder(s.backupBox, container.NewVBox(form, imp, finish), nil, nil)
+	buttons := container.NewVBox(form, imp, finish)
+	if u.helping() && u.survey.Path == desktop.PathOwner {
+		buttons.Objects = append([]fyne.CanvasObject{widget.NewButton(u.t(msg.UIGuideOpen), func() { u.show(screenGuide) })}, buttons.Objects...)
+	}
+	right := container.NewBorder(s.backupBox, buttons, nil, nil)
 	u.setMain(page(split(270, 24, container.NewVScroll(container.NewVBox(left...)), right)))
 }
 
@@ -213,6 +218,9 @@ func (u *UI) importConf(file string, data []byte) {
 	rows := []fyne.CanvasObject{h2(u.t(msg.UIImportTitle))}
 	if hadKey {
 		rows = append(rows, warnBox(warnText(u.t(msg.UIImportPrivateKey))))
+	}
+	if u.helping() {
+		rows = append(rows, small(u.t(msg.UIImportDeleteHint)))
 	}
 	rows = append(rows, label(u.t(msg.UITunnelName)), name)
 	var backupIP *widget.Entry
