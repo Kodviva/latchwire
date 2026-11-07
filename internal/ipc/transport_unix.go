@@ -33,6 +33,9 @@ func Dial(path string) (*Conn, error) {
 	return connFromUnix(nc.(*net.UnixConn))
 }
 
+// ListenUsers is Listen. The table of users exists on Windows only.
+func ListenUsers(path string, _ *UserTable) (net.Listener, error) { return Listen(path) }
+
 // Listen creates a unix socket listener at path with mode 0666; callers are
 // told apart by peer credentials, not file permissions. A stale socket file
 // (nothing accepts connections on it) is replaced. A live one, or a path that

@@ -1,6 +1,7 @@
 package ipc
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -12,7 +13,7 @@ import (
 func TestCloseAfterAcceptDoesNotHang(t *testing.T) {
 	for i := 0; i < 300; i++ {
 		path := ipctest.Path(t)
-		l, err := Listen(path)
+		l, err := ListenUsers(path, OpenUserTable(filepath.Join(t.TempDir(), "users.json")))
 		if err != nil {
 			t.Fatal(err)
 		}

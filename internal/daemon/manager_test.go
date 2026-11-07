@@ -32,6 +32,7 @@ import (
 	"golang.zx2c4.com/wireguard/tun/netstack"
 
 	"github.com/Kodviva/latchwire/internal/agent"
+	"github.com/Kodviva/latchwire/internal/datadir"
 	"github.com/Kodviva/latchwire/internal/ipc"
 	"github.com/Kodviva/latchwire/internal/ipc/ipctest"
 	"github.com/Kodviva/latchwire/internal/keyprovider"
@@ -62,7 +63,25 @@ var (
 
 func TestMain(m *testing.M) {
 	log.SetOutput(io.Discard) // the daemon and agent log every event
-	os.Exit(m.Run())
+	os.Exit(runTests(m))
+}
+
+// runTests runs the tests with the data directory and the table of users in
+// a scratch directory: on Windows, Serve would otherwise change the
+// machine's %ProgramData%\Latchwire.
+func runTests(m *testing.M) int {
+	scratch, err := os.MkdirTemp("", "latchwire-daemon-test")
+	if err != nil {
+		panic(err)
+	}
+	defer os.RemoveAll(scratch)
+	data := filepath.Join(scratch, "data")
+	secureDataDir = func() error { return datadir.SecureDir(data) }
+	if runtime.GOOS == "windows" {
+		users := ipc.OpenUserTable(filepath.Join(data, "users.json"))
+		hostUsers = func() *ipc.UserTable { return users }
+	}
+	return m.Run()
 }
 
 // ---- fake cards, behind a real agent.Agent ----
@@ -1557,7 +1576,7 @@ func newFakeAgent(t *testing.T, e *env, uid uint32, key *softkey.Key, serials ..
 func newLyingAgent(t *testing.T, e *env, uid uint32, pub [32]byte, key *softkey.Key, gate chan struct{}, serials ...uint32) *fakeAgent {
 	t.Helper()
 	path := fmt.Sprintf("%s-f%d", e.socket, uid)
-	l, err := ipc.Listen(path)
+	l, err := ipc.ListenUsers(path, ipc.OpenUserTable(filepath.Join(t.TempDir(), "users.json")))
 	if err != nil {
 		t.Fatal(err)
 	}
