@@ -47,7 +47,9 @@ func AdminMessage(lang string, keys []Key, addrs []netip.Addr) (subject, body st
 
 // MailtoURL is a mailto: link with a subject and a body. Spaces become %20
 // and '+' becomes %2B: mail programs read a '+' in a mailto: link literally.
+// Line breaks in the body become CRLF, %0D%0A, as RFC 6068 asks.
 func MailtoURL(subject, body string) *url.URL {
 	esc := func(s string) string { return strings.ReplaceAll(url.QueryEscape(s), "+", "%20") }
+	body = strings.ReplaceAll(strings.ReplaceAll(body, "\r\n", "\n"), "\n", "\r\n")
 	return &url.URL{Scheme: "mailto", RawQuery: "subject=" + esc(subject) + "&body=" + esc(body)}
 }

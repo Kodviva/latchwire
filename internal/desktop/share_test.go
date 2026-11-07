@@ -54,8 +54,14 @@ func TestMailtoEncodes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// RFC 6068: line breaks in a body are CRLF, %0D%0A, whatever the
+	// text had.
+	if strings.Count(s, "%0A") != 3 || strings.Count(s, "%0D%0A") != 3 {
+		t.Fatalf("line breaks not CRLF: %q", s)
+	}
 	q := back.Query()
-	if q.Get("subject") != subject || q.Get("body") != body {
+	want := "line1\r\nline2 +x&y=z\r\n[Peer]\r\nKey = ab+/cd=="
+	if q.Get("subject") != subject || q.Get("body") != want {
 		t.Fatalf("round trip: %q %q", q.Get("subject"), q.Get("body"))
 	}
 }
