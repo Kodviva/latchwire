@@ -104,10 +104,11 @@ func (u *UI) renderPubkey() {
 
 	s.backupBox = container.NewStack()
 	u.fillBackup()
+	form := widget.NewButton(u.t(msg.UIEnterServerInfo), u.showServerForm)
 	imp := widget.NewButton(u.t(msg.UIImportConf), u.pickConf)
 	imp.Importance = widget.HighImportance
 	finish := widget.NewButton(u.t(msg.UIFinish), func() { u.show(screenTunnels) })
-	right := container.NewBorder(s.backupBox, container.NewVBox(imp, finish), nil, nil)
+	right := container.NewBorder(s.backupBox, container.NewVBox(form, imp, finish), nil, nil)
 	u.setMain(page(split(270, 24, container.NewVScroll(container.NewVBox(left...)), right)))
 }
 
