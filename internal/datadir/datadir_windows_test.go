@@ -133,8 +133,14 @@ func TestSecureDirRefusesUntrustedOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := sd.String(); !strings.HasPrefix(got, "O:"+user) || !strings.Contains(got, ";;;WD)") {
-		t.Errorf("the refused directory was changed: %s", got)
+	// Compared as SIDs: SDDL writes well-known accounts by alias (LA for
+	// the built-in Administrator a CI runner may be).
+	owner, _, err := sd.Owner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want, _ := windows.StringToSid(user); !owner.Equals(want) || !strings.Contains(sd.String(), ";;;WD)") {
+		t.Errorf("the refused directory was changed: %s", sd.String())
 	}
 }
 
