@@ -1,6 +1,6 @@
 #!/bin/sh
 # Builds Latchwire.app next to this script, signed ad hoc for local use.
-# Developer ID signing and notarization belong to packaging (plan 5).
+# The release build is packaging/macos/build-app.sh, signed by sign-app.sh.
 # Usage: desktop/build_macos.sh [go build flags, for example -tags demo]
 set -eu
 cd "$(dirname "$0")"

@@ -10,6 +10,7 @@ import (
 
 	"github.com/Kodviva/latchwire/internal/ipc"
 	"github.com/Kodviva/latchwire/internal/keyref"
+	"github.com/Kodviva/latchwire/internal/killswitch"
 	"github.com/Kodviva/latchwire/internal/netcfg"
 	"github.com/Kodviva/latchwire/internal/netmon"
 )
@@ -235,10 +236,9 @@ func TestOnDemandDisconnectsOnTrusted(t *testing.T) {
 	if st := e.status(); st.KillSwitch != ipc.KillSwitchStatusOff {
 		t.Fatalf("kill switch %q after the on-demand disconnect, want off", st.KillSwitch)
 	}
-	sets := e.fw.all()
-	if len(sets) == 0 || sets[len(sets)-1].Block {
-		t.Fatalf("kill switch still blocking on the trusted network: %+v", sets)
-	}
+	// The state turns disconnected before the device closes and the kill
+	// switch follows it, so wait for the release rather than read it once.
+	e.fw.waitLast(t, "a release on the trusted network", func(s killswitch.State) bool { return !s.Block })
 
 	// Connected by hand on the trusted network: on-demand leaves it, here
 	// and after a round trip through an untrusted network.

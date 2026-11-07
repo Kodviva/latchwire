@@ -41,8 +41,12 @@ packaging/third-party.sh --licenses dist/macos/THIRD_PARTY_LICENSES.txt
 packaging/macos/build-pkg.sh --binary dist/macos/latchwire --licenses dist/macos/THIRD_PARTY_LICENSES.txt --out dist/macos/latchwire.pkg
 ```
 
-`build-pkg.sh --app PATH` adds a desktop application bundle to `/Applications`
-when one exists. Nothing depends on it.
+`build-pkg.sh --app PATH` adds the desktop application to `/Applications`.
+Build it, universal and unsigned, with:
+
+```bash
+packaging/macos/build-app.sh --out dist/macos/Latchwire.app
+```
 
 ## Check that two builds match
 
@@ -102,18 +106,34 @@ on a machine you care about to test it.
 ## Release (macOS), by a person
 
 Nothing in the repository holds a credential, and CI signs nothing. Every
-script stops with the name of what is missing. The order matters: the binary
-is signed before it goes into the package.
+script stops with the name of what is missing.
 
-1. Build the universal binary.
-2. `DEVELOPER_ID_APPLICATION=... packaging/macos/sign-binary.sh dist/macos/latchwire`
-3. Build the package from that binary.
-4. `DEVELOPER_ID_INSTALLER=... packaging/macos/sign-pkg.sh in.pkg latchwire-X.Y.Z.pkg`
-5. Create a notarization profile once with `xcrun notarytool store-credentials`.
-   Then run `NOTARY_KEYCHAIN_PROFILE=... packaging/macos/notarize.sh latchwire-X.Y.Z.pkg`.
-   For CI use `APPLE_API_KEY_PATH`, `APPLE_API_KEY_ID` and `APPLE_API_ISSUER`.
-6. `packaging/macos/render-cask.sh X.Y.Z latchwire-X.Y.Z.pkg` prints the cask.
-   The URL in it expects the file on the GitHub release `vX.Y.Z`.
+What the Apple Developer account must hold, once:
+
+- a `Developer ID Application` certificate, for the CLI and the application;
+- a `Developer ID Installer` certificate, for the package. Only the account
+  holder can create one;
+- notarization credentials: `xcrun notarytool store-credentials latchwire`
+  stores an app-specific password or an App Store Connect API key in the
+  keychain under the profile name `latchwire`.
+
+Then, on a clean checkout of the tag `vX.Y.Z`:
+
+```bash
+DEVELOPER_ID_APPLICATION='Developer ID Application: NAME (TEAMID)' DEVELOPER_ID_INSTALLER='Developer ID Installer: NAME (TEAMID)' NOTARY_KEYCHAIN_PROFILE=latchwire packaging/macos/release.sh
+```
+
+`release.sh` checks every credential first, then builds and signs the CLI and
+the application, builds and signs the package around them, notarizes and
+staples it, and asks Gatekeeper to accept it. It writes
+`latchwire-X.Y.Z.pkg`, `latchwire.rb` (the cask, whose URL expects the file
+on the GitHub release `vX.Y.Z`), `SHA256SUMS` and `BUILD-INFO` to
+`dist/macos`. For CI, give `APPLE_API_KEY_PATH`, `APPLE_API_KEY_ID` and
+`APPLE_API_ISSUER` instead of the profile.
+
+Each step also runs alone: `sign-binary.sh`, `sign-app.sh`, `sign-pkg.sh`,
+`notarize.sh`, `render-cask.sh`. The order matters: what goes into the
+package is signed before the package is built.
 
 The Linux packages are not signed yet: there is no signing key and no
 repository. Publish `SHA256SUMS` and `BUILD-INFO` with the release. Current
