@@ -29,7 +29,11 @@ import (
 // card within a second, so the screen follows within about three.
 const pollEvery = 2 * time.Second
 
-const prefLang = "lang"
+const (
+	prefLang     = "lang"
+	prefSurvey   = "guide.survey"
+	prefProgress = "guide.progress"
+)
 
 // Backend is what the shell needs from the outside world. *desktop.Client
 // and desktop.Cards provide it in production, package demo in the demo build.
@@ -65,6 +69,9 @@ const (
 	screenTunnels screen = iota
 	screenOnboard
 	screenPubkey
+	screenSurvey
+	screenRoadmap
+	screenExplore
 )
 
 // UI is the app. Its fields are touched on the Fyne goroutine only.
@@ -97,6 +104,16 @@ type UI struct {
 
 	card    onboardState
 	session pubkeyState
+
+	// survey holds the stored answers; its Help is empty until there are
+	// some. known is set by the first successful reading of the daemon, asked
+	// once the survey was shown. draft and step are the survey under way.
+	survey   desktop.Survey
+	progress desktop.Progress
+	known    bool
+	asked    bool
+	draft    desktop.Survey
+	step     int
 }
 
 // New creates the app. Call Run to start it.
@@ -104,6 +121,7 @@ func New(a fyne.App, o Options) *UI {
 	a.Settings().SetTheme(newTheme())
 	u := &UI{app: a, opts: o, b: o.Backend, infos: map[uint32]desktop.CardInfo{}, pending: map[string]bool{}}
 	u.lang = chooseLanguage(a)
+	u.loadGuide()
 	u.win = a.NewWindow("Latchwire")
 	u.win.Resize(fyne.NewSize(1000, 680))
 	u.win.SetOnDropped(func(_ fyne.Position, uris []fyne.URI) { u.dropped(uris) })
@@ -202,6 +220,8 @@ func (u *UI) apply(devs []desktop.Device, sts []ipc.TunnelStatus, err error) {
 	changedDevices := !slices.Equal(devs, u.devices)
 	changedTunnels := !slices.Equal(sts, u.statuses) || e != u.daemonErr
 	u.devices, u.statuses, u.daemonErr = devs, sts, e
+	u.known = u.known || err == nil
+	u.decideFirstRun()
 	if u.selected == "" && len(sts) > 0 {
 		u.selected = sts[0].Name
 	}
@@ -231,6 +251,10 @@ func (u *UI) apply(devs []desktop.Device, sts []ipc.TunnelStatus, err error) {
 		if changedTunnels {
 			u.renderSidebar()
 		}
+	default:
+		if changedTunnels {
+			u.renderSidebar()
+		}
 	}
 	u.updateTray()
 }
@@ -246,6 +270,12 @@ func (u *UI) render() {
 		u.renderOnboard()
 	case screenPubkey:
 		u.renderPubkey()
+	case screenSurvey:
+		u.renderSurvey()
+	case screenRoadmap:
+		u.renderPlaceholder(msg.UIRoadmapTitle)
+	case screenExplore:
+		u.renderPlaceholder(msg.UIExploreTitle)
 	}
 }
 

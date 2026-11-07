@@ -46,6 +46,13 @@ func New() *Backend {
 	return b
 }
 
+// NewEmpty returns New's backend without any tunnel, as a new user has it.
+func NewEmpty() *Backend {
+	b := New()
+	b.tunnels = nil
+	return b
+}
+
 // SetCard plugs a card in or removes it, the way the daemon reacts: a tunnel
 // on a removed card goes to card_removed at once.
 func (b *Backend) SetCard(serial uint32, in bool) {

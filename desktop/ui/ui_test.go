@@ -24,10 +24,26 @@ import (
 
 func start(t *testing.T, lang string) (*UI, *demo.Backend) {
 	t.Helper()
+	return startWith(t, lang, demo.New(), true)
+}
+
+// startFirstRun starts the app the way a new user sees it: no stored
+// survey and no tunnels.
+func startFirstRun(t *testing.T, lang string) (*UI, *demo.Backend) {
+	t.Helper()
+	return startWith(t, lang, demo.NewEmpty(), false)
+}
+
+// startWith starts the app on b. expert stores the expert survey first,
+// which keeps the first-run survey out of the way.
+func startWith(t *testing.T, lang string, b *demo.Backend, expert bool) (*UI, *demo.Backend) {
+	t.Helper()
 	t.Setenv("LATCHWIRE_LANG", lang)
 	a := test.NewApp()
 	t.Cleanup(func() { a.Quit() })
-	b := demo.New()
+	if expert {
+		a.Preferences().SetString(prefSurvey, desktop.Survey{Path: desktop.PathOwner, Help: desktop.HelpExpert}.Encode())
+	}
 	u := New(a, Options{Backend: b})
 	u.win.Resize(fyne.NewSize(1000, 680))
 	sync(u)
