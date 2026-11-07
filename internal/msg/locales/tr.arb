@@ -251,6 +251,7 @@
   "UIQRBody": "Yalnızca açık anahtarı ve tünel IP'sini içerir; içinde gizli bir bilgi yoktur.",
   "UIClose": "Kapat",
   "UIImportConf": "Sunucunun .conf dosyasını içe aktar",
+  "UIDropNotConf": "Buraya yalnızca .conf dosyası eklenebilir.",
   "UIImportTitle": ".conf dosyasından tünel ekle",
   "UITunnelName": "Tünel adı",
   "UIBackupAddressLabel": "Yedek kartın tünel IP'si",

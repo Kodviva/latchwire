@@ -625,3 +625,11 @@ func TestFreshChecks(t *testing.T) {
 		t.Fatal(s)
 	}
 }
+
+// openPubkey leaves the UI on the public key screen with a fresh key.
+func openPubkey(t *testing.T, u *UI) {
+	t.Helper()
+	u.show(screenOnboard)
+	sync(u)
+	generate(t, u)
+}

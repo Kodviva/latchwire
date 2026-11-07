@@ -426,6 +426,7 @@ const (
 	UIQRBody             ID = "UIQRBody"
 	UIClose              ID = "UIClose"
 	UIImportConf         ID = "UIImportConf"
+	UIDropNotConf        ID = "UIDropNotConf"
 	UIImportTitle        ID = "UIImportTitle"
 	UITunnelName         ID = "UITunnelName"
 	UIBackupAddressLabel ID = "UIBackupAddressLabel"

@@ -772,6 +772,7 @@
   "UIQRBody": "It holds only the public key and the tunnel IP. There is nothing secret in it.",
   "UIClose": "Close",
   "UIImportConf": "Import the server's .conf file",
+  "UIDropNotConf": "Only .conf files can be added here.",
   "UIImportTitle": "Add tunnel from .conf",
   "UITunnelName": "Tunnel name",
   "UIBackupAddressLabel": "Tunnel IP of the backup card",

@@ -85,6 +85,7 @@ type UI struct {
 	screen   screen
 	selected string // tunnel shown
 	notice   string
+	pick     picker // the file picker; nil means the system's
 
 	statuses  []ipc.TunnelStatus
 	devices   []desktop.Device
@@ -105,6 +106,7 @@ func New(a fyne.App, o Options) *UI {
 	u.lang = chooseLanguage(a)
 	u.win = a.NewWindow("Latchwire")
 	u.win.Resize(fyne.NewSize(1000, 680))
+	u.win.SetOnDropped(func(_ fyne.Position, uris []fyne.URI) { u.dropped(uris) })
 	u.win.SetCloseIntercept(func() { u.win.Hide() })
 	u.sidebar = container.NewStack()
 	u.notices = container.NewVBox()

@@ -4,7 +4,6 @@ import (
 	"context"
 	"image"
 	"image/color"
-	"io"
 	"net/netip"
 	"path/filepath"
 	"strings"
@@ -13,9 +12,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
-	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/widget"
 	"rsc.io/qr"
 
@@ -187,32 +184,6 @@ func qrImage(c *qr.Code) image.Image {
 		}
 	}
 	return img
-}
-
-func (u *UI) pickConf() {
-	d := dialog.NewFileOpen(func(r fyne.URIReadCloser, err error) {
-		if err != nil {
-			u.setNotice(u.translate(err))
-			return
-		}
-		if r == nil {
-			return
-		}
-		defer r.Close()
-		data, err := io.ReadAll(io.LimitReader(r, maxConfBytes+1))
-		defer clear(data)
-		if err != nil {
-			u.setNotice(u.translate(err))
-			return
-		}
-		if len(data) > maxConfBytes {
-			u.setNotice(u.tr("ConfigTooLargeFmt", msg.Args{"limit": maxConfBytes}))
-			return
-		}
-		u.importConf(r.URI().Name(), data)
-	}, u.win)
-	d.SetFilter(storage.NewExtensionFileFilter([]string{".conf"}))
-	d.Show()
 }
 
 // tunnelNameFrom suggests a tunnel name from a file name.
