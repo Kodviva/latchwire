@@ -132,7 +132,11 @@ func TestGuideHasKeyAndVersion(t *testing.T) {
 		u.show(screenGuide)
 		key := fixedKey().PublicBase64()
 		wantText(t, u, key)
-		wantText(t, u, "10.8.0.2/32")
+		if k == desktop.ServerPfSense {
+			wantText(t, u, "\n10.8.0.2\n") // the mask has a box of its own
+		} else {
+			wantText(t, u, "10.8.0.2/32")
+		}
 		if v, ok := versions[k]; ok {
 			wantText(t, u, msg.Render("en", msg.UIGuideVersionNote, msg.Args{"product": v[0], "version": v[1]}))
 		} else {
@@ -149,7 +153,8 @@ func TestGuideCommands(t *testing.T) {
 	u, _ := startGuided(t, s)
 	openFixedPubkey(u, "10.8.0.2")
 	u.show(screenGuide)
-	wantText(t, u, "sudo wg syncconf wg0 <(wg-quick strip wg0)")
+	wantText(t, u, "sudo bash -c 'wg syncconf wg0 <(wg-quick strip wg0)'")
+	noText(t, u, "sudo -i")
 	wantText(t, u, desktop.PeerBlock("en", fixedKey(), netip.MustParseAddr("10.8.0.2")))
 
 	s.Server = desktop.ServerMikroTik
@@ -157,6 +162,27 @@ func TestGuideCommands(t *testing.T) {
 	openFixedPubkey(u, "10.8.0.2")
 	u.show(screenGuide)
 	wantText(t, u, `/interface/wireguard/peers/add interface=wireguard1 public-key="`+fixedKey().PublicBase64()+`" allowed-address=10.8.0.2/32`)
+	for _, menu := range []string{"New Terminal", "WebFig", "Add New"} {
+		wantText(t, u, menu)
+	}
+}
+
+func TestPfSenseCopiesBareIP(t *testing.T) {
+	s := ownerSurvey(desktop.HelpGuided)
+	s.Server = desktop.ServerPfSense
+	u, _ := startGuided(t, s)
+	openFixedPubkey(u, "10.8.0.2")
+	u.show(screenGuide)
+	var copied []string
+	walk(u, func(o fyne.CanvasObject) {
+		if b, ok := o.(*widget.Button); ok && b.Text == en(msg.UICopy) {
+			test.Tap(b)
+			copied = append(copied, u.app.Clipboard().Content())
+		}
+	})
+	if want := []string{fixedKey().PublicBase64(), "10.8.0.2"}; !slices.Equal(copied, want) {
+		t.Fatalf("copied %q, want %q", copied, want)
+	}
 }
 
 func TestGuideCopiesOnlyPublicValues(t *testing.T) {

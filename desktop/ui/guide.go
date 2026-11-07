@@ -31,7 +31,8 @@ type serverGuide struct {
 }
 
 // syncconf reloads a wg-quick interface without dropping its other peers.
-const syncconf = "sudo wg syncconf wg0 <(wg-quick strip wg0)"
+// The whole line runs as root: wg0.conf is readable by root only.
+const syncconf = "sudo bash -c 'wg syncconf wg0 <(wg-quick strip wg0)'"
 
 var guides = map[desktop.ServerKind]serverGuide{
 	desktop.ServerOPNsense: {"OPNsense", "26.x", []guideStep{
@@ -42,7 +43,7 @@ var guides = map[desktop.ServerKind]serverGuide{
 	}},
 	desktop.ServerPfSense: {"pfSense", "CE 2.8 / Plus 25.x", []guideStep{
 		{text: msg.UIGuidePfSense1},
-		{text: msg.UIGuidePfSense2, values: (*UI).peerValues, term: msg.UIGlossaryAllowedIPs},
+		{text: msg.UIGuidePfSense2, values: (*UI).pfSenseValues, term: msg.UIGlossaryAllowedIPs},
 		{text: msg.UIGuidePfSense3},
 		{text: msg.UIGuidePfSense4, term: msg.UIGlossaryEndpoint},
 	}},
@@ -127,6 +128,24 @@ func (u *UI) peerValues() []fyne.CanvasObject {
 		out = append(out,
 			label(u.t(msg.UIPublicKey)), u.copyField(k.PublicBase64(), true),
 			label(u.t(msg.UIGuideAllowedLabel)), u.copyField(allowed, ok))
+		out = append(out, u.noIP(ok)...)
+	}
+	return out
+}
+
+// pfSenseValues are peerValues with the bare tunnel IP: the pfSense peer
+// form takes the mask in a box of its own.
+func (u *UI) pfSenseValues() []fyne.CanvasObject {
+	var out []fyne.CanvasObject
+	for i, k := range u.session.keys {
+		ip, ok := msg.Translate(u.lang, msg.KeygenTunnelIP), false
+		if a, valid := u.tunnelAddr(i); valid {
+			ip, ok = a.String(), true
+		}
+		out = append(out, u.keyHead(i)...)
+		out = append(out,
+			label(u.t(msg.UIPublicKey)), u.copyField(k.PublicBase64(), true),
+			label(u.t(msg.UIGuideAllowedLabel)), u.copyField(ip, ok))
 		out = append(out, u.noIP(ok)...)
 	}
 	return out
