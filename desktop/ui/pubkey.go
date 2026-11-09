@@ -4,7 +4,6 @@ import (
 	"context"
 	"image"
 	"image/color"
-	"io"
 	"net/netip"
 	"path/filepath"
 	"strings"
@@ -13,9 +12,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
-	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/widget"
 	"rsc.io/qr"
 
@@ -71,6 +68,7 @@ func (u *UI) renderPubkey() {
 		h1(u.t(title)),
 		body(u.tr(msg.UIPubBody, msg.Args{"serial": k.Ref.Serial})),
 	}
+	left = prependExplain(left, 2, u.explain(msg.UIExplainPubkeyLong, msg.UIExplainPubkeyShort))
 	if len(s.keys) > 1 {
 		var names []string
 		for _, key := range s.keys {
@@ -102,15 +100,23 @@ func (u *UI) renderPubkey() {
 	}
 	peerHead := container.NewBorder(nil, nil, nil,
 		container.NewHBox(u.copyButton(u.peerText), widget.NewButton(u.t(msg.UIShowQR), u.showQR)),
-		label(u.t(msg.UIPeerBlockLabel)))
-	left = append(left, label(u.t(msg.UITunnelIPLabel)), ip, peerHead, card(s.peer))
+		u.withTerm(label(u.t(msg.UIPeerBlockLabel)), msg.UIGlossaryPeer))
+	left = append(left, u.withTerm(label(u.t(msg.UITunnelIPLabel)), msg.UIGlossaryAllowedIPs), ip, peerHead, card(s.peer))
 
 	s.backupBox = container.NewStack()
 	u.fillBackup()
+	form := widget.NewButton(u.t(msg.UIEnterServerInfo), u.showServerForm)
 	imp := widget.NewButton(u.t(msg.UIImportConf), u.pickConf)
 	imp.Importance = widget.HighImportance
 	finish := widget.NewButton(u.t(msg.UIFinish), func() { u.show(screenTunnels) })
-	right := container.NewBorder(s.backupBox, container.NewVBox(imp, finish), nil, nil)
+	buttons := container.NewVBox(form, imp, finish)
+	if u.helping() && u.survey.Path == desktop.PathOwner {
+		buttons.Objects = append([]fyne.CanvasObject{widget.NewButton(u.t(msg.UIGuideOpen), func() { u.show(screenGuide) })}, buttons.Objects...)
+	}
+	if u.helping() && u.survey.Path == desktop.PathInvited {
+		buttons.Objects = append([]fyne.CanvasObject{widget.NewButton(u.t(msg.UIShareOpen), func() { u.show(screenShare) })}, buttons.Objects...)
+	}
+	right := container.NewBorder(s.backupBox, buttons, nil, nil)
 	u.setMain(page(split(270, 24, container.NewVScroll(container.NewVBox(left...)), right)))
 }
 
@@ -133,6 +139,7 @@ func (u *UI) otherDevice() (desktop.Device, bool) {
 // fillBackup draws the backup offer (spec goal 4).
 func (u *UI) fillBackup() {
 	s := &u.session
+	u.markStep(desktop.StepBackupOffered)
 	rows := []fyne.CanvasObject{rich(u.t(msg.UIBackupTitle), nameAmber, "", fyne.TextStyle{Bold: true})}
 	if len(s.keys) > 1 {
 		rows = append(rows, warnText(u.tr(msg.UIBackupReady, msg.Args{"serial": s.keys[1].Ref.Serial})))
@@ -153,10 +160,13 @@ func (u *UI) fillBackup() {
 	s.backupBox.Refresh()
 }
 
-func (u *UI) showQR() {
-	code, err := qr.Encode(u.peerText(), qr.M)
+func (u *UI) showQR() { u.showQRText(u.peerText()) }
+
+// showQRText shows text as a QR code; it must hold public values only.
+func (u *UI) showQRText(text string) {
+	code, err := qr.Encode(text, qr.M)
 	if err != nil {
-		u.setNotice(u.translate(err))
+		u.setNotice(u.t(msg.UIShareQRTooLong))
 		return
 	}
 	img := canvas.NewImageFromImage(qrImage(code))
@@ -189,32 +199,6 @@ func qrImage(c *qr.Code) image.Image {
 	return img
 }
 
-func (u *UI) pickConf() {
-	d := dialog.NewFileOpen(func(r fyne.URIReadCloser, err error) {
-		if err != nil {
-			u.setNotice(u.translate(err))
-			return
-		}
-		if r == nil {
-			return
-		}
-		defer r.Close()
-		data, err := io.ReadAll(io.LimitReader(r, maxConfBytes+1))
-		defer clear(data)
-		if err != nil {
-			u.setNotice(u.translate(err))
-			return
-		}
-		if len(data) > maxConfBytes {
-			u.setNotice(u.tr("ConfigTooLargeFmt", msg.Args{"limit": maxConfBytes}))
-			return
-		}
-		u.importConf(r.URI().Name(), data)
-	}, u.win)
-	d.SetFilter(storage.NewExtensionFileFilter([]string{".conf"}))
-	d.Show()
-}
-
 // tunnelNameFrom suggests a tunnel name from a file name.
 func tunnelNameFrom(file string) string {
 	s := strings.TrimSuffix(filepath.Base(file), filepath.Ext(file))
@@ -241,6 +225,9 @@ func (u *UI) importConf(file string, data []byte) {
 	if hadKey {
 		rows = append(rows, warnBox(warnText(u.t(msg.UIImportPrivateKey))))
 	}
+	if u.helping() {
+		rows = append(rows, small(u.t(msg.UIImportDeleteHint)))
+	}
 	rows = append(rows, label(u.t(msg.UITunnelName)), name)
 	var backupIP *widget.Entry
 	if len(s.keys) > 1 {
@@ -258,40 +245,51 @@ func (u *UI) importConf(file string, data []byte) {
 	add := widget.NewButton(u.t(msg.UIImportAdd), nil)
 	add.Importance = widget.HighImportance
 	add.OnTapped = func() {
-		var backup *desktop.Backup
-		if backupIP != nil {
-			ip, err := netip.ParseAddr(strings.TrimSpace(backupIP.Text))
-			if err != nil {
-				showErr(u.t(msg.UITunnelIPInvalid))
-				return
-			}
-			backup = &desktop.Backup{Key: s.keys[1], Address: ip}
-		}
-		cfg, err := desktop.Bind(text, s.keys[0], backup)
-		if err != nil {
-			showErr(u.translate(err))
-			return
-		}
-		add.Disable()
-		tunnel := strings.TrimSpace(name.Text)
-		go func() {
-			err := u.b.Add(context.Background(), tunnel, cfg)
-			fyne.Do(func() {
-				add.Enable()
-				if err != nil {
-					showErr(u.translate(err))
-					return
-				}
-				pop.Hide()
-				u.notice = u.tr(msg.UIImportAdded, msg.Args{"name": tunnel})
-				u.selected = tunnel
-				u.show(screenTunnels)
-			})
-			u.pollOnce(context.Background())
-		}()
+		u.addTunnel(text, strings.TrimSpace(name.Text), backupIP, add, func() { pop.Hide() }, showErr, showErr)
 	}
 	cancel := widget.NewButton(u.t(msg.UICancel), func() { pop.Hide() })
 	rows = append(rows, errText, container.NewHBox(layout.NewSpacer(), cancel, add))
 	pop = modal(u.win, 480, container.NewVBox(rows...))
 	pop.Show()
+}
+
+// addTunnel is the step both ways of adding a tunnel end in: it reads the
+// backup card's tunnel IP from backupIP (nil when there is no backup card),
+// binds text to the session's keys, adds the tunnel and, on success, closes
+// the form and shows the tunnel list. The caller shows errors its own way:
+// ipErr for a bad backup IP, showErr for everything else. add is disabled
+// while the daemon works.
+func (u *UI) addTunnel(text, tunnel string, backupIP *widget.Entry, add *widget.Button, closeForm func(), ipErr, showErr func(string)) {
+	s := &u.session
+	var backup *desktop.Backup
+	if backupIP != nil {
+		ip, err := netip.ParseAddr(strings.TrimSpace(backupIP.Text))
+		if err != nil {
+			ipErr(u.t(msg.UITunnelIPInvalid))
+			return
+		}
+		backup = &desktop.Backup{Key: s.keys[1], Address: ip}
+	}
+	cfg, err := desktop.Bind(text, s.keys[0], backup)
+	if err != nil {
+		showErr(u.translate(err))
+		return
+	}
+	add.Disable()
+	go func() {
+		err := u.b.Add(context.Background(), tunnel, cfg)
+		fyne.Do(func() {
+			add.Enable()
+			if err != nil {
+				showErr(u.translate(err))
+				return
+			}
+			closeForm()
+			u.markStep(desktop.StepServerInfo)
+			u.notice = u.tr(msg.UIImportAdded, msg.Args{"name": tunnel})
+			u.selected = tunnel
+			u.show(screenTunnels)
+		})
+		u.pollOnce(context.Background())
+	}()
 }

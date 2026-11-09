@@ -31,6 +31,12 @@ func (u *UI) selectedStatus() (ipc.TunnelStatus, bool) {
 // renderTunnels draws the tunnel screen. onlyIfChanged skips the redraw when
 // nothing the user can see differs.
 func (u *UI) renderTunnels(onlyIfChanged bool) {
+	if u.surveyOpen() && !u.known && u.daemonErr == "" {
+		// The first reading decides between this screen and the survey.
+		u.shownView = nil
+		u.setMain(container.NewStack())
+		return
+	}
 	st, ok := u.selectedStatus()
 	if !ok {
 		u.shownView = nil

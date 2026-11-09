@@ -1,0 +1,72 @@
+TUNNELS
+TUNNELS
+office
+office
+servers
+servers
++ New tunnel
++ New tunnel
++ New tunnel
+Language
+Language
+English
+English
+Help level
+Help level
+Expert
+Expert
+STEP 2 / 2
+STEP 2 / 2
+Key on the card
+Key on the card
+Add only this public key to your server. The private key stays inside YubiKey 40727512.
+Add only this public key to your server. The private key
+stays inside YubiKey 40727512.
+Public key
+Public key
+AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=
+AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobH
+B0eHyA=
+Copy
+Copy
+Copy
+Tunnel IP of this client
+Tunnel IP of this client
+10.8.0.2
+10.8.0.2
+Peer to add on the server
+Peer to add on the server
+Copy
+Copy
+Copy
+Show QR
+Show QR
+Show QR
+[Peer]
+PublicKey = AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=
+AllowedIPs = 10.8.0.2/32
+[Peer]
+PublicKey = AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcY
+GRobHB0eHyA=
+AllowedIPs = 10.8.0.2/32
+Add a backup card
+Add a backup card
+This key cannot be copied. In case the card is lost, create a separate key on a second YubiKey and add it to the server as a second peer with its own tunnel IP.
+This key cannot be copied. In
+case the card is lost, create a
+separate key on a second
+YubiKey and add it to the server
+as a second peer with its own
+tunnel IP.
+Create for 40727513 too
+Create for 40727513 too
+Create for 40727513 too
+Enter server details
+Enter server details
+Enter server details
+Import the server's .conf file
+Import the server's .conf file
+Import the server's .conf file
+Done, go to tunnels
+Done, go to tunnels
+Done, go to tunnels

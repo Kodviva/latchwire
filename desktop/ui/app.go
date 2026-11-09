@@ -29,7 +29,11 @@ import (
 // card within a second, so the screen follows within about three.
 const pollEvery = 2 * time.Second
 
-const prefLang = "lang"
+const (
+	prefLang     = "lang"
+	prefSurvey   = "guide.survey"
+	prefProgress = "guide.progress"
+)
 
 // Backend is what the shell needs from the outside world. *desktop.Client
 // and desktop.Cards provide it in production, package demo in the demo build.
@@ -65,6 +69,11 @@ const (
 	screenTunnels screen = iota
 	screenOnboard
 	screenPubkey
+	screenSurvey
+	screenRoadmap
+	screenExplore
+	screenGuide
+	screenShare
 )
 
 // UI is the app. Its fields are touched on the Fyne goroutine only.
@@ -85,6 +94,7 @@ type UI struct {
 	screen   screen
 	selected string // tunnel shown
 	notice   string
+	pick     picker // the file picker; nil means the system's
 
 	statuses  []ipc.TunnelStatus
 	devices   []desktop.Device
@@ -96,6 +106,22 @@ type UI struct {
 
 	card    onboardState
 	session pubkeyState
+
+	// survey holds the stored answers; its Help is empty until there are
+	// some. known is set by the first successful reading of the daemon, asked
+	// once the survey was shown. draft and step are the survey under way.
+	survey   desktop.Survey
+	progress desktop.Progress
+	known    bool
+	asked    bool
+	// reask is set at launch for someone who stopped on the explore pages:
+	// with no tunnel, they get the survey again.
+	reask       bool
+	draft       desktop.Survey
+	step        int
+	explorePage int
+	// guideOpen is set once a hints user opened the server guide's steps.
+	guideOpen bool
 }
 
 // New creates the app. Call Run to start it.
@@ -103,8 +129,10 @@ func New(a fyne.App, o Options) *UI {
 	a.Settings().SetTheme(newTheme())
 	u := &UI{app: a, opts: o, b: o.Backend, infos: map[uint32]desktop.CardInfo{}, pending: map[string]bool{}}
 	u.lang = chooseLanguage(a)
+	u.loadGuide()
 	u.win = a.NewWindow("Latchwire")
 	u.win.Resize(fyne.NewSize(1000, 680))
+	u.win.SetOnDropped(func(_ fyne.Position, uris []fyne.URI) { u.dropped(uris) })
 	u.win.SetCloseIntercept(func() { u.win.Hide() })
 	u.sidebar = container.NewStack()
 	u.notices = container.NewVBox()
@@ -200,6 +228,9 @@ func (u *UI) apply(devs []desktop.Device, sts []ipc.TunnelStatus, err error) {
 	changedDevices := !slices.Equal(devs, u.devices)
 	changedTunnels := !slices.Equal(sts, u.statuses) || e != u.daemonErr
 	u.devices, u.statuses, u.daemonErr = devs, sts, e
+	u.known = u.known || err == nil
+	u.decideFirstRun()
+	u.markHandshake()
 	if u.selected == "" && len(sts) > 0 {
 		u.selected = sts[0].Name
 	}
@@ -229,6 +260,10 @@ func (u *UI) apply(devs []desktop.Device, sts []ipc.TunnelStatus, err error) {
 		if changedTunnels {
 			u.renderSidebar()
 		}
+	default:
+		if changedTunnels {
+			u.renderSidebar()
+		}
 	}
 	u.updateTray()
 }
@@ -244,6 +279,16 @@ func (u *UI) render() {
 		u.renderOnboard()
 	case screenPubkey:
 		u.renderPubkey()
+	case screenSurvey:
+		u.renderSurvey()
+	case screenRoadmap:
+		u.renderRoadmap()
+	case screenExplore:
+		u.renderExplore()
+	case screenGuide:
+		u.renderGuide()
+	case screenShare:
+		u.renderShare()
 	}
 }
 
@@ -286,7 +331,12 @@ func strip(o fyne.CanvasObject) fyne.CanvasObject {
 }
 
 func (u *UI) renderSidebar() {
-	rows := []fyne.CanvasObject{section(u.t(msg.UITunnelsHeader))}
+	var rows []fyne.CanvasObject
+	if u.roadmapOpen() {
+		row := container.NewBorder(nil, nil, nil, nil, strong(u.t(msg.UIRoadmapTitle)))
+		rows = append(rows, newTapCard(row, u.screen == screenRoadmap, true, func() { u.show(screenRoadmap) }))
+	}
+	rows = append(rows, section(u.t(msg.UITunnelsHeader)))
 	for _, st := range u.statuses {
 		name := st.Name
 		lit := st.State == daemon.StateConnected
@@ -305,6 +355,9 @@ func (u *UI) renderSidebar() {
 	}
 	sel.OnChanged = func(string) { u.setLanguage(codes[sel.SelectedIndex()]) }
 	foot := container.NewVBox(add, widget.NewSeparator(), small(u.t(msg.UILanguage)), sel)
+	if u.survey.Help != "" {
+		foot.Add(u.helpSelect())
+	}
 	u.sidebar.Objects = []fyne.CanvasObject{container.NewBorder(container.NewVBox(rows...), foot, nil, nil)}
 	u.sidebar.Refresh()
 }

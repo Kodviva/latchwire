@@ -24,10 +24,26 @@ import (
 
 func start(t *testing.T, lang string) (*UI, *demo.Backend) {
 	t.Helper()
+	return startWith(t, lang, demo.New(), true)
+}
+
+// startFirstRun starts the app the way a new user sees it: no stored
+// survey and no tunnels.
+func startFirstRun(t *testing.T, lang string) (*UI, *demo.Backend) {
+	t.Helper()
+	return startWith(t, lang, demo.NewEmpty(), false)
+}
+
+// startWith starts the app on b. expert stores the expert survey first,
+// which keeps the first-run survey out of the way.
+func startWith(t *testing.T, lang string, b *demo.Backend, expert bool) (*UI, *demo.Backend) {
+	t.Helper()
 	t.Setenv("LATCHWIRE_LANG", lang)
 	a := test.NewApp()
 	t.Cleanup(func() { a.Quit() })
-	b := demo.New()
+	if expert {
+		a.Preferences().SetString(prefSurvey, desktop.Survey{Path: desktop.PathOwner, Help: desktop.HelpExpert}.Encode())
+	}
 	u := New(a, Options{Backend: b})
 	u.win.Resize(fyne.NewSize(1000, 680))
 	sync(u)
@@ -206,7 +222,7 @@ func TestOnboardShowsCardsAndSlots(t *testing.T) {
 	wantText(t, u, "The PIV PIN will be asked")
 	var sel *widget.Select
 	walk(u, func(o fyne.CanvasObject) {
-		if s, ok := o.(*widget.Select); ok && s.Selected != "English" {
+		if s, ok := o.(*widget.Select); ok && s.Selected != "English" && s.Selected != en(msg.UIHelpExpert) {
 			sel = s
 		}
 	})
@@ -226,7 +242,7 @@ func TestOccupiedSlotIsNotOffered(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 	found := false
 	walk(u, func(o fyne.CanvasObject) {
-		if s, ok := o.(*widget.Select); ok && s.Selected != "English" {
+		if s, ok := o.(*widget.Select); ok && s.Selected != "English" && s.Selected != en(msg.UIHelpExpert) {
 			found = true
 			if slices.Contains(s.Options, "Retired slot 82 (recommended)") || len(s.Options) != 19 {
 				t.Fatalf("offers %v", s.Options)
@@ -624,4 +640,12 @@ func TestFreshChecks(t *testing.T) {
 	if s := checkFresh("en", v("1", "123", "123", "87654321", "87654321")); s != msg.KeygenSecretRules {
 		t.Fatal(s)
 	}
+}
+
+// openPubkey leaves the UI on the public key screen with a fresh key.
+func openPubkey(t *testing.T, u *UI) {
+	t.Helper()
+	u.show(screenOnboard)
+	sync(u)
+	generate(t, u)
 }

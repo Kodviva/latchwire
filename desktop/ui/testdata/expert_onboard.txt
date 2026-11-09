@@ -1,0 +1,56 @@
+TUNNELS
+TUNNELS
+office
+office
+servers
+servers
++ New tunnel
++ New tunnel
++ New tunnel
+Language
+Language
+English
+English
+Help level
+Help level
+Expert
+Expert
+STEP 1 / 2
+STEP 1 / 2
+2 hardware keys found
+2 hardware keys found
+The private key is created inside this device and never leaves it. No copy is written to this computer.
+The private key is created inside this device and
+never leaves it. No copy is written to this computer.
+YubiKey 40727512
+YubiKey 40727512
+Serial 40727512 · Firmware 5.8.0 · PIV
+Serial 40727512 · Firmware 5.8.0 ·
+PIV
+Compatible
+YubiKey 40727513
+YubiKey 40727513
+Serial 40727513 · Firmware 5.8.0 · PIV
+Serial 40727513 · Firmware 5.8.0 ·
+PIV
+Compatible
+SETTINGS
+SETTINGS
+Slot on the card
+Slot on the card
+Retired slot 82 (recommended)
+Retired slot 82 (recommended)
+Slots 9a and 9d stay untouched, so smart-card login keeps working.
+Slots 9a and 9d stay untouched, so
+smart-card login keeps working.
+Touch
+Touch
+Never. A handshake happens about every 2 minutes, so a touch policy would interrupt the tunnel.
+Never. A handshake happens about
+every 2 minutes, so a touch policy
+would interrupt the tunnel.
+Create key on the card
+Create key on the card
+Create key on the card
+The PIV PIN will be asked
+The PIV PIN will be asked

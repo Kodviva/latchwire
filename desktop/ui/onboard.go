@@ -77,6 +77,7 @@ func (u *UI) renderOnboard() {
 		h1(u.tr(msg.UIOnboardTitle, msg.Args{"count": len(u.devices)})),
 		body(u.t(msg.UIOnboardBody)),
 	}
+	left = prependExplain(left, 2, u.explain(msg.UIExplainOnboardLong, msg.UIExplainOnboardShort))
 	if len(u.devices) == 0 {
 		left = append(left, card(small(u.t(msg.UIOnboardEmpty))))
 	}
@@ -102,7 +103,7 @@ func (u *UI) renderOnboard() {
 	if u.card.working {
 		note = u.t(msg.UIWorking)
 	}
-	right = append(right, create, small(note))
+	right = append(right, create, u.withTerm(small(note), msg.UIGlossaryPIN))
 	u.setMain(page(split(290, 28, container.NewVScroll(container.NewVBox(left...)), container.NewVBox(right...))))
 }
 
@@ -156,7 +157,7 @@ func (u *UI) settingsCard(dev desktop.Device, ok bool) fyne.CanvasObject {
 		sel.Disable()
 	}
 	return card(container.NewVBox(section(u.t(msg.UISettings)),
-		label(u.t(msg.UISlotLabel)), sel, small(u.t(msg.UISlotHint)),
+		u.withTerm(label(u.t(msg.UISlotLabel)), msg.UIGlossarySlot), sel, small(u.t(msg.UISlotHint)),
 		label(u.t(msg.UITouchLabel)), small(u.t(msg.UITouchNever))))
 }
 
@@ -189,6 +190,8 @@ func (u *UI) startKeygen() {
 // useKey opens the public key screen for a key. With backup set on the
 // session the key joins it as the second card.
 func (u *UI) useKey(k desktop.Key, created bool) {
+	u.markStep(desktop.StepCardReady)
+	u.markStep(desktop.StepKeyCreated)
 	if u.card.backup && len(u.session.keys) > 0 && u.session.keys[0].Ref.Serial != k.Ref.Serial {
 		u.session.keys = append(u.session.keys[:1], k)
 		u.session.shown = 1
