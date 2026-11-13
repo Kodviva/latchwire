@@ -597,6 +597,7 @@ const (
 	UIKeyNone                   ID = "UIKeyNone"
 	UIKeyPresent                ID = "UIKeyPresent"
 	UIKeyAbsent                 ID = "UIKeyAbsent"
+	UIKeyReady                  ID = "UIKeyReady"
 	UILastHandshake             ID = "UILastHandshake"
 	UIHandshakeNote             ID = "UIHandshakeNote"
 	UIHandshakeNone             ID = "UIHandshakeNone"

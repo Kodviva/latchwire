@@ -88,3 +88,29 @@ func TestAgo(t *testing.T) {
 		}
 	}
 }
+
+// A disconnected tunnel names the card that holds its key: ready when it is
+// plugged in, a warning when none of its cards is.
+func TestDisconnectedViewNamesItsCard(t *testing.T) {
+	st := ipc.TunnelStatus{Name: "office", State: daemon.StateDisconnected,
+		Keys: []string{"piv://40727512/82", "piv://40727513/82"}}
+	only := func(s uint32) func(uint32) bool { return func(x uint32) bool { return x == s } }
+
+	v := NewTunnelView("en", st, only(40727513), t0)
+	if v.Key != "YubiKey 40727513" || v.KeyNote != "Plugged in · ready to connect" || v.KeyWarn {
+		t.Fatalf("backup plugged in: %+v", v)
+	}
+	v = NewTunnelView("tr", st, only(40727512), t0)
+	if v.Key != "YubiKey 40727512" || v.KeyNote != "Takılı · bağlanmaya hazır" || v.KeyWarn {
+		t.Fatalf("tr: %+v", v)
+	}
+	v = NewTunnelView("en", st, pulled, t0)
+	if v.Key != "YubiKey 40727512" || v.KeyNote != "Not plugged in" || !v.KeyWarn {
+		t.Fatalf("none plugged in: %+v", v)
+	}
+	// An old daemon reports no keys: the old wording stays.
+	v = NewTunnelView("en", ipc.TunnelStatus{Name: "office", State: daemon.StateDisconnected}, plugged, t0)
+	if v.Key != "No card in use" || v.KeyNote != "" {
+		t.Fatalf("no keys: %+v", v)
+	}
+}

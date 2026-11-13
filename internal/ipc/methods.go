@@ -1,5 +1,7 @@
 package ipc
 
+import "slices"
+
 // Method names. Direction is part of the name's prefix: agent.* go from the
 // per-user agent to the daemon, key.* from the daemon to the agent, and
 // tunnel.* and network.* from the CLI to the daemon.
@@ -160,16 +162,28 @@ type NetworkCurrent struct {
 // should act on (shared or overridden DNS, DNS not applied, no reverse-path
 // filter); several are joined with "; ".
 type TunnelStatus struct {
-	Name          string `json:"name"`
-	State         string `json:"state"`
-	Identity      string `json:"identity"`
-	LastHandshake string `json:"lastHandshake"`
-	Interface     string `json:"interface,omitempty"`
-	MTU           int    `json:"mtu,omitempty"`
-	FullTunnel    bool   `json:"fullTunnel,omitempty"`
-	DNS           string `json:"dns,omitempty"`
-	KillSwitch    string `json:"killSwitch,omitempty"`
-	Warning       string `json:"warning,omitempty"`
+	Name     string `json:"name"`
+	State    string `json:"state"`
+	Identity string `json:"identity"`
+	// Keys are the tunnel's configured hardware keys (KeyRef), first the
+	// main card then its backups, so a disconnected tunnel can name the
+	// card it would use. Older daemons leave it empty.
+	Keys          []string `json:"keys,omitempty"`
+	LastHandshake string   `json:"lastHandshake"`
+	Interface     string   `json:"interface,omitempty"`
+	MTU           int      `json:"mtu,omitempty"`
+	FullTunnel    bool     `json:"fullTunnel,omitempty"`
+	DNS           string   `json:"dns,omitempty"`
+	KillSwitch    string   `json:"killSwitch,omitempty"`
+	Warning       string   `json:"warning,omitempty"`
+}
+
+// Equal reports whether s and o are the same status.
+func (s TunnelStatus) Equal(o TunnelStatus) bool {
+	return s.Name == o.Name && s.State == o.State && s.Identity == o.Identity &&
+		slices.Equal(s.Keys, o.Keys) && s.LastHandshake == o.LastHandshake &&
+		s.Interface == o.Interface && s.MTU == o.MTU && s.FullTunnel == o.FullTunnel &&
+		s.DNS == o.DNS && s.KillSwitch == o.KillSwitch && s.Warning == o.Warning
 }
 
 // TunnelStatus.DNS values: how the tunnel's DNS servers take part in name

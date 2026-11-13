@@ -1198,6 +1198,10 @@ func TestProofOfPossessionBeforeDeviceAndWrongPIN(t *testing.T) {
 	if st := e.status(); st.State != StateDisconnected || st.Identity != "" {
 		t.Fatalf("status %+v, want an unbound disconnected tunnel", st)
 	}
+	// Disconnected, the status still names the tunnel's configured keys.
+	if st := e.status(); !slices.Equal(st.Keys, []string{refA.String()}) {
+		t.Fatalf("keys %v, want [%s]", st.Keys, refA)
+	}
 
 	// The right PIN then connects. The proof of possession used a fresh
 	// ephemeral key, so the only DH with the server key is the precompute.
