@@ -1653,7 +1653,8 @@ func (m *Manager) prove(ctx context.Context, name string, cands []candidate) (ca
 		if err == nil {
 			return c, nil
 		}
-		log.Printf("daemon: tunnel %s: agent of uid %d for %s: %v", name, c.uid, c.id.Ref, err)
+		log.Printf("daemon: tunnel %s: agent of uid %d for %s: %v (%s)", name, c.uid, c.id.Ref, err,
+			m.agentsSummary(c.uid, c.id.Ref.Serial))
 		lastErr = err
 		if ctx.Err() != nil {
 			break
