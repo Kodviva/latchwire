@@ -364,6 +364,16 @@ runs the daemon:
 	PolicyNoSuchUser = "no such user"
 	// ServiceLocationFmt takes the path of the program.
 	ServiceLocationFmt = "refusing to install %s as a service: it would run as SYSTEM, so it must be under Program Files, where only administrators can write"
+	// AssistAccessOff: an agent tool was called while access is off or expired.
+	AssistAccessOff = "Latchwire agent access is off: ask the user to turn it on in the Latchwire app (Agent access)"
+	// AssistGroupOffFmt takes the name of the permission group (keys, tunnels, connect).
+	AssistGroupOffFmt = "Latchwire agent access does not include %s: ask the user to turn it on in the Latchwire app (Agent access)"
+	// AssistDenied: the user refused, or did not answer, the approval window.
+	AssistDenied = "the user did not allow this action"
+	// AssistNoApp: no desktop agent can show the approval window.
+	AssistNoApp = "the Latchwire app is not open: ask the user to open it"
+	// AssistCancelled: access was revoked while the action waited.
+	AssistCancelled = "the action was cancelled because agent access was turned off"
 )
 
 // Desktop app messages, rendered with Render.

@@ -218,6 +218,7 @@ type Manager struct {
 	ctx     context.Context // Serve's ctx; tunnel lifetimes derive from it
 	tunnels map[string]*tunnel
 	agents  map[*ipc.Conn]*agentState
+	assist  assistState
 	nextSeq uint64
 	// netID is the last identified network an on-demand evaluation saw
 	// ("" before the first). odEpoch changes with it and whenever an agent
@@ -235,6 +236,7 @@ type agentState struct {
 	uid     uint32
 	seq     uint64
 	serials map[uint32]bool
+	caps    map[string]bool // CapAssist and friends, from AgentRegister.Caps
 	noAuto  map[string]bool
 }
 
@@ -816,12 +818,13 @@ func (m *Manager) requestDisconnect(uid uint32, name string) (ipc.TunnelStatus, 
 }
 
 func (m *Manager) handle(c *ipc.Conn) {
+	m.handleAssist(c)
 	c.Handle(ipc.MethodAgentRegister, func(_ context.Context, uid uint32, params json.RawMessage) (any, error) {
 		var p ipc.AgentRegister
 		if err := decode(params, &p); err != nil {
 			return nil, err
 		}
-		m.agentRegister(c, uid, p.Serials)
+		m.agentRegister(c, uid, p.Serials, p.Caps...)
 		return nil, nil
 	})
 	c.Handle(ipc.MethodAgentEvent, func(_ context.Context, uid uint32, params json.RawMessage) (any, error) {
@@ -1075,7 +1078,7 @@ func lastHandshake(dev *device.Device) string {
 
 // ---- agents ----
 
-func (m *Manager) agentRegister(c *ipc.Conn, uid uint32, serials []uint32) {
+func (m *Manager) agentRegister(c *ipc.Conn, uid uint32, serials []uint32, caps ...string) {
 	m.mu.Lock()
 	a := m.agents[c]
 	if a == nil {
@@ -1085,6 +1088,10 @@ func (m *Manager) agentRegister(c *ipc.Conn, uid uint32, serials []uint32) {
 	if a.seq == 0 {
 		m.nextSeq++
 		a.seq = m.nextSeq
+	}
+	a.caps = map[string]bool{}
+	for _, name := range caps {
+		a.caps[name] = true
 	}
 	old := a.serials
 	a.serials = map[uint32]bool{}
@@ -1161,6 +1168,7 @@ func (m *Manager) dropAgent(c *ipc.Conn) {
 	a := m.agents[c]
 	delete(m.agents, c)
 	m.mu.Unlock()
+	m.assist.dropOwner(c)
 	if a == nil || a.seq == 0 {
 		return
 	}

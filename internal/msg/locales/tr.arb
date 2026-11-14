@@ -464,5 +464,10 @@
   "ServiceSynopsis": "service install|uninstall",
   "WintunMissingFmt": "wintun.dll yüklenemiyor, latchwire.exe ile aynı dizinde olmalı: {err}",
   "PolicyNoSuchUser": "böyle bir kullanıcı yok",
-  "ServiceLocationFmt": "{path} servis olarak kurulmuyor: SYSTEM olarak çalışacağı için yalnızca yöneticilerin yazabildiği Program Files altında olmalı"
+  "ServiceLocationFmt": "{path} servis olarak kurulmuyor: SYSTEM olarak çalışacağı için yalnızca yöneticilerin yazabildiği Program Files altında olmalı",
+  "AssistAccessOff": "Latchwire ajan erişimi kapalı: kullanıcıdan Latchwire uygulamasında (Ajan erişimi) açmasını isteyin",
+  "AssistGroupOffFmt": "Latchwire ajan erişimi {group} iznini içermiyor: kullanıcıdan Latchwire uygulamasında (Ajan erişimi) açmasını isteyin",
+  "AssistDenied": "kullanıcı bu işleme izin vermedi",
+  "AssistNoApp": "Latchwire uygulaması açık değil: kullanıcıdan açmasını isteyin",
+  "AssistCancelled": "ajan erişimi kapatıldığı için işlem iptal edildi"
 }

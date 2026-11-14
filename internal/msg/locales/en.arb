@@ -1039,5 +1039,30 @@
   "ServiceLocationFmt": "refusing to install {path} as a service: it would run as SYSTEM, so it must be under Program Files, where only administrators can write",
   "@ServiceLocationFmt": {
     "description": "ServiceLocationFmt takes the path of the program."
+  },
+  "AssistAccessOff": "Latchwire agent access is off: ask the user to turn it on in the Latchwire app (Agent access)",
+  "@AssistAccessOff": {
+    "description": "AssistAccessOff: an agent tool was called while access is off or expired."
+  },
+  "AssistGroupOffFmt": "Latchwire agent access does not include {group}: ask the user to turn it on in the Latchwire app (Agent access)",
+  "@AssistGroupOffFmt": {
+    "description": "AssistGroupOffFmt takes the name of the permission group (keys, tunnels, connect).",
+    "placeholders": {
+      "group": {
+        "verb": "%s"
+      }
+    }
+  },
+  "AssistDenied": "the user did not allow this action",
+  "@AssistDenied": {
+    "description": "AssistDenied: the user refused, or did not answer, the approval window."
+  },
+  "AssistNoApp": "the Latchwire app is not open: ask the user to open it",
+  "@AssistNoApp": {
+    "description": "AssistNoApp: no desktop agent can show the approval window."
+  },
+  "AssistCancelled": "the action was cancelled because agent access was turned off",
+  "@AssistCancelled": {
+    "description": "AssistCancelled: access was revoked while the action waited."
   }
 }
