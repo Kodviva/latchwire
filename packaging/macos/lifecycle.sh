@@ -50,6 +50,26 @@ journal_has_steps() { [ -f "$JOURNAL" ] && grep -q '"name"' "$JOURNAL"; }
 
 daemon_loaded() { "$LAUNCHCTL" print "system/$DAEMON_LABEL" >/dev/null 2>&1; }
 
+# wait_gone TARGET: waits up to 10 s until launchd has finished removing the
+# job. bootout returns before that, and a bootstrap in between fails.
+wait_gone() {
+	i=0
+	while "$LAUNCHCTL" print "$1" >/dev/null 2>&1 && [ "$i" -lt 20 ]; do
+		sleep 0.5
+		i=$((i + 1))
+	done
+}
+
+# bootstrap_retry DOMAIN PLIST: up to 3 attempts, 1 s apart.
+bootstrap_retry() {
+	i=1
+	while ! "$LAUNCHCTL" bootstrap "$1" "$2"; do
+		[ "$i" -lt 3 ] || return 1
+		i=$((i + 1))
+		sleep 1
+	done
+}
+
 # gui_uids prints the uids that have a GUI login session: the console user,
 # and everyone else with an agent running (fast user switching).
 gui_uids() {
@@ -79,11 +99,13 @@ post_install() {
 			return 0
 		fi
 		"$LAUNCHCTL" bootout "system/$DAEMON_LABEL" || :
+		wait_gone "system/$DAEMON_LABEL"
 	fi
-	"$LAUNCHCTL" bootstrap system "$DAEMON_PLIST" || say "WARNING: could not start the daemon"
+	bootstrap_retry system "$DAEMON_PLIST" || say "WARNING: could not start the daemon"
 	for uid in $(gui_uids | sort -u); do
 		"$LAUNCHCTL" bootout "gui/$uid/$AGENT_LABEL" >/dev/null 2>&1
-		"$LAUNCHCTL" bootstrap "gui/$uid" "$AGENT_PLIST" || say "WARNING: could not start the agent of uid $uid"
+		wait_gone "gui/$uid/$AGENT_LABEL"
+		bootstrap_retry "gui/$uid" "$AGENT_PLIST" || say "WARNING: could not start the agent of uid $uid"
 	done
 }
 

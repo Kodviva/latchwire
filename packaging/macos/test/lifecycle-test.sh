@@ -41,15 +41,34 @@ fresh() {
 root="$root"
 echo "launchctl \$*" >>"\$root/calls"
 case \$1 in
-print) [ -e "\$root/loaded" ]; exit \$? ;;
+print)
+	# Right after a bootout launchd still knows the job for a moment:
+	# \$root/linger holds how many more prints report it as loaded.
+	if [ -s "\$root/linger" ]; then
+		n=\$(cat "\$root/linger")
+		echo \$((n - 1)) >"\$root/linger"
+		[ "\$n" -gt 0 ] && exit 0
+	fi
+	case \$2 in
+	gui/*) [ -e "\$root/agent_loaded" ]; exit \$? ;;
+	esac
+	[ -e "\$root/loaded" ]; exit \$? ;;
 bootstrap)
+	# \$root/failfirst: the first bootstrap of each domain fails, as when
+	# launchd is still removing the old job.
+	if [ -e "\$root/failfirst" ] && [ ! -e "\$root/failed.\${2//\//_}" ]; then
+		touch "\$root/failed.\${2//\//_}"
+		echo "Bootstrap failed: 5: Input/output error" >&2
+		exit 5
+	fi
+	case \$2 in gui*) touch "\$root/agent_loaded" ;; esac
 	if [ "\$2" = system ]; then
 		touch "\$root/loaded"
 		[ -e "\$root/stuck" ] || printf '{"version":1,"owners":{}}\n' >"\$root/var/run/latchwire/journal.json" 2>/dev/null
 		/usr/bin/python3 -I -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' "\$root/var/run/latchwire.sock"
 	fi
 	;;
-bootout) case \$2 in system/*) rm -f "\$root/loaded" ;; esac ;;
+bootout) case \$2 in system/*) rm -f "\$root/loaded" ;; gui/*) rm -f "\$root/agent_loaded" ;; esac ;;
 esac
 exit 0
 STUB
@@ -91,6 +110,33 @@ touch "$root/loaded"
 run post-install
 check "replaces the daemon" called 'bootout system/com.latchwire.daemon'
 check "starts it again" called 'bootstrap system'
+rm -rf "$root"
+
+echo "== upgrade while launchd is slow to remove the job"
+fresh
+touch "$root/loaded" "$root/agent_loaded" "$root/failfirst"
+mkdir -p "$root/dev"
+touch "$root/dev/console"
+echo 2 >"$root/linger"
+: >"$root/var/log/latchwire-daemon.log"
+run post-install
+check "boots out the daemon" called 'bootout system/com.latchwire.daemon'
+check "boots out the agent" called 'bootout gui/.*/com.latchwire.agent'
+check "daemon bootstrapped after a retry" test "$(grep -c 'bootstrap system' "$root/calls")" = 2
+check "daemon is loaded" test -e "$root/loaded"
+check "agent bootstrapped after a retry" test "$(grep -c 'bootstrap gui/' "$root/calls")" = 2
+check "agent is loaded" test -e "$root/agent_loaded"
+refute "no warning" grep -q WARNING "$root/out"
+rm -rf "$root"
+
+echo "== a bootstrap that never works warns"
+fresh
+touch "$root/dev/console" 2>/dev/null || { mkdir -p "$root/dev"; touch "$root/dev/console"; }
+printf '#!/bin/bash\necho "launchctl $*" >>"%s/calls"\ncase $1 in print) exit 1 ;; bootstrap) exit 5 ;; esac\n' "$root" >"$root/bin/launchctl"
+run post-install
+check "tries 3 times" test "$(grep -c 'bootstrap system' "$root/calls")" = 3
+check "warns about the daemon" grep -q 'could not start the daemon' "$root/out"
+check "warns about the agent" grep -q 'could not start the agent' "$root/out"
 rm -rf "$root"
 
 echo "== upgrade with the kill switch on"
