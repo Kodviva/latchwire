@@ -46,6 +46,9 @@ type Device struct {
 type CardInfo struct {
 	FreeSlots []uint8 // retired slots without a key, lowest first
 	Keys      []Key   // usable Latchwire keys
+	// Fresh says the card still uses the factory management key: creating
+	// a key will ask for the current PUK and change the PIN and PUK.
+	Fresh bool
 }
 
 // CardOps is the part of *piv.Card this package uses. Tests replace it.
@@ -54,6 +57,7 @@ type CardOps interface {
 	Provider(ref keyref.Ref, prompt func(retriesLeft int) (string, error)) (keyprovider.Provider, error)
 	Occupied(slot uint8) (bool, error)
 	PINRetries() (int, error)
+	Fresh() (bool, error)
 	Close() error
 }
 
@@ -94,8 +98,9 @@ func (c Cards) Devices() ([]Device, error) {
 // needs it.
 func noPIN(int) (string, error) { return "", keyprovider.ErrPINRequired }
 
-// Inspect reads which slots of a card are free and which keys it holds. A
-// slot holding something Latchwire cannot use counts as neither.
+// Inspect reads which slots of a card are free, which keys it holds and
+// whether it is factory-fresh. A slot holding something Latchwire cannot use
+// counts as neither.
 func (c Cards) Inspect(serial uint32) (CardInfo, error) {
 	card, err := c.Open(serial)
 	if err != nil {
@@ -103,6 +108,9 @@ func (c Cards) Inspect(serial uint32) (CardInfo, error) {
 	}
 	defer card.Close()
 	var info CardInfo
+	if info.Fresh, err = card.Fresh(); err != nil {
+		return CardInfo{}, err
+	}
 	for s := uint8(keyref.MinSlot); s <= keyref.MaxSlot; s++ {
 		occ, err := card.Occupied(s)
 		if err != nil {

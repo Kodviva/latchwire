@@ -136,6 +136,19 @@ func (c *Card) PINRetries() (int, error) {
 	return n, nil
 }
 
+// Fresh reports whether the card still uses the factory management key, the
+// sign by which Generate treats a card as factory-fresh (and asks for the
+// current PUK and a new PIN and PUK). It only tries the default management
+// key, which has no retry counter, and changes nothing on the card.
+func (c *Card) Fresh() (bool, error) {
+	c.sem <- struct{}{}
+	defer func() { <-c.sem }()
+	if c.closed {
+		return false, keyprovider.ErrUnavailable
+	}
+	return c.c.AuthenticateManagementKey(piv.DefaultManagementKey) == nil, nil
+}
+
 func (c *Card) occupied(s uint8) (bool, error) {
 	_, err := c.c.KeyInfo(pivSlot(s))
 	switch {
