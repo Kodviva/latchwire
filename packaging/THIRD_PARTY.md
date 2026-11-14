@@ -17,8 +17,8 @@ texts in `THIRD_PARTY_LICENSES.txt`.
 | `golang.org/x/net` | v0.62.0 | BSD-3-Clause | Go module |
 | `golang.org/x/oauth2` | v0.38.0 | BSD-3-Clause | Go module, used by the MCP SDK |
 | `golang.org/x/sync` | v0.25.0 | BSD-3-Clause | Go module, used by the MCP SDK |
-| `golang.org/x/sys` | v0.49.0 | BSD-3-Clause | Go module |
-| `golang.org/x/term` | v0.47.0 | BSD-3-Clause | Go module |
+| `golang.org/x/sys` | v0.50.0 | BSD-3-Clause | Go module |
+| `golang.org/x/term` | v0.48.0 | BSD-3-Clause | Go module |
 | `golang.org/x/time` | v0.16.0 | BSD-3-Clause | Go module |
 | `golang.zx2c4.com/wintun` | v0.0.0-20230126152724-0fa3db229ce2 | MIT | Go module, Windows only |
 | `golang.zx2c4.com/wireguard` | 2631ce99a06f | MIT | Vendored and patched in third_party/wireguard-go, see PATCHES.md there |

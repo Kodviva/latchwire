@@ -14,7 +14,7 @@ require (
 	fyne.io/fyne/v2 v2.8.2
 	github.com/Kodviva/latchwire v0.0.0-00010101000000-000000000000
 	github.com/ncruces/zenity v0.10.15
-	golang.org/x/sys v0.49.0
+	golang.org/x/sys v0.50.0
 	rsc.io/qr v0.2.0
 )
 
@@ -56,7 +56,7 @@ require (
 	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/image v0.44.0 // indirect
 	golang.org/x/net v0.62.0 // indirect
-	golang.org/x/term v0.47.0 // indirect
+	golang.org/x/term v0.48.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
