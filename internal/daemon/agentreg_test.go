@@ -15,6 +15,13 @@ var regPairs atomic.Int32
 // connPair returns the daemon side of a fresh connection.
 func connPair(t *testing.T, e *env) *ipc.Conn {
 	t.Helper()
+	return connPairWith(t, e, nil)
+}
+
+// connPairWith is connPair; setup, if set, registers the agent side's
+// handlers before it serves.
+func connPairWith(t *testing.T, e *env, setup func(ac *ipc.Conn)) *ipc.Conn {
+	t.Helper()
 	path := fmt.Sprintf("%s-r%d", e.socket, regPairs.Add(1))
 	l, err := ipc.ListenUsers(path, ipc.OpenUserTable(filepath.Join(t.TempDir(), "users.json")))
 	if err != nil {
@@ -37,6 +44,9 @@ func connPair(t *testing.T, e *env) *ipc.Conn {
 	l.Close()
 	if dc == nil {
 		t.Fatal("accept failed")
+	}
+	if setup != nil {
+		setup(ac)
 	}
 	go ac.Serve(context.Background())
 	go dc.Serve(context.Background())
