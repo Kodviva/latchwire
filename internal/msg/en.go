@@ -376,6 +376,24 @@ runs the daemon:
 	AssistCancelled = "the action was cancelled because agent access was turned off"
 	// AssistRequestCancelled: the caller went away while the approval window waited.
 	AssistRequestCancelled = "the request was cancelled before the user answered"
+	// AssistUnknownTool: assist.call named a tool the daemon does not know.
+	AssistUnknownTool = "this Latchwire version does not offer that tool"
+	// AssistNoCardFmt takes the serial the agent asked for.
+	AssistNoCardFmt = "no YubiKey with serial %d is plugged in, or it cannot hold Latchwire keys"
+	// AssistSlotNotFreeFmt takes the slot and the serial.
+	AssistSlotNotFreeFmt = "slot %02x of YubiKey %d is not free: leave the slot out to take the first free one"
+	// AssistKeygenFailed: the app's card.keygen answer had a bad key reference or public key.
+	AssistKeygenFailed = "the app reported a key that does not match the request; no key was recorded"
+	// AssistSummaryKeyFmt is the summary of create_key in the approval window and the activity list. It takes the serial and the slot.
+	AssistSummaryKeyFmt = "new key on YubiKey %d, slot %02x"
+	// AssistSummaryTunnelFmt is the summary of add_tunnel. It takes the tunnel name, the endpoints and the allowed IPs (each joined with spaces), the number of servers and AssistPSKYes or AssistPSKNo; never a key or the PSK itself.
+	AssistSummaryTunnelFmt = "tunnel \"%s\": endpoints %s, allowed IPs %s, servers: %d, %v"
+	// AssistPSKYes: the tunnel has a preshared key (never shown).
+	AssistPSKYes = "PSK: yes"
+	// AssistPSKNo: the tunnel has no preshared key.
+	AssistPSKNo = "PSK: no"
+	// AssistSummaryTunnelNameFmt is the summary of connect, disconnect and setup_progress: the tunnel's name.
+	AssistSummaryTunnelNameFmt = "tunnel \"%s\""
 )
 
 // Desktop app messages, rendered with Render.

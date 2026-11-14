@@ -125,3 +125,73 @@ type KeygenResult struct {
 type AssistNotice struct {
 	Step string `json:"step"`
 }
+
+// Tools of assist.call. ToolCheck is the access check the MCP server makes
+// before it computes a read-only tool (peer_block, server_guide) itself.
+const (
+	ToolCheck         = "check"
+	ToolStatus        = "status"
+	ToolSetupProgress = "setup_progress"
+	ToolPeerBlock     = "peer_block"
+	ToolServerGuide   = "server_guide"
+	ToolCreateKey     = "create_key"
+	ToolAddTunnel     = "add_tunnel"
+	ToolConnect       = "connect"
+	ToolDisconnect    = "disconnect"
+)
+
+// AssistCheckArgs is the Args of the check tool: the read-only tool the
+// MCP server is about to compute.
+type AssistCheckArgs struct {
+	Tool string `json:"tool"`
+}
+
+// AssistProgressArgs is the Args of setup_progress. Path is "invited" or
+// "owner" (default "owner"); Tunnel, if set, is the tunnel to look at.
+type AssistProgressArgs struct {
+	Path   string `json:"path,omitempty"`
+	Tunnel string `json:"tunnel,omitempty"`
+}
+
+// AssistKeyArgs is the Args of create_key. Slot 0 takes the card's first
+// free slot.
+type AssistKeyArgs struct {
+	Serial uint32 `json:"serial"`
+	Slot   uint8  `json:"slot,omitempty"`
+}
+
+// AssistTunnelArgs is the Args of add_tunnel: the tunnel's name and its
+// configuration text.
+type AssistTunnelArgs struct {
+	Name   string `json:"name"`
+	Config string `json:"config"`
+}
+
+// AssistStatus is the Data of the status tool. CardsUnavailable says the
+// cards could not be listed (the app is not open).
+type AssistStatus struct {
+	Tunnels          []TunnelStatus `json:"tunnels"`
+	Cards            []CardEntry    `json:"cards"`
+	CardsUnavailable bool           `json:"cardsUnavailable,omitempty"`
+}
+
+// States of a setup step in AssistProgress.
+const (
+	StepDone    = "done"
+	StepPending = "pending"
+	StepUnknown = "unknown" // the daemon cannot see whether it was done
+)
+
+// AssistStep is one roadmap step (a desktop.StepID value) and its state.
+type AssistStep struct {
+	ID    string `json:"id"`
+	State string `json:"state"`
+}
+
+// AssistProgress is the Data of setup_progress: the roadmap of Path, in
+// order.
+type AssistProgress struct {
+	Path   string       `json:"path"`
+	Tunnel string       `json:"tunnel,omitempty"`
+	Steps  []AssistStep `json:"steps"`
+}

@@ -3,6 +3,8 @@ package desktop
 import (
 	"slices"
 	"testing"
+
+	"github.com/Kodviva/latchwire/internal/daemon"
 )
 
 func TestRoadmapInvited(t *testing.T) {
@@ -18,6 +20,20 @@ func TestRoadmapOwner(t *testing.T) {
 	want := []StepID{StepCardReady, StepKeyCreated, StepBackupOffered, StepServerAdded, StepServerInfo, StepConnected}
 	if !slices.Equal(got, want) {
 		t.Fatalf("%v, want %v", got, want)
+	}
+}
+
+// The daemon cannot import this package: it keeps its own copy of the
+// roadmap for setup_progress, which must match Roadmap on every path.
+func TestAssistStepsMatchRoadmap(t *testing.T) {
+	for _, p := range []Path{PathInvited, PathOwner, PathExplore} {
+		var want []string
+		for _, s := range Roadmap(Survey{Path: p, Help: HelpGuided}) {
+			want = append(want, string(s))
+		}
+		if got := daemon.AssistSteps(string(p)); !slices.Equal(got, want) {
+			t.Errorf("path %s: daemon %v, desktop %v", p, got, want)
+		}
 	}
 }
 

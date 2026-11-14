@@ -470,5 +470,14 @@
   "AssistDenied": "kullanıcı bu işleme izin vermedi",
   "AssistNoApp": "Latchwire uygulaması açık değil: kullanıcıdan açmasını isteyin",
   "AssistCancelled": "ajan erişimi kapatıldığı için işlem iptal edildi",
-  "AssistRequestCancelled": "istek, siz yanıt vermeden iptal edildi"
+  "AssistRequestCancelled": "istek, kullanıcı yanıt vermeden iptal edildi",
+  "AssistUnknownTool": "bu Latchwire sürümü bu aracı sunmuyor",
+  "AssistNoCardFmt": "{serial} seri numaralı YubiKey takılı değil ya da Latchwire anahtarı tutamıyor",
+  "AssistSlotNotFreeFmt": "{serial} seri numaralı YubiKey'in {slot} yuvası boş değil: ilk boş yuvanın seçilmesi için yuvayı belirtmeyin",
+  "AssistKeygenFailed": "uygulama istekle uyuşmayan bir anahtar bildirdi; anahtar kaydedilmedi",
+  "AssistSummaryKeyFmt": "{serial} seri numaralı YubiKey'de yeni anahtar, yuva {slot}",
+  "AssistSummaryTunnelFmt": "\"{name}\" tüneli: uç noktalar {endpoints}, izin verilen IP'ler {networks}, sunucu sayısı: {peers}, {psk}",
+  "AssistPSKYes": "PSK: var",
+  "AssistPSKNo": "PSK: yok",
+  "AssistSummaryTunnelNameFmt": "\"{name}\" tüneli"
 }

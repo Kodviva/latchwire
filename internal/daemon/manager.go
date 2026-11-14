@@ -837,6 +837,15 @@ func (m *Manager) handle(c *ipc.Conn) {
 		m.agentEvent(c, uid, p)
 		return nil, nil
 	})
+	c.Handle(ipc.MethodAssistCall, func(ctx context.Context, uid uint32, params json.RawMessage) (any, error) {
+		// A malformed call still goes through the access check and the
+		// activity list, as an unknown tool.
+		var p ipc.AssistCall
+		if decode(params, &p) != nil {
+			p = ipc.AssistCall{}
+		}
+		return m.assistCall(ctx, c, uid, p)
+	})
 	c.Handle(ipc.MethodTunnelAdd, func(_ context.Context, uid uint32, params json.RawMessage) (any, error) {
 		if !m.admin(uid) {
 			return nil, errAdminOnly

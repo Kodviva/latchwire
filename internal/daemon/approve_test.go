@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"sync"
 	"sync/atomic"
@@ -9,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Kodviva/latchwire/internal/ipc"
+	"github.com/Kodviva/latchwire/internal/keyref"
 	"github.com/Kodviva/latchwire/internal/msg"
 )
 
@@ -24,7 +27,14 @@ type fakeApprover struct {
 	notices  []string
 	keygens  []ipc.KeygenRequest
 	lists    int
+	// cards, if set, is the card.list answer; keygen, if set, answers
+	// card.keygen.
+	cards  []ipc.CardEntry
+	keygen func(ipc.KeygenRequest) (ipc.KeygenResult, error)
 }
+
+// testPublic is the public key the fake app reports for a new key.
+var testPublic = base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
 
 func (f *fakeApprover) setup(ac *ipc.Conn) {
 	ac.Handle(ipc.MethodAssistApprove, func(ctx context.Context, _ uint32, p json.RawMessage) (any, error) {
@@ -44,8 +54,12 @@ func (f *fakeApprover) setup(ac *ipc.Conn) {
 	ac.Handle(ipc.MethodCardList, func(context.Context, uint32, json.RawMessage) (any, error) {
 		f.mu.Lock()
 		f.lists++
+		cards := f.cards
 		f.mu.Unlock()
-		return ipc.CardListResult{Cards: []ipc.CardEntry{{Serial: serialA, Supported: true, Fresh: true}}}, nil
+		if cards == nil {
+			cards = []ipc.CardEntry{{Serial: serialA, Supported: true, Fresh: true, FreeSlots: []uint8{0x82, 0x83}}}
+		}
+		return ipc.CardListResult{Cards: cards}, nil
 	})
 	ac.Handle(ipc.MethodCardKeygen, func(_ context.Context, _ uint32, p json.RawMessage) (any, error) {
 		var r ipc.KeygenRequest
@@ -54,8 +68,12 @@ func (f *fakeApprover) setup(ac *ipc.Conn) {
 		}
 		f.mu.Lock()
 		f.keygens = append(f.keygens, r)
+		keygen := f.keygen
 		f.mu.Unlock()
-		return ipc.KeygenResult{Ref: "yubikey:1/0x82", Public: "AAAA"}, nil
+		if keygen != nil {
+			return keygen(r)
+		}
+		return ipc.KeygenResult{Ref: keyref.Ref{Serial: r.Serial, Slot: r.Slot}.String(), Public: testPublic}, nil
 	})
 	ac.Handle(ipc.MethodAssistNotice, func(_ context.Context, _ uint32, p json.RawMessage) (any, error) {
 		var n ipc.AssistNotice
@@ -163,7 +181,8 @@ func TestApproveWithoutAccessAsksNobody(t *testing.T) {
 	f := &fakeApprover{allow: true}
 	e, _ := assistEnv(t, f)
 	e.m.assist.revoke(assistUID)
-	wantCode(t, e.m.approve(context.Background(), assistUID, testApproval), ipc.CodeNoApp)
+	// Access is off: that is the answer, not a missing app.
+	wantCode(t, e.m.approve(context.Background(), assistUID, testApproval), ipc.CodeAccessOff)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if len(f.requests) != 0 {
@@ -231,14 +250,19 @@ func TestApproveAgentLostIsDenied(t *testing.T) {
 
 func TestNoAssistAgentRefusesApproval(t *testing.T) {
 	e := newEnv(t, envOpts{noAgent: true})
-	wantCode(t, e.m.approve(context.Background(), assistUID, testApproval), ipc.CodeNoApp)
+	// No access at all: access_off comes first.
+	wantCode(t, e.m.approve(context.Background(), assistUID, testApproval), ipc.CodeAccessOff)
+	_, err := e.m.cardList(context.Background(), assistUID)
+	wantCode(t, err, ipc.CodeAccessOff)
+	_, err = e.m.cardKeygen(context.Background(), assistUID, serialA, 0x82)
+	wantCode(t, err, ipc.CodeAccessOff)
 	// An agent without the capability (the CLI agent) is never asked.
 	f := &fakeApprover{allow: true}
 	dc := connPairWith(t, e, f.setup)
 	e.m.agentRegister(dc, assistUID, nil)
 	e.m.assist.set(assistUID, nil, ipc.AssistGrant{Groups: allGroups()}, time.Now())
 	wantCode(t, e.m.approve(context.Background(), assistUID, testApproval), ipc.CodeNoApp)
-	_, err := e.m.cardList(context.Background(), assistUID)
+	_, err = e.m.cardList(context.Background(), assistUID)
 	wantCode(t, err, ipc.CodeNoApp)
 	_, err = e.m.cardKeygen(context.Background(), assistUID, serialA, 0x82)
 	wantCode(t, err, ipc.CodeNoApp)
@@ -276,11 +300,11 @@ func TestAssistAgentIsGrantOwner(t *testing.T) {
 	}
 	// The owner leaves: access closes and nobody else is asked.
 	e.m.dropAgent(first)
-	wantCode(t, e.m.approve(context.Background(), assistUID, testApproval), ipc.CodeNoApp)
+	wantCode(t, e.m.approve(context.Background(), assistUID, testApproval), ipc.CodeAccessOff)
 	_, err := e.m.cardList(context.Background(), assistUID)
-	wantCode(t, err, ipc.CodeNoApp)
+	wantCode(t, err, ipc.CodeAccessOff)
 	_, err = e.m.cardKeygen(context.Background(), assistUID, serialA, 0x82)
-	wantCode(t, err, ipc.CodeNoApp)
+	wantCode(t, err, ipc.CodeAccessOff)
 	intruder.mu.Lock()
 	n := len(intruder.requests) + len(intruder.keygens) + intruder.lists
 	intruder.mu.Unlock()
@@ -319,7 +343,7 @@ func TestCardOpsReachAssistAgent(t *testing.T) {
 		t.Fatalf("cards %+v, %v", cards, err)
 	}
 	res, err := e.m.cardKeygen(context.Background(), assistUID, serialA, 0x82)
-	if err != nil || res.Ref != "yubikey:1/0x82" {
+	if err != nil || res.Ref != refA.String() {
 		t.Fatalf("keygen %+v, %v", res, err)
 	}
 	e.m.notify(assistUID, "key")

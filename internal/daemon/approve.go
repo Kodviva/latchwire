@@ -45,12 +45,12 @@ func (m *Manager) assistAgent(uid uint32) *ipc.Conn {
 // A refusal, no answer within approveTimeout, access closing meanwhile
 // (revoke, a new grant, the owner leaving) and losing the app's connection
 // are CodeDenied; access that expired by time is CodeAccessOff; ctx ending
-// is CodeCancelled; no grant owner is CodeNoApp. Callers still check access
-// again before acting.
+// is CodeCancelled; no grant owner is CodeNoApp, or CodeAccessOff when
+// access is off. Callers still check access again before acting.
 func (m *Manager) approve(ctx context.Context, uid uint32, r ipc.ApproveRequest) error {
 	c := m.assistAgent(uid)
 	if c == nil {
-		return errNoApp
+		return m.noApp(uid)
 	}
 	pctx, release := m.assist.pending(uid)
 	defer release()
@@ -86,11 +86,21 @@ func (m *Manager) approve(ctx context.Context, uid uint32, r ipc.ApproveRequest)
 	return m.assist.allowed(uid, "", m.assist.now())
 }
 
+// noApp is the error for uid when no app can be asked: access_off when
+// access is off (a revoke closes the grant and with it its owner), else
+// no_app.
+func (m *Manager) noApp(uid uint32) error {
+	if err := m.assist.allowed(uid, "", m.assist.now()); err != nil {
+		return err
+	}
+	return errNoApp
+}
+
 // cardList returns the cards that uid's app (the grant's owner) sees.
 func (m *Manager) cardList(ctx context.Context, uid uint32) ([]ipc.CardEntry, error) {
 	c := m.assistAgent(uid)
 	if c == nil {
-		return nil, errNoApp
+		return nil, m.noApp(uid)
 	}
 	var res ipc.CardListResult
 	if err := c.Call(ctx, ipc.MethodCardList, nil, &res); err != nil {
@@ -103,7 +113,7 @@ func (m *Manager) cardList(ctx context.Context, uid uint32) ([]ipc.CardEntry, er
 func (m *Manager) cardKeygen(ctx context.Context, uid, serial uint32, slot uint8) (ipc.KeygenResult, error) {
 	c := m.assistAgent(uid)
 	if c == nil {
-		return ipc.KeygenResult{}, errNoApp
+		return ipc.KeygenResult{}, m.noApp(uid)
 	}
 	var res ipc.KeygenResult
 	err := c.Call(ctx, ipc.MethodCardKeygen, ipc.KeygenRequest{Serial: serial, Slot: slot}, &res)
