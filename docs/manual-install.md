@@ -208,9 +208,17 @@ Claude Code:
 
     claude mcp add latchwire -- /usr/local/latchwire/bin/latchwire mcp
 
-Claude Desktop, in its configuration file:
+Claude Desktop, in its configuration file
+(`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS,
+`%APPDATA%\Claude\claude_desktop_config.json` on Windows):
 
     {"mcpServers":{"latchwire":{"command":"/usr/local/latchwire/bin/latchwire","args":["mcp"]}}}
+
+In JSON a backslash must be doubled, so a Windows path is written like this:
+
+    {"mcpServers":{"latchwire":{"command":"C:\\Program Files\\Latchwire\\latchwire.exe","args":["mcp"]}}}
+
+Claude Desktop is not available on Linux; use another MCP client there.
 
 Any other MCP client: the command is `<path to latchwire> mcp`.
 

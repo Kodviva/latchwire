@@ -52,8 +52,8 @@ test only).
 
 ## 3. Components and trust
 
-Four programs (all in the one `latchwire` binary) cooperate. The desktop app
-(`desktop/`, a separate binary) is a fourth way to run the agent:
+Four programs, all in the one `latchwire` binary, cooperate. The desktop app
+(`desktop/`, a separate binary) is one more way to run the agent:
 
 | Component | Runs as | Does |
 | --- | --- | --- |
@@ -799,7 +799,8 @@ adds a way to ask for these actions, not a new trust level.
   `internal/agent/assist.go`.
 - **Rights.** `connect` and `disconnect` from an agent run with the rights of
   the user who granted access; an administrator's agent gets no administrator
-  pass-through (it can take down only a tunnel bound to its user). `add_tunnel`
+  pass-through (it can take down only a tunnel bound to its user, or its
+  user's own failed or pending connect). `add_tunnel`
   follows the same rule as `latchwire add`: only an administrator may add a
   tunnel, and the owner is the user who granted access.
   Where: `internal/daemon/assistcall.go` (`addTunnel`, `connect`,
