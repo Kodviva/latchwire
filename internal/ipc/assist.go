@@ -20,6 +20,7 @@ const (
 	MethodCardKeygen     = "card.keygen"     // daemon -> agent
 	MethodAssistApprove  = "assist.approve"  // daemon -> agent
 	MethodAssistNotice   = "assist.notice"   // daemon -> agent
+	MethodAssistAbort    = "assist.abort"    // daemon -> agent
 )
 
 // CapAssist is the capability an agent reports in AgentRegister.Caps when it
@@ -79,7 +80,9 @@ type AssistActivity struct {
 
 // ApproveRequest is the params of assist.approve. Fresh says the card still
 // has its factory PIN and PUK, which the action will change.
+// ID names the request for assist.abort.
 type ApproveRequest struct {
+	ID      string `json:"id,omitempty"`
 	Client  string `json:"client"`
 	Tool    string `json:"tool"`
 	Summary string `json:"summary"`
@@ -107,8 +110,10 @@ type CardListResult struct {
 	Cards []CardEntry `json:"cards"`
 }
 
-// KeygenRequest is the params of card.keygen.
+// KeygenRequest is the params of card.keygen. ID names the request for
+// assist.abort.
 type KeygenRequest struct {
+	ID     string `json:"id,omitempty"`
 	Serial uint32 `json:"serial"`
 	Slot   uint8  `json:"slot"`
 }
@@ -118,6 +123,13 @@ type KeygenRequest struct {
 type KeygenResult struct {
 	Ref    string `json:"ref"`
 	Public string `json:"public"`
+}
+
+// AssistAbort is the params of assist.abort: the daemon stopped waiting for
+// the assist.approve or card.keygen request ID (timeout, access closed, the
+// caller gone), so the app should close its window or give up the key.
+type AssistAbort struct {
+	ID string `json:"id"`
 }
 
 // AssistNotice is the params of assist.notice: the guided step the agent

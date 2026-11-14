@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -31,6 +32,30 @@ type fakeApprover struct {
 	// card.keygen.
 	cards  []ipc.CardEntry
 	keygen func(ipc.KeygenRequest) (ipc.KeygenResult, error)
+	// The IDs of the requests (requests and keygens are kept without
+	// them) and of the aborts the daemon sent.
+	approveIDs []string
+	keygenIDs  []string
+	aborts     []string
+}
+
+// abortsNow returns the aborts received so far.
+func (f *fakeApprover) abortsNow() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.aborts)
+}
+
+// waitAborts waits until the daemon sent the aborts want.
+func (f *fakeApprover) waitAborts(t *testing.T, want ...string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !slices.Equal(f.abortsNow(), want) {
+		if time.Now().After(deadline) {
+			t.Fatalf("aborts %v, want %v", f.abortsNow(), want)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 // testPublic is the public key the fake app reports for a new key.
@@ -43,6 +68,8 @@ func (f *fakeApprover) setup(ac *ipc.Conn) {
 			return nil, err
 		}
 		f.mu.Lock()
+		f.approveIDs = append(f.approveIDs, r.ID)
+		r.ID = ""
 		f.requests = append(f.requests, r)
 		allow, answer := f.allow, f.answer
 		f.mu.Unlock()
@@ -67,6 +94,8 @@ func (f *fakeApprover) setup(ac *ipc.Conn) {
 			return nil, err
 		}
 		f.mu.Lock()
+		f.keygenIDs = append(f.keygenIDs, r.ID)
+		r.ID = ""
 		f.keygens = append(f.keygens, r)
 		keygen := f.keygen
 		f.mu.Unlock()
@@ -74,6 +103,16 @@ func (f *fakeApprover) setup(ac *ipc.Conn) {
 			return keygen(r)
 		}
 		return ipc.KeygenResult{Ref: keyref.Ref{Serial: r.Serial, Slot: r.Slot}.String(), Public: testPublic}, nil
+	})
+	ac.Handle(ipc.MethodAssistAbort, func(_ context.Context, _ uint32, p json.RawMessage) (any, error) {
+		var a ipc.AssistAbort
+		if err := json.Unmarshal(p, &a); err != nil {
+			return nil, err
+		}
+		f.mu.Lock()
+		f.aborts = append(f.aborts, a.ID)
+		f.mu.Unlock()
+		return nil, nil
 	})
 	ac.Handle(ipc.MethodAssistNotice, func(_ context.Context, _ uint32, p json.RawMessage) (any, error) {
 		var n ipc.AssistNotice
@@ -355,4 +394,64 @@ func TestCardOpsReachAssistAgent(t *testing.T) {
 	if len(f.notices) != 1 || f.notices[0] != "key" {
 		t.Fatalf("notices %v", f.notices)
 	}
+}
+
+// approveID returns the ID of the i-th approval request.
+func (f *fakeApprover) approveID(i int) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.approveIDs[i]
+}
+
+// When the daemon stops waiting for an approval early (timeout, revoke,
+// the caller gone), it tells the app to close that window; an answered
+// approval needs no abort.
+func TestApproveAbortsWindowWhenDaemonStopsWaiting(t *testing.T) {
+	prev := approveTimeout
+	t.Cleanup(func() { approveTimeout = prev })
+	waitCtx := func(ctx context.Context) bool { <-ctx.Done(); return true }
+
+	// Answered: no abort; every request has its own ID.
+	f := &fakeApprover{allow: true}
+	e, _ := assistEnv(t, f)
+	for range 2 {
+		if err := e.m.approve(context.Background(), assistUID, testApproval); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if a, b := f.approveID(0), f.approveID(1); a == "" || a == b {
+		t.Fatalf("request IDs %q %q", a, b)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := f.abortsNow(); len(got) != 0 {
+		t.Fatalf("aborts %v after answers", got)
+	}
+
+	// Timeout.
+	approveTimeout = 50 * time.Millisecond
+	f = &fakeApprover{answer: waitCtx}
+	e, _ = assistEnv(t, f)
+	wantCode(t, result(t, approveAsync(e, context.Background())), ipc.CodeDenied)
+	f.waitAborts(t, f.approveID(0))
+	approveTimeout = prev
+
+	// Revoke.
+	started := make(chan struct{}, 1)
+	f = &fakeApprover{answer: func(ctx context.Context) bool { started <- struct{}{}; return waitCtx(ctx) }}
+	e, _ = assistEnv(t, f)
+	done := approveAsync(e, context.Background())
+	<-started
+	e.m.assist.revoke(assistUID)
+	wantCode(t, result(t, done), ipc.CodeDenied)
+	f.waitAborts(t, f.approveID(0))
+
+	// The caller goes away.
+	f = &fakeApprover{answer: func(ctx context.Context) bool { started <- struct{}{}; return waitCtx(ctx) }}
+	e, _ = assistEnv(t, f)
+	ctx, cancel := context.WithCancel(context.Background())
+	done = approveAsync(e, ctx)
+	<-started
+	cancel()
+	wantCode(t, result(t, done), ipc.CodeCancelled)
+	f.waitAborts(t, f.approveID(0))
 }

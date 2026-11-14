@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"log"
 	"time"
 
@@ -67,8 +69,13 @@ func (m *Manager) approve(ctx context.Context, uid uint32, r ipc.ApproveRequest)
 	// while pending's canceller holds the assist mutex.
 	stop := context.AfterFunc(pctx, cancel)
 	defer stop()
+	r.ID = requestID()
 	var res ipc.ApproveResult
 	err := c.Call(cctx, ipc.MethodAssistApprove, r, &res)
+	if err != nil && cctx.Err() != nil {
+		// The daemon stopped waiting: the window must not stay open.
+		m.abort(c, r.ID)
+	}
 	switch {
 	case pctx.Err() != nil:
 		// Checked first: an allow that raced a revoke is a refusal.
@@ -84,6 +91,25 @@ func (m *Manager) approve(ctx context.Context, uid uint32, r ipc.ApproveRequest)
 	// The grant may have run out by time while the window was open: that
 	// does not cancel pending approvals, so check it here.
 	return m.assist.allowed(uid, "", m.assist.now())
+}
+
+// requestID is a random name for one assist.approve or card.keygen.
+func requestID() string {
+	var b [16]byte
+	rand.Read(b[:])
+	return hex.EncodeToString(b[:])
+}
+
+// abort tells the app c that the daemon no longer waits for request id. It
+// does not wait for the answer; errors are only logged.
+func (m *Manager) abort(c *ipc.Conn, id string) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), noticeTimeout)
+		defer cancel()
+		if err := c.Call(ctx, ipc.MethodAssistAbort, ipc.AssistAbort{ID: id}, nil); err != nil {
+			log.Printf("daemon: assist.abort %s: %v", id, err)
+		}
+	}()
 }
 
 // noApp is the error for uid when no app can be asked: access_off when
@@ -115,8 +141,13 @@ func (m *Manager) cardKeygen(ctx context.Context, uid, serial uint32, slot uint8
 	if c == nil {
 		return ipc.KeygenResult{}, m.noApp(uid)
 	}
+	id := requestID()
 	var res ipc.KeygenResult
-	err := c.Call(ctx, ipc.MethodCardKeygen, ipc.KeygenRequest{Serial: serial, Slot: slot}, &res)
+	err := c.Call(ctx, ipc.MethodCardKeygen, ipc.KeygenRequest{ID: id, Serial: serial, Slot: slot}, &res)
+	if err != nil && ctx.Err() != nil {
+		// The daemon stopped waiting: the app gives the key up.
+		m.abort(c, id)
+	}
 	return res, err
 }
 

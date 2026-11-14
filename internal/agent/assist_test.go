@@ -22,9 +22,30 @@ type fakeAssistant struct {
 	notices  []string
 	cards    []ipc.CardEntry
 	pub      [32]byte
+	aborts   []string
+	// block, if set, makes Approve and Keygen wait for their ctx.
+	block   bool
+	started chan struct{}
 }
 
-func (f *fakeAssistant) Approve(_ context.Context, r ipc.ApproveRequest) (bool, error) {
+func (f *fakeAssistant) wait(ctx context.Context) {
+	f.mu.Lock()
+	block, started := f.block, f.started
+	f.mu.Unlock()
+	if block {
+		started <- struct{}{}
+		<-ctx.Done()
+	}
+}
+
+func (f *fakeAssistant) Abort(id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.aborts = append(f.aborts, id)
+}
+
+func (f *fakeAssistant) Approve(ctx context.Context, r ipc.ApproveRequest) (bool, error) {
+	f.wait(ctx)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.approved = append(f.approved, r)
@@ -37,7 +58,8 @@ func (f *fakeAssistant) Cards() ([]ipc.CardEntry, error) {
 	return slices.Clone(f.cards), nil
 }
 
-func (f *fakeAssistant) Keygen(_ context.Context, serial uint32, slot uint8) (string, [32]byte, error) {
+func (f *fakeAssistant) Keygen(ctx context.Context, serial uint32, slot uint8) (string, [32]byte, error) {
+	f.wait(ctx)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.keygens = append(f.keygens, [2]uint32{serial, uint32(slot)})
@@ -188,4 +210,43 @@ func TestAssistCallUsesDaemonConnection(t *testing.T) {
 	waitFor(t, "ErrClosed after the daemon went away", func() bool {
 		return errors.Is(a.Call(ctx5(t), ipc.MethodAssistActivity, nil, nil), ipc.ErrClosed)
 	})
+}
+
+// assist.abort cancels the named request's ctx and reaches the Assistant.
+func TestAbortReachesAssistant(t *testing.T) {
+	d := newDaemon(t)
+	f := &fakeAssistant{block: true, started: make(chan struct{}, 1)}
+	_, c := startAssist(t, d, f)
+	for _, call := range []struct {
+		method string
+		params any
+	}{
+		{ipc.MethodAssistApprove, ipc.ApproveRequest{ID: "a1", Tool: "connect"}},
+		{ipc.MethodCardKeygen, ipc.KeygenRequest{ID: "k1", Serial: serialA, Slot: 0x82}},
+	} {
+		done := make(chan error, 1)
+		go func() { done <- c.Call(ctx5(t), call.method, call.params, nil) }()
+		<-f.started
+		id := "a1"
+		if call.method == ipc.MethodCardKeygen {
+			id = "k1"
+		}
+		if err := c.Call(ctx5(t), ipc.MethodAssistAbort, ipc.AssistAbort{ID: id}, nil); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s still waits after the abort", call.method)
+		}
+	}
+	// An unknown ID is passed on and harms nothing.
+	if err := c.Call(ctx5(t), ipc.MethodAssistAbort, ipc.AssistAbort{ID: "zz"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !slices.Equal(f.aborts, []string{"a1", "k1", "zz"}) {
+		t.Fatalf("aborts %v", f.aborts)
+	}
 }
