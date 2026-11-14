@@ -140,7 +140,8 @@ type AssistNotice struct {
 
 // Tools of assist.call. ToolCheck is the access check the MCP server makes
 // before it computes a read-only tool (peer_block, server_guide) itself,
-// and before it validates add_tunnel's form (recorded as "checked").
+// and before it reports bad arguments of create_key or validates add_tunnel's
+// form (recorded as "checked").
 const (
 	ToolCheck         = "check"
 	ToolStatus        = "status"
@@ -154,7 +155,7 @@ const (
 )
 
 // AssistCheckArgs is the Args of the check tool: the read-only tool the
-// MCP server is about to compute, or add_tunnel.
+// MCP server is about to compute, or create_key or add_tunnel.
 type AssistCheckArgs struct {
 	Tool string `json:"tool"`
 }

@@ -244,14 +244,33 @@ func TestCreateKeySendsSlot(t *testing.T) {
 	if res := call(t, cs, "create_key", map[string]any{"serial": 12345678, "slot": "zz"}); !res.IsError || text(res) != "slot: invalid" {
 		t.Errorf("bad slot = %v %q", res.IsError, text(res))
 	}
+	if res := call(t, cs, "create_key", map[string]any{"serial": 12345678, "slot": "01"}); !res.IsError || text(res) != "slot: invalid" {
+		t.Errorf("out-of-range slot = %v %q", res.IsError, text(res))
+	}
+	// A valid slot goes to the daemon as is; a bad one only after the
+	// access check passed.
 	calls := d.recorded()
-	if len(calls) != 1 {
+	if len(calls) != 3 || !isCheck(calls[1], ipc.ToolCreateKey) || !isCheck(calls[2], ipc.ToolCreateKey) {
 		t.Fatalf("daemon calls = %+v", calls)
 	}
 	var a ipc.AssistKeyArgs
 	json.Unmarshal(calls[0].Args, &a)
 	if calls[0].Tool != ipc.ToolCreateKey || a != (ipc.AssistKeyArgs{Serial: 12345678, Slot: 0x83}) {
 		t.Errorf("daemon call = %+v %+v", calls[0], a)
+	}
+}
+
+func TestCreateKeyChecksAccessFirst(t *testing.T) {
+	d := &fakeDaemon{handle: func(context.Context, ipc.AssistCall) (ipc.AssistResult, error) {
+		return ipc.AssistResult{}, &ipc.Error{Code: ipc.CodeAccessOff, Message: msg.AssistAccessOff}
+	}}
+	cs := connect(t, startDaemon(t, d), nil)
+	res := call(t, cs, "create_key", map[string]any{"serial": 12345678, "slot": "zz"})
+	if !res.IsError || text(res) != msg.AssistAccessOff {
+		t.Errorf("create_key with access off = %v %q, want the access_off message", res.IsError, text(res))
+	}
+	if calls := d.recorded(); len(calls) != 1 || !isCheck(calls[0], ipc.ToolCreateKey) {
+		t.Errorf("daemon calls = %+v, want one check of create_key", calls)
 	}
 }
 

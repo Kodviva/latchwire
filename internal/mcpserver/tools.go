@@ -143,6 +143,11 @@ func addTools(s *mcp.Server, d *daemon) {
 		if in.Slot != "" {
 			slot, err := strconv.ParseUint(strings.TrimPrefix(strings.ToLower(in.Slot), "0x"), 16, 8)
 			if err != nil || slot < keyref.MinSlot || slot > keyref.MaxSlot {
+				// Access and the keys group first: while they are off
+				// nothing else is said.
+				if err := d.check(ctx, req, ipc.ToolCreateKey); err != nil {
+					return nil, nil, err
+				}
 				return nil, nil, invalidField("slot")
 			}
 			a.Slot = uint8(slot)
@@ -194,7 +199,8 @@ func (d *daemon) forward(ctx context.Context, req *mcp.CallToolRequest, tool str
 }
 
 // check asks the daemon whether tool may run: peer_block and server_guide,
-// which are computed here, or add_tunnel before its form is validated.
+// which are computed here, create_key before a bad slot is reported, or
+// add_tunnel before its form is validated.
 func (d *daemon) check(ctx context.Context, req *mcp.CallToolRequest, tool string) error {
 	_, err := d.call(ctx, req, ipc.ToolCheck, ipc.AssistCheckArgs{Tool: tool}, false)
 	return err

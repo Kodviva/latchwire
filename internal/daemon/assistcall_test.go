@@ -135,8 +135,8 @@ func TestUnknownToolIsBadRequest(t *testing.T) {
 	_, err := tool(t, e, context.Background(), assistUID, "rm -rf", nil)
 	wantCode(t, err, ipc.CodeBadRequest)
 	wantResult(t, e, assistUID, "unknown", "error: bad_request")
-	_, err = tool(t, e, context.Background(), assistUID, ipc.ToolCheck, ipc.AssistCheckArgs{Tool: ipc.ToolCreateKey})
-	wantCode(t, err, ipc.CodeBadRequest) // check is for read-only tools and add_tunnel only
+	_, err = tool(t, e, context.Background(), assistUID, ipc.ToolCheck, ipc.AssistCheckArgs{Tool: ipc.ToolConnect})
+	wantCode(t, err, ipc.CodeBadRequest) // check is for read-only tools, create_key and add_tunnel only
 }
 
 // The MCP server checks access and the tunnels group before it validates
@@ -178,6 +178,38 @@ func TestCheckAddTunnel(t *testing.T) {
 	e.m.mu.Unlock()
 	if n != 0 {
 		t.Fatalf("%d tunnels after a check", n)
+	}
+}
+
+// The MCP server checks access and the keys group before it reports a bad
+// create_key slot: the check asks no approval and makes no key.
+func TestCheckCreateKey(t *testing.T) {
+	e := newEnv(t, envOpts{noAgent: true})
+	check := ipc.AssistCheckArgs{Tool: ipc.ToolCreateKey}
+
+	_, err := tool(t, e, context.Background(), assistUID, ipc.ToolCheck, check)
+	wantCode(t, err, ipc.CodeAccessOff)
+	wantResult(t, e, assistUID, ipc.ToolCreateKey, "access_off")
+
+	f := &fakeApprover{allow: true}
+	grantAssist(t, e, f, assistUID, []string{ipc.GroupTunnels, ipc.GroupConnect})
+	_, err = tool(t, e, context.Background(), assistUID, ipc.ToolCheck, check)
+	wantCode(t, err, ipc.CodeAccessOff) // the keys group is off
+	wantResult(t, e, assistUID, ipc.ToolCreateKey, "access_off")
+
+	grantAssist(t, e, f, assistUID, []string{ipc.GroupKeys})
+	res, err := tool(t, e, context.Background(), assistUID, ipc.ToolCheck, check)
+	if err != nil {
+		t.Fatalf("check of create_key with keys on: %v", err)
+	}
+	if len(res.Data) != 0 || res.Summary != "" {
+		t.Fatalf("check result %+v, want none", res)
+	}
+	wantResult(t, e, assistUID, ipc.ToolCreateKey, "checked")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.requests)+len(f.keygens) != 0 {
+		t.Fatalf("the check asked the app %d times", len(f.requests)+len(f.keygens))
 	}
 }
 

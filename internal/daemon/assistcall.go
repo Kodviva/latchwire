@@ -87,19 +87,20 @@ func (m *Manager) assistCall(ctx context.Context, c *ipc.Conn, uid uint32, p ipc
 		elevated = c.ElevatedUser()
 	}
 	name := p.Tool
-	checkOnly := false // an access check of add_tunnel, which is not run
+	checkOnly := false // an access check of create_key or add_tunnel, which is not run
 	if name == ipc.ToolCheck {
 		// The MCP server computes peer_block and server_guide itself and
-		// only asks whether it may. Before it validates add_tunnel's form
-		// it asks whether access and the tunnels group are on, so that
-		// while they are off nothing else is said.
+		// only asks whether it may. Before it reports an error in the
+		// arguments of create_key or add_tunnel it asks whether access and
+		// the tool's group are on, so that while they are off nothing else
+		// is said.
 		var a ipc.AssistCheckArgs
 		switch {
 		case json.Unmarshal(p.Args, &a) != nil:
 			name = ""
 		case a.Tool == ipc.ToolPeerBlock || a.Tool == ipc.ToolServerGuide:
 			name = a.Tool
-		case a.Tool == ipc.ToolAddTunnel:
+		case a.Tool == ipc.ToolCreateKey || a.Tool == ipc.ToolAddTunnel:
 			name, checkOnly = a.Tool, true
 		default:
 			name = ""
