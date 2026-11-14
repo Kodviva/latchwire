@@ -1082,6 +1082,16 @@ func lastHandshake(dev *device.Device) string {
 
 func (m *Manager) agentRegister(c *ipc.Conn, uid uint32, serials []uint32, caps ...string) {
 	m.mu.Lock()
+	// Serve closes c before the accept loop calls dropAgent, and dropAgent
+	// deletes under mu: a register that runs after the drop sees Done closed
+	// here, so it cannot put a dead connection back into the table.
+	select {
+	case <-c.Done():
+		m.mu.Unlock()
+		log.Printf("daemon: agent of uid %d registered on a closed connection: ignored", uid)
+		return
+	default:
+	}
 	a := m.agents[c]
 	if a == nil {
 		a = &agentState{uid: uid, noAuto: map[string]bool{}}
