@@ -378,6 +378,8 @@ runs the daemon:
 	AssistCancelled = "the action was cancelled because agent access was turned off"
 	// AssistRequestCancelled: the caller went away while the approval window waited.
 	AssistRequestCancelled = "the request was cancelled before the user answered"
+	// AssistBusy: an approval window is already open for this user; a second request is refused at once.
+	AssistBusy = "another request is waiting for the user's answer: try again after the user answers it"
 	// AssistUnknownTool: assist.call named a tool the daemon does not know.
 	AssistUnknownTool = "this Latchwire version does not offer that tool"
 	// AssistDaemonTooOld: latchwire mcp reached a daemon that does not know assist.call.
@@ -402,6 +404,8 @@ runs the daemon:
 	AssistKeygenCancelled = "the user cancelled creating the key in the Latchwire app"
 	// AssistAppNotConnected: the app turned agent access on or off before its agent had connected to the daemon.
 	AssistAppNotConnected = "The app is not connected to the Latchwire service yet. Try again in a moment."
+	// AssistServiceTooOld: the daemon does not know the agent access methods (an older version).
+	AssistServiceTooOld = "The Latchwire service is too old for agent access. Update Latchwire."
 )
 
 // Desktop app messages, rendered with Render.

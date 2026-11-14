@@ -1069,6 +1069,10 @@
   "@AssistRequestCancelled": {
     "description": "AssistRequestCancelled: the caller went away while the approval window waited."
   },
+  "AssistBusy": "another request is waiting for the user's answer: try again after the user answers it",
+  "@AssistBusy": {
+    "description": "AssistBusy: an approval window is already open for this user; a second request is refused at once."
+  },
   "AssistUnknownTool": "this Latchwire version does not offer that tool",
   "@AssistUnknownTool": {
     "description": "AssistUnknownTool: assist.call named a tool the daemon does not know."
@@ -1157,7 +1161,7 @@
     "description": "AssistKeygenCancelled: the person closed a PIN or PUK form of a key the agent asked for."
   },
   "UIAccessNav": "Agent access",
-  "UIAccessIntro": "An AI agent on this computer, such as Claude Code, can help you set up Latchwire. With access on, it can read your setup: tunnels, plugged-in YubiKeys and the next steps. In the groups you allow, it can also ask to create keys, add tunnels and connect; Latchwire shows you each request and does nothing until you allow it. The agent never sees or types your PIN, PUK or keys.",
+  "UIAccessIntro": "An AI agent on this computer can help you set up Latchwire. With access on, it can read your setup: tunnels, plugged-in YubiKeys and the next steps. In the groups you allow, it can also ask to create keys, add tunnels and connect; Latchwire shows you each request and does nothing until you allow it. The agent never sees or types your PIN, PUK or keys.",
   "UIAccessStateOff": "Agent access is off.",
   "UIAccessStateMinutes": "{minutes, plural, one {Agent access is on: # minute left.} other {Agent access is on: # minutes left.}}",
   "UIAccessStateUntilQuit": "Agent access is on until Latchwire quits.",
@@ -1186,6 +1190,10 @@
   "AssistAppNotConnected": "The app is not connected to the Latchwire service yet. Try again in a moment.",
   "@AssistAppNotConnected": {
     "description": "AssistAppNotConnected: the app turned agent access on or off before its agent had connected to the daemon."
+  },
+  "AssistServiceTooOld": "The Latchwire service is too old for agent access. Update Latchwire.",
+  "@AssistServiceTooOld": {
+    "description": "AssistServiceTooOld: the daemon does not know the agent access methods (an older version)."
   },
   "UIRoadmapAgentLink": "Let an AI agent help with these steps",
   "UIApproveTitle": "Allow this agent request?",
