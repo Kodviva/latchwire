@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/Kodviva/latchwire/internal/ipc"
 	"github.com/Kodviva/latchwire/internal/msg"
@@ -34,26 +35,53 @@ type Assistant interface {
 	Abort(id string)
 }
 
+// An assist.abort can overtake the request it names (each is served on its
+// own goroutine), so the agent remembers the last abortKeep aborted IDs for
+// abortFor and starts a later request with such an ID already cancelled.
+const (
+	abortKeep = 64
+	abortFor  = 5 * time.Minute
+)
+
 // inflight is the requests of the daemon that the Assistant is working on,
-// by ID, so assist.abort can cancel them.
+// by ID, so assist.abort can cancel them, and the IDs aborted before their
+// request arrived.
 type inflight struct {
-	mu sync.Mutex
-	m  map[string]context.CancelFunc
+	mu      sync.Mutex
+	m       map[string]context.CancelFunc
+	aborted []abortMark // oldest first
+	now     func() time.Time
+}
+
+type abortMark struct {
+	id string
+	at time.Time
+}
+
+func (f *inflight) clock() time.Time {
+	if f.now != nil {
+		return f.now()
+	}
+	return time.Now()
 }
 
 // start returns ctx bound to id until done is called. An empty id cannot
-// be aborted.
+// be aborted; an id aborted recently starts cancelled.
 func (f *inflight) start(ctx context.Context, id string) (context.Context, func()) {
 	ctx, cancel := context.WithCancel(ctx)
 	if id == "" {
 		return ctx, cancel
 	}
 	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.wasAbortedLocked(id) {
+		cancel()
+		return ctx, cancel
+	}
 	if f.m == nil {
 		f.m = map[string]context.CancelFunc{}
 	}
 	f.m[id] = cancel
-	f.mu.Unlock()
 	return ctx, func() {
 		f.mu.Lock()
 		delete(f.m, id)
@@ -62,13 +90,42 @@ func (f *inflight) start(ctx context.Context, id string) (context.Context, func(
 	}
 }
 
+// cancel cancels the request id and remembers the id for a request that
+// has not arrived yet.
 func (f *inflight) cancel(id string) {
+	if id == "" {
+		return
+	}
 	f.mu.Lock()
-	cancel := f.m[id]
-	f.mu.Unlock()
-	if cancel != nil {
+	defer f.mu.Unlock()
+	if cancel := f.m[id]; cancel != nil {
 		cancel()
 	}
+	f.pruneLocked()
+	if len(f.aborted) == abortKeep {
+		f.aborted = f.aborted[1:]
+	}
+	f.aborted = append(f.aborted, abortMark{id: id, at: f.clock()})
+}
+
+// pruneLocked forgets the aborts older than abortFor.
+func (f *inflight) pruneLocked() {
+	cut := f.clock().Add(-abortFor)
+	i := 0
+	for i < len(f.aborted) && f.aborted[i].at.Before(cut) {
+		i++
+	}
+	f.aborted = f.aborted[i:]
+}
+
+func (f *inflight) wasAbortedLocked(id string) bool {
+	f.pruneLocked()
+	for _, a := range f.aborted {
+		if a.id == id {
+			return true
+		}
+	}
+	return false
 }
 
 // WithAssistant makes the agent offer s to the daemon: agent.register then
@@ -89,6 +146,11 @@ func (a *Agent) Call(ctx context.Context, method string, params, result any) err
 	}
 	return c.Call(ctx, method, params, result)
 }
+
+// Connection returns the agent's current registered daemon connection, or
+// nil when it is not connected. Access the app opens over it (assist.grant)
+// ends when the connection does: the app watches its Done channel.
+func (a *Agent) Connection() *ipc.Conn { return a.conn.Load() }
 
 // handleAssist registers the daemon's requests that go to the Assistant.
 func (a *Agent) handleAssist(c *ipc.Conn) {

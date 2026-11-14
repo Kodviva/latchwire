@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"sync"
 	"testing"
@@ -248,5 +249,79 @@ func TestAbortReachesAssistant(t *testing.T) {
 	defer f.mu.Unlock()
 	if !slices.Equal(f.aborts, []string{"a1", "k1", "zz"}) {
 		t.Fatalf("aborts %v", f.aborts)
+	}
+}
+
+// Connection is the registered connection while there is one; the app
+// watches its Done channel to know that access opened over it has ended.
+func TestConnectionIsTheRegisteredOne(t *testing.T) {
+	d := newDaemon(t)
+	a := New(d.path, newFakeBackend(t, serialA), &fakePrompter{}, poll).WithAssistant(&fakeAssistant{})
+	if a.Connection() != nil {
+		t.Fatal("a connection before Run")
+	}
+	startWith(t, a)
+	c, _ := d.conn()
+	var got *ipc.Conn
+	waitFor(t, "registered connection", func() bool { got = a.Connection(); return got != nil })
+	d.l.Close()
+	c.Close()
+	select {
+	case <-got.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("Done did not close with the connection")
+	}
+	waitFor(t, "no connection", func() bool { return a.Connection() == nil })
+}
+
+// An assist.abort can overtake its request: the request then starts with
+// its ctx already cancelled, for approvals and keys alike.
+func TestAbortBeforeRequestCancelsIt(t *testing.T) {
+	d := newDaemon(t)
+	f := &fakeAssistant{block: true, started: make(chan struct{}, 1)}
+	_, c := startAssist(t, d, f)
+	for _, call := range []struct {
+		id     string
+		method string
+		params any
+	}{
+		{"a2", ipc.MethodAssistApprove, ipc.ApproveRequest{ID: "a2", Tool: "connect"}},
+		{"k2", ipc.MethodCardKeygen, ipc.KeygenRequest{ID: "k2", Serial: serialA, Slot: 0x82}},
+	} {
+		if err := c.Call(ctx5(t), ipc.MethodAssistAbort, ipc.AssistAbort{ID: call.id}, nil); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() { done <- c.Call(ctx5(t), call.method, call.params, nil) }()
+		<-f.started
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s waits although it was aborted first", call.method)
+		}
+	}
+}
+
+func TestAbortMemoryIsBounded(t *testing.T) {
+	var f inflight
+	now := time.Unix(1000, 0)
+	f.now = func() time.Time { return now }
+	for i := range abortKeep + 1 {
+		f.cancel(fmt.Sprint("x", i))
+	}
+	started := func(id string) bool {
+		ctx, done := f.start(context.Background(), id)
+		defer done()
+		return ctx.Err() != nil
+	}
+	if started("x0") || !started("x1") || !started(fmt.Sprint("x", abortKeep)) {
+		t.Fatal("not the last abortKeep IDs")
+	}
+	now = now.Add(abortFor + time.Second)
+	if started("x2") {
+		t.Fatal("an old abort is still remembered")
+	}
+	if started("") {
+		t.Fatal("an empty ID was cancelled")
 	}
 }
