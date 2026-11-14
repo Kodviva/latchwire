@@ -751,7 +751,12 @@ func notAllowed(name string, uid uint32) error {
 // (whose next attempt would be for the same user). The policy is read again
 // after the network lookup, so a user denied meanwhile is refused.
 func (m *Manager) requestDisconnect(uid uint32, name string) (ipc.TunnelStatus, error) {
-	admin := m.admin(uid)
+	return m.disconnectAs(uid, name, m.admin(uid))
+}
+
+// disconnectAs is requestDisconnect with admin given: an agent tool calls it
+// with false, so an administrator's agent only has a user's rights.
+func (m *Manager) disconnectAs(uid uint32, name string, admin bool) (ipc.TunnelStatus, error) {
 	if !admin && !m.agentUser(uid) {
 		return ipc.TunnelStatus{}, errForbidden
 	}

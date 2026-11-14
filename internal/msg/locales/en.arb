@@ -1110,12 +1110,12 @@
       }
     }
   },
-  "AssistSummaryTunnelFmt": "tunnel \"{name}\": endpoints {endpoints}, allowed IPs {networks}, servers: {peers}, {psk}",
+  "AssistSummaryTunnelFmt": "tunnel {name}: endpoints {endpoints}, allowed IPs {networks}, servers: {peers}, {psk}",
   "@AssistSummaryTunnelFmt": {
     "description": "AssistSummaryTunnelFmt is the summary of add_tunnel. It takes the tunnel name, the endpoints and the allowed IPs (each joined with spaces), the number of servers and AssistPSKYes or AssistPSKNo; never a key or the PSK itself.",
     "placeholders": {
       "name": {
-        "verb": "%s"
+        "verb": "%q"
       },
       "endpoints": {
         "verb": "%s"
@@ -1139,12 +1139,12 @@
   "@AssistPSKNo": {
     "description": "AssistPSKNo: the tunnel has no preshared key."
   },
-  "AssistSummaryTunnelNameFmt": "tunnel \"{name}\"",
+  "AssistSummaryTunnelNameFmt": "the tunnel {name}",
   "@AssistSummaryTunnelNameFmt": {
     "description": "AssistSummaryTunnelNameFmt is the summary of connect, disconnect and setup_progress: the tunnel's name.",
     "placeholders": {
       "name": {
-        "verb": "%s"
+        "verb": "%q"
       }
     }
   }

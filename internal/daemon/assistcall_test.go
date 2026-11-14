@@ -172,7 +172,7 @@ func TestCreateKeyAsksApprovalThenKeygen(t *testing.T) {
 	}
 	wantResult(t, e, assistUID, ipc.ToolCreateKey, "done")
 	f.mu.Lock()
-	if len(f.keygens) != 1 || f.keygens[0] != (ipc.KeygenRequest{Serial: serialA, Slot: 0x83}) {
+	if len(f.keygens) != 1 || f.keygens[0] != (ipc.KeygenRequest{Serial: serialA, Slot: 0x83}) || f.keygenIDs[0] == "" {
 		t.Fatalf("keygens %+v", f.keygens)
 	}
 	if !slices.Equal(f.notices, []string{"key_created"}) {
@@ -513,7 +513,7 @@ func TestSetupProgressFromFacts(t *testing.T) {
 	f := &fakeApprover{cards: []ipc.CardEntry{{Serial: serialA, Supported: true, Keys: []string{refA.String()}}}}
 	e, _ := assistEnv(t, f)
 	p := progress(t, e, assistUID, nil)
-	want := "card_ready done, key_created done, backup_offered done, server_added unknown, server_info_entered pending, connected pending"
+	want := "card_ready done, key_created done, backup_offered unknown, server_added unknown, server_info_entered pending, connected pending"
 	if p.Path != "owner" || steps(p) != want {
 		t.Fatalf("progress %s %s, want owner %s", p.Path, steps(p), want)
 	}
@@ -535,6 +535,24 @@ func TestSetupProgressFromFacts(t *testing.T) {
 	f.mu.Unlock()
 	p = progress(t, e, assistUID, ipc.AssistProgressArgs{Tunnel: "other"})
 	want = "card_ready done, key_created pending, backup_offered unknown, server_added unknown, server_info_entered pending, connected pending"
+	if steps(p) != want {
+		t.Fatalf("progress %s, want %s", steps(p), want)
+	}
+
+	// What is seen is reported as it is: a card without a key is pending
+	// even though the tunnel exists; the unseen steps before the tunnel
+	// are done.
+	p = progress(t, e, assistUID, ipc.AssistProgressArgs{Tunnel: tunName})
+	want = "card_ready done, key_created pending, backup_offered done, server_added done, server_info_entered done, connected pending"
+	if steps(p) != want {
+		t.Fatalf("progress %s, want %s", steps(p), want)
+	}
+	// No card plugged in: card_ready is pending too.
+	f.mu.Lock()
+	f.cards = []ipc.CardEntry{}
+	f.mu.Unlock()
+	p = progress(t, e, assistUID, ipc.AssistProgressArgs{Tunnel: tunName})
+	want = "card_ready pending, key_created pending, backup_offered done, server_added done, server_info_entered done, connected pending"
 	if steps(p) != want {
 		t.Fatalf("progress %s, want %s", steps(p), want)
 	}
@@ -626,8 +644,130 @@ func TestCreateKeyTimesOut(t *testing.T) {
 	}
 	wantResult(t, e, assistUID, ipc.ToolCreateKey, "error: unavailable")
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	if len(f.notices) != 0 {
-		t.Fatalf("notices %v after a timeout", f.notices)
+	id := f.keygenIDs[0]
+	if len(f.notices) != 0 || id == "" {
+		t.Fatalf("notices %v, keygen ID %q after a timeout", f.notices, id)
+	}
+	f.mu.Unlock()
+	// The app is told to give the key up.
+	f.waitAborts(t, id)
+}
+
+// Access closing while the PIN and PUK are typed abandons the key, and the
+// app is told so.
+func TestCreateKeyRevokedAbortsKeygen(t *testing.T) {
+	started := make(chan struct{})
+	never := make(chan struct{})
+	t.Cleanup(func() { close(never) })
+	f := &fakeApprover{allow: true, keygen: func(ipc.KeygenRequest) (ipc.KeygenResult, error) {
+		close(started)
+		<-never
+		return ipc.KeygenResult{}, nil
+	}}
+	e, _ := assistEnv(t, f)
+	done := make(chan error, 1)
+	go func() {
+		_, err := tool(t, e, context.Background(), assistUID, ipc.ToolCreateKey, ipc.AssistKeyArgs{Serial: serialA})
+		done <- err
+	}()
+	<-started
+	e.m.assist.revoke(assistUID)
+	select {
+	case err := <-done:
+		wantCode(t, err, ipc.CodeDenied)
+	case <-time.After(5 * time.Second):
+		t.Fatal("create_key still waits after the revoke")
+	}
+	f.mu.Lock()
+	id := f.keygenIDs[0]
+	f.mu.Unlock()
+	f.waitAborts(t, id)
+}
+
+// Text that the agent controls reaches the approval window and the
+// activity list only as validated, printable parts: no bidi override or
+// zero-width character can disguise it.
+func TestSummaryAndClientArePrintable(t *testing.T) {
+	f := &fakeApprover{allow: true}
+	e, _ := assistEnv(t, f)
+	ctx := context.Background()
+	call := func(client, name string, args any) error {
+		_, err := e.m.assistCall(ctx, nil, assistUID, ipc.AssistCall{Client: client, Tool: name, Args: toolArgs(t, args)})
+		return err
+	}
+	evil := []string{"\u202e", "\u200b", "\u2066", "\ufeff"}
+	// An endpoint host that is not a plain DNS name is refused before any
+	// approval.
+	for _, bad := range []string{"vpn\u202eexample.com", "vpn\u200b.example.com", "vpn example.com"} {
+		cfg := strings.Replace(pskConfig(testPublic), "vpn.example.com", bad, 1)
+		wantCode(t, call("c", ipc.ToolAddTunnel, ipc.AssistTunnelArgs{Name: tunName, Config: cfg}), ipc.CodeBadRequest)
+	}
+	// A tunnel name outside the daemon's rules never reaches a summary.
+	wantCode(t, call("c", ipc.ToolAddTunnel, ipc.AssistTunnelArgs{Name: "of\u202efice", Config: pskConfig(testPublic)}), ipc.CodeBadRequest)
+	wantCode(t, call("c", ipc.ToolConnect, ipc.TunnelName{Name: "of\u202efice"}), ipc.CodeNotFound)
+	f.mu.Lock()
+	n := len(f.requests)
+	f.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("%d approvals for refused input", n)
+	}
+	// IP endpoints are shown normalised; the client name loses its
+	// non-printing characters.
+	cfg := strings.Replace(pskConfig(testPublic), "vpn.example.com:51820", "[2001:DB8::1]:51820", 1)
+	if err := call("Code\u202eedoC\u200b\u2066 x\n", ipc.ToolAddTunnel, ipc.AssistTunnelArgs{Name: tunName, Config: cfg}); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	r := f.requests[0]
+	f.mu.Unlock()
+	if r.Client != "CodeedoC x" {
+		t.Fatalf("client %q", r.Client)
+	}
+	if !strings.Contains(r.Summary, "[2001:db8::1]:51820") || !strings.Contains(r.Summary, `"`+tunName+`"`) {
+		t.Fatalf("summary %q", r.Summary)
+	}
+	act, _ := json.Marshal(e.m.assist.activity(assistUID))
+	for _, text := range []string{r.Client, r.Summary, string(act)} {
+		for _, c := range evil {
+			if strings.Contains(text, c) || strings.ContainsRune(text, []rune(c)[0]) {
+				t.Fatalf("%q carries %+q", text, c)
+			}
+		}
+	}
+}
+
+func TestClientName(t *testing.T) {
+	for in, want := range map[string]string{
+		"Claude Code":            "Claude Code",
+		"a\u202eb\u200cc\u200bd": "abcd",
+		"":                       "unknown",
+		"\u200b\u202e":           "unknown",
+		strings.Repeat("x", 100): strings.Repeat("x", 64),
+	} {
+		if got := clientName(in); got != want {
+			t.Errorf("clientName(%+q) = %+q, want %+q", in, got, want)
+		}
+	}
+}
+
+// An administrator's agent is not an administrator: it takes down only
+// tunnels its user may take down as a user.
+func TestAgentDisconnectIsNotAdmin(t *testing.T) {
+	f := &fakeApprover{allow: true}
+	e := connectEnv(t, f) // everyone is an administrator here
+	if st := e.connect(); st.State != StateConnected {
+		t.Fatalf("state %q", st.State)
+	}
+	other := &fakeApprover{allow: true}
+	grantAssist(t, e, other, assistUID, allGroups())
+	_, err := tool(t, e, context.Background(), assistUID, ipc.ToolDisconnect, ipc.TunnelName{Name: tunName})
+	wantCode(t, err, ipc.CodeForbidden)
+	wantResult(t, e, assistUID, ipc.ToolDisconnect, "error: forbidden")
+	if st := e.status(); st.State != StateConnected {
+		t.Fatalf("state %q after another user's agent disconnect", st.State)
+	}
+	// The administrator itself still can, through the CLI.
+	if err := e.call(ipc.MethodTunnelDisconnect, ipc.TunnelName{Name: tunName}, nil); err != nil {
+		t.Fatal(err)
 	}
 }

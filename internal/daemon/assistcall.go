@@ -7,7 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
+	"net/netip"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -113,7 +116,7 @@ func (m *Manager) assistCall(ctx context.Context, c *ipc.Conn, uid uint32, p ipc
 			res, err = call.run(p.Args)
 		}
 	}
-	entry.Summary = res.Summary
+	entry.Summary = printable(res.Summary)
 	entry.Result = activityResult(err)
 	m.assist.record(uid, entry)
 	if err != nil {
@@ -125,13 +128,7 @@ func (m *Manager) assistCall(ctx context.Context, c *ipc.Conn, uid uint32, p ipc
 // clientName is the MCP client's name as the activity list and the
 // approval window show it: printable, at most 64 characters.
 func clientName(s string) string {
-	s = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) || r == unicode.ReplacementChar {
-			return -1
-		}
-		return r
-	}, strings.ToValidUTF8(s, ""))
-	s = strings.TrimSpace(s)
+	s = printable(s)
 	if r := []rune(s); len(r) > 64 {
 		s = string(r[:64])
 	}
@@ -139,6 +136,20 @@ func clientName(s string) string {
 		return "unknown"
 	}
 	return s
+}
+
+// printable drops from s every rune that is not printable (control and
+// format characters such as bidi overrides and zero-width ones, invalid
+// UTF-8, separators other than the ASCII space), so text shown to the
+// person reads as it is.
+func printable(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if r == unicode.ReplacementChar || !unicode.IsPrint(r) {
+			return -1
+		}
+		return r
+	}, strings.ToValidUTF8(s, ""))
+	return strings.TrimSpace(s)
 }
 
 // activityResult is the result column of the activity list for err.
@@ -216,7 +227,7 @@ func (a assistCall) cards() ([]ipc.CardEntry, error) {
 // again afterwards: access may have closed or lost it while the window
 // was open.
 func (a assistCall) approved(summary string, fresh bool) error {
-	r := ipc.ApproveRequest{Client: a.client, Tool: a.tool, Summary: summary, Fresh: fresh}
+	r := ipc.ApproveRequest{Client: a.client, Tool: a.tool, Summary: printable(summary), Fresh: fresh}
 	if err := a.m.approve(a.ctx, a.uid, r); err != nil {
 		return err
 	}
@@ -263,11 +274,11 @@ func (a assistCall) status() (ipc.AssistResult, error) {
 }
 
 // setupProgress reports the roadmap's steps from facts: a card plugged in,
-// a Latchwire key on it, the tunnel defined, a handshake. The steps the
-// daemon cannot see (and the card steps when the app is not open) are done
-// when a later step is; the backup is offered as soon as the key is made,
-// so it is done with the key. A plugged card is a fact of now: a card that
-// is out is pending, whatever came later.
+// a Latchwire key on it, the tunnel defined, a handshake. A step the daemon
+// sees is reported as it is, done or pending, whatever came later. A step
+// it cannot see (backup_offered, pubkey_shared, server_added, and the card
+// steps when the app is not open) is done when a later step it sees is
+// done, else unknown.
 func (a assistCall) setupProgress(args json.RawMessage) (ipc.AssistResult, error) {
 	var res ipc.AssistResult
 	var p ipc.AssistProgressArgs
@@ -314,16 +325,12 @@ func (a assistCall) setupProgress(args json.RawMessage) (ipc.AssistResult, error
 		switch {
 		case done[id]:
 			state = ipc.StepDone
-		case id == stepCardReady && seen[id]:
+		case seen[id]:
 			state = ipc.StepPending
 		case later:
 			state = ipc.StepDone
-		case id == stepBackupOffered && done[stepKeyCreated]:
-			state = ipc.StepDone
-		case seen[id]:
-			state = ipc.StepPending
 		}
-		later = later || state == ipc.StepDone
+		later = later || (seen[id] && done[id])
 		out.Steps[i] = ipc.AssistStep{ID: id, State: state}
 	}
 	return res, data(&res, out)
@@ -386,13 +393,22 @@ func (a assistCall) createKey(args json.RawMessage) (ipc.AssistResult, error) {
 }
 
 // tunnelSummary describes cfg without a key: its endpoints, allowed IPs,
-// number of servers and whether it has a PSK.
-func tunnelSummary(name string, cfg *config.Tunnel) string {
+// number of servers and whether it has a PSK. Each part is rendered from
+// its parsed form; an endpoint whose host is neither an IP address nor a
+// plain DNS name is refused, so nothing the agent wrote reaches the
+// approval window as it is.
+func tunnelSummary(name string, cfg *config.Tunnel) (string, error) {
 	var endpoints, networks []string
 	psk := false
 	for _, p := range cfg.Peers {
-		if p.Endpoint != "" && !slices.Contains(endpoints, p.Endpoint) {
-			endpoints = append(endpoints, p.Endpoint)
+		if p.Endpoint != "" {
+			e, ok := endpointText(p.Endpoint)
+			if !ok {
+				return "", &ipc.Error{Code: ipc.CodeBadRequest, Message: fmt.Sprintf(msg.ConfigInvalidValueFmt, "Endpoint")}
+			}
+			if !slices.Contains(endpoints, e) {
+				endpoints = append(endpoints, e)
+			}
 		}
 		for _, n := range p.AllowedIPs {
 			if s := n.String(); !slices.Contains(networks, s) {
@@ -411,7 +427,52 @@ func tunnelSummary(name string, cfg *config.Tunnel) string {
 	if psk {
 		has = msg.AssistPSKYes
 	}
-	return fmt.Sprintf(msg.AssistSummaryTunnelFmt, name, join(endpoints), join(networks), len(cfg.Peers), has)
+	return fmt.Sprintf(msg.AssistSummaryTunnelFmt, name, join(endpoints), join(networks), len(cfg.Peers), has), nil
+}
+
+// endpointText renders a configured endpoint (host:port) from its parts:
+// an IP address without a zone, or a DNS name of letters, digits, hyphens
+// and dots, and a port 1-65535.
+func endpointText(e string) (string, bool) {
+	host, port, err := net.SplitHostPort(e)
+	if err != nil {
+		return "", false
+	}
+	n, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || n == 0 {
+		return "", false
+	}
+	if addr, err := netip.ParseAddr(host); err == nil {
+		if addr.Zone() != "" {
+			return "", false
+		}
+		return netip.AddrPortFrom(addr, uint16(n)).String(), true
+	}
+	if !dnsName(host) {
+		return "", false
+	}
+	return net.JoinHostPort(strings.ToLower(host), strconv.FormatUint(n, 10)), true
+}
+
+// dnsName reports whether s is a DNS name of labels of 1-63 letters,
+// digits and hyphens (not at either end), at most 253 characters.
+func dnsName(s string) bool {
+	s = strings.TrimSuffix(s, ".")
+	if s == "" || len(s) > 253 {
+		return false
+	}
+	for _, l := range strings.Split(s, ".") {
+		if l == "" || len(l) > 63 || l[0] == '-' || l[len(l)-1] == '-' {
+			return false
+		}
+		for i := 0; i < len(l); i++ {
+			c := l[i]
+			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (a assistCall) addTunnel(args json.RawMessage) (ipc.AssistResult, error) {
@@ -438,7 +499,9 @@ func (a assistCall) addTunnel(args json.RawMessage) (ipc.AssistResult, error) {
 	if exists {
 		return res, &ipc.Error{Code: ipc.CodeBadRequest, Message: msg.DaemonTunnelExists}
 	}
-	res.Summary = tunnelSummary(p.Name, cfg)
+	if res.Summary, err = tunnelSummary(p.Name, cfg); err != nil {
+		return res, err
+	}
 	if err := a.approved(res.Summary, false); err != nil {
 		return res, err
 	}
@@ -495,14 +558,24 @@ func (a assistCall) connect(args json.RawMessage) (ipc.AssistResult, error) {
 }
 
 // disconnect takes a tunnel down without an approval: it only ever ends
-// access to the network, and it is recorded.
+// access to the network, and it is recorded. The agent has its user's
+// rights only, never an administrator's: it takes down a tunnel bound to
+// its user, or its user's own failed or pending connect.
 func (a assistCall) disconnect(args json.RawMessage) (ipc.AssistResult, error) {
 	var res ipc.AssistResult
 	name, err := a.tunnelArg(args, &res)
 	if err != nil {
 		return res, err
 	}
-	st, err := a.m.requestDisconnect(a.uid, name)
+	var st ipc.TunnelStatus
+	err = a.act(func(ctx context.Context) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		var err error
+		st, err = a.m.disconnectAs(a.uid, name, false)
+		return err
+	})
 	if err != nil {
 		return res, err
 	}

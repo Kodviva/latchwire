@@ -387,13 +387,13 @@ runs the daemon:
 	// AssistSummaryKeyFmt is the summary of create_key in the approval window and the activity list. It takes the serial and the slot.
 	AssistSummaryKeyFmt = "new key on YubiKey %d, slot %02x"
 	// AssistSummaryTunnelFmt is the summary of add_tunnel. It takes the tunnel name, the endpoints and the allowed IPs (each joined with spaces), the number of servers and AssistPSKYes or AssistPSKNo; never a key or the PSK itself.
-	AssistSummaryTunnelFmt = "tunnel \"%s\": endpoints %s, allowed IPs %s, servers: %d, %v"
+	AssistSummaryTunnelFmt = "tunnel %q: endpoints %s, allowed IPs %s, servers: %d, %v"
 	// AssistPSKYes: the tunnel has a preshared key (never shown).
 	AssistPSKYes = "PSK: yes"
 	// AssistPSKNo: the tunnel has no preshared key.
 	AssistPSKNo = "PSK: no"
 	// AssistSummaryTunnelNameFmt is the summary of connect, disconnect and setup_progress: the tunnel's name.
-	AssistSummaryTunnelNameFmt = "tunnel \"%s\""
+	AssistSummaryTunnelNameFmt = "the tunnel %q"
 )
 
 // Desktop app messages, rendered with Render.
