@@ -84,6 +84,13 @@ func (a *assistState) set(uid uint32, owner *ipc.Conn, g ipc.AssistGrant, now ti
 			return errBadRequest
 		}
 	}
+	if owner != nil {
+		select {
+		case <-owner.Done():
+			return &ipc.Error{Code: ipc.CodeAccessOff, Message: msg.AssistAccessOff}
+		default:
+		}
+	}
 	n := &assistGrant{groups: groups, owner: owner}
 	if g.Minutes > 0 {
 		n.until = now.Add(time.Duration(g.Minutes) * time.Minute)
@@ -171,11 +178,18 @@ func (a *assistState) pending(uid uint32) (context.Context, func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	key := new(struct{})
 	a.mu.Lock()
-	a.userLocked(uid).pending[key] = cancel
+	u := a.userLocked(uid)
+	if g := u.grant; g == nil || (!g.until.IsZero() && !a.now().Before(g.until)) {
+		// No open access: nothing could cancel this later.
+		a.mu.Unlock()
+		cancel()
+		return ctx, func() {}
+	}
+	u.pending[key] = cancel
 	a.mu.Unlock()
 	return ctx, func() {
 		a.mu.Lock()
-		delete(a.users[uid].pending, key)
+		delete(u.pending, key)
 		a.mu.Unlock()
 		cancel()
 	}
@@ -188,7 +202,12 @@ func (m *Manager) handleAssist(c *ipc.Conn) {
 		if err := decode(params, &g); err != nil {
 			return nil, err
 		}
-		if !m.assistAgent(c, uid) {
+		// Check and store under one m.mu section: dropAgent closes the
+		// owner's access under the same lock, so a grant never outlives
+		// its connection. Lock order: m.mu, then assist.mu.
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if !m.assistAgentLocked(c, uid) {
 			return nil, errForbidden
 		}
 		return nil, m.assist.set(uid, c, g, m.assist.now())
@@ -202,11 +221,22 @@ func (m *Manager) handleAssist(c *ipc.Conn) {
 	})
 }
 
-// assistAgent reports whether c is a registered agent of uid that reported
-// CapAssist.
-func (m *Manager) assistAgent(c *ipc.Conn, uid uint32) bool {
+// assistAgentLocked reports whether c is a registered agent of uid that
+// reported CapAssist and never made an assist call. Call with m.mu held.
+func (m *Manager) assistAgentLocked(c *ipc.Conn, uid uint32) bool {
+	a := m.agents[c]
+	return a != nil && a.seq != 0 && a.uid == uid && a.caps[ipc.CapAssist] && !m.assistCallers[c]
+}
+
+// markAssistCaller records that c made an assist.call: a connection that
+// drives tools is never an access owner, so its grant is refused and any
+// it holds is closed.
+func (m *Manager) markAssistCaller(c *ipc.Conn) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	a := m.agents[c]
-	return a != nil && a.seq != 0 && a.uid == uid && a.caps[ipc.CapAssist]
+	if m.assistCallers == nil {
+		m.assistCallers = map[*ipc.Conn]bool{}
+	}
+	m.assistCallers[c] = true
+	m.assist.dropOwner(c)
 }

@@ -81,7 +81,9 @@ func TestBadGrant(t *testing.T) {
 
 func TestRevoke(t *testing.T) {
 	var a assistState
-	a.set(501, nil, ipc.AssistGrant{Minutes: 60, Groups: allGroups()}, t0)
+	if err := a.set(501, nil, ipc.AssistGrant{Minutes: 60, Groups: allGroups()}, t0); err != nil {
+		t.Fatal(err)
+	}
 	a.revoke(501)
 	wantCode(t, a.allowed(501, "", t0), ipc.CodeAccessOff)
 }
@@ -189,6 +191,7 @@ func TestGrantNeedsAssistAgent(t *testing.T) {
 	if err := e.call(ipc.MethodAssistRevoke, nil, nil); err != nil {
 		t.Fatal(err)
 	}
+	wantCode(t, e.m.assist.allowed(uid, "", time.Now()), ipc.CodeAccessOff)
 	var act ipc.AssistActivity
 	if err := e.call(ipc.MethodAssistActivity, nil, &act); err != nil {
 		t.Fatal(err)
@@ -227,4 +230,77 @@ func pendingCount(a *assistState) int {
 		n += len(u.pending)
 	}
 	return n
+}
+
+func TestSetAfterOwnerGone(t *testing.T) {
+	var a assistState
+	owner := &ipc.Conn{}
+	a.dropOwner(owner)
+	// A closed connection cannot own a grant.
+	e := newEnv(t, envOpts{noAgent: true})
+	closed := e.cli
+	closed.Close()
+	<-closed.Done()
+	wantCode(t, a.set(501, closed, ipc.AssistGrant{Groups: allGroups()}, t0), ipc.CodeAccessOff)
+	wantCode(t, a.allowed(501, "", t0), ipc.CodeAccessOff)
+}
+
+func TestPendingWithoutGrantIsCancelled(t *testing.T) {
+	var a assistState
+	ctx, release := a.pending(501)
+	if ctx.Err() == nil {
+		t.Fatal("no grant: context must be cancelled")
+	}
+	release()
+	a.clock = func() time.Time { return t0.Add(16 * time.Minute) }
+	a.set(501, nil, ipc.AssistGrant{Minutes: 15, Groups: allGroups()}, t0)
+	ctx, release = a.pending(501)
+	defer release()
+	if ctx.Err() == nil {
+		t.Fatal("expired grant: context must be cancelled")
+	}
+	if n := pendingCount(&a); n != 0 {
+		t.Fatalf("%d leaked", n)
+	}
+}
+
+func TestGrantRefusedForAssistCaller(t *testing.T) {
+	e := newEnv(t, envOpts{noAgent: true})
+	g := ipc.AssistGrant{Minutes: 15, Groups: allGroups()}
+	if err := e.call(ipc.MethodAgentRegister, ipc.AgentRegister{Caps: []string{ipc.CapAssist}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.call(ipc.MethodAssistGrant, g, nil); err != nil {
+		t.Fatal(err)
+	}
+	e.m.mu.Lock()
+	var c *ipc.Conn
+	var uid uint32
+	for k, a := range e.m.agents {
+		c, uid = k, a.uid
+	}
+	e.m.mu.Unlock()
+	e.m.markAssistCaller(c)
+	wantCode(t, e.m.assist.allowed(uid, "", time.Now()), ipc.CodeAccessOff)
+	wantCode(t, e.call(ipc.MethodAssistGrant, g, nil), ipc.CodeForbidden)
+}
+
+func TestReregisterWithoutAssistClosesAccess(t *testing.T) {
+	e := newEnv(t, envOpts{noAgent: true})
+	if err := e.call(ipc.MethodAgentRegister, ipc.AgentRegister{Caps: []string{ipc.CapAssist}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.call(ipc.MethodAssistGrant, ipc.AssistGrant{Groups: allGroups()}, nil); err != nil {
+		t.Fatal(err)
+	}
+	e.m.mu.Lock()
+	var uid uint32
+	for _, a := range e.m.agents {
+		uid = a.uid
+	}
+	e.m.mu.Unlock()
+	if err := e.call(ipc.MethodAgentRegister, ipc.AgentRegister{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	wantCode(t, e.m.assist.allowed(uid, "", time.Now()), ipc.CodeAccessOff)
 }

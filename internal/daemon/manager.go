@@ -219,7 +219,9 @@ type Manager struct {
 	tunnels map[string]*tunnel
 	agents  map[*ipc.Conn]*agentState
 	assist  assistState
-	nextSeq uint64
+	// assistCallers: connections that made an assist.call (guarded by mu).
+	assistCallers map[*ipc.Conn]bool
+	nextSeq       uint64
 	// netID is the last identified network an on-demand evaluation saw
 	// ("" before the first). odEpoch changes with it and whenever an agent
 	// registers or reports a card anew: an on-demand attempt is made once
@@ -1093,6 +1095,9 @@ func (m *Manager) agentRegister(c *ipc.Conn, uid uint32, serials []uint32, caps 
 	for _, name := range caps {
 		a.caps[name] = true
 	}
+	if !a.caps[ipc.CapAssist] {
+		m.assist.dropOwner(c)
+	}
 	old := a.serials
 	a.serials = map[uint32]bool{}
 	for _, s := range serials {
@@ -1167,8 +1172,9 @@ func (m *Manager) dropAgent(c *ipc.Conn) {
 	m.mu.Lock()
 	a := m.agents[c]
 	delete(m.agents, c)
+	delete(m.assistCallers, c)
+	m.assist.dropOwner(c) // under mu: see handleAssist
 	m.mu.Unlock()
-	m.assist.dropOwner(c)
 	if a == nil || a.seq == 0 {
 		return
 	}
