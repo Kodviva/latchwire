@@ -52,9 +52,14 @@ daemon_loaded() { "$LAUNCHCTL" print "system/$DAEMON_LABEL" >/dev/null 2>&1; }
 
 # wait_gone TARGET: waits up to 10 s until launchd has finished removing the
 # job. bootout returns before that, and a bootstrap in between fails.
+# LW_WAIT_POLLS (default 20 polls of 0.5 s) is for the tests.
 wait_gone() {
 	i=0
-	while "$LAUNCHCTL" print "$1" >/dev/null 2>&1 && [ "$i" -lt 20 ]; do
+	while "$LAUNCHCTL" print "$1" >/dev/null 2>&1; do
+		if [ "$i" -ge "${LW_WAIT_POLLS:-20}" ]; then
+			say "$1 is still loaded after the wait: trying to start it anyway"
+			return 0
+		fi
 		sleep 0.5
 		i=$((i + 1))
 	done
