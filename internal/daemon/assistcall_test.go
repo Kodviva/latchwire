@@ -867,14 +867,17 @@ func TestAgentDisconnectIsNotAdmin(t *testing.T) {
 func TestAgentConnectIsNotAdmin(t *testing.T) {
 	f := &fakeApprover{allow: true}
 	e := connectEnv(t, f) // everyone is an administrator; only uidA may use it
+	// Not assistUID: on Windows the user table gives the test process,
+	// the tunnel's owner, the first uid (1000) and so the right to it.
+	const stranger uint32 = 4711
 	other := &fakeApprover{allow: true}
-	grantAssist(t, e, other, assistUID, allGroups())
-	_, err := tool(t, e, context.Background(), assistUID, ipc.ToolConnect, ipc.TunnelName{Name: tunName})
+	grantAssist(t, e, other, stranger, allGroups())
+	_, err := tool(t, e, context.Background(), stranger, ipc.ToolConnect, ipc.TunnelName{Name: tunName})
 	wantCode(t, err, ipc.CodeForbidden)
 	if want := fmt.Sprintf(msg.DaemonNotAllowedUserFmt, tunName); err.(*ipc.Error).Message != want {
 		t.Fatalf("message %q, want the user refusal %q", err.(*ipc.Error).Message, want)
 	}
-	wantResult(t, e, assistUID, ipc.ToolConnect, "error: forbidden")
+	wantResult(t, e, stranger, ipc.ToolConnect, "error: forbidden")
 	if st := e.status(); st.State != StateDisconnected {
 		t.Fatalf("state %q after another user's agent connect", st.State)
 	}
@@ -882,7 +885,7 @@ func TestAgentConnectIsNotAdmin(t *testing.T) {
 		t.Fatalf("PIN asked %d times", n)
 	}
 	// The same administrator through the CLI path still may.
-	if _, err := e.m.requestConnect(context.Background(), assistUID, tunName); err != nil {
+	if _, err := e.m.requestConnect(context.Background(), stranger, tunName); err != nil {
 		t.Fatalf("administrator connect: %v", err)
 	}
 }
