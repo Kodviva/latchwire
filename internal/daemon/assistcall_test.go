@@ -214,7 +214,7 @@ func TestCheckCreateKey(t *testing.T) {
 }
 
 func TestCreateKeyAsksApprovalThenKeygen(t *testing.T) {
-	f := &fakeApprover{allow: false, cards: []ipc.CardEntry{{Serial: serialA, Supported: true, FreeSlots: []uint8{0x83, 0x84}}}}
+	f := &fakeApprover{allow: false, cards: []ipc.CardEntry{{Serial: serialA, Supported: true, FreeSlots: ipc.Slots{0x83, 0x84}}}}
 	e, _ := assistEnv(t, f)
 	ctx := context.Background()
 
@@ -683,6 +683,19 @@ func TestStatusListsCards(t *testing.T) {
 		t.Fatal(err)
 	}
 	if st.CardsUnavailable || len(st.Cards) != 1 || st.Cards[0].Serial != serialA || st.Tunnels == nil {
+		t.Fatalf("status %s", res.Data)
+	}
+}
+
+// The status tool hands agents the free slots as numbers, not base64.
+func TestStatusFreeSlotsAreNumbers(t *testing.T) {
+	f := &fakeApprover{cards: []ipc.CardEntry{{Serial: serialA, Supported: true, FreeSlots: ipc.Slots{130, 131, 149}}}}
+	e, _ := assistEnv(t, f)
+	res, err := tool(t, e, context.Background(), assistUID, ipc.ToolStatus, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(res.Data), `"freeSlots":[130,131,149]`) {
 		t.Fatalf("status %s", res.Data)
 	}
 }

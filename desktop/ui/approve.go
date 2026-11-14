@@ -141,7 +141,7 @@ func (u *UI) CardList() ([]ipc.CardEntry, error) {
 			if err != nil {
 				return nil, err
 			}
-			e.Fresh, e.FreeSlots = info.Fresh, info.FreeSlots
+			e.Fresh, e.FreeSlots = info.Fresh, ipc.Slots(info.FreeSlots)
 			for _, k := range info.Keys {
 				e.Keys = append(e.Keys, k.Ref.String())
 			}

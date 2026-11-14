@@ -84,7 +84,7 @@ func (f *fakeApprover) setup(ac *ipc.Conn) {
 		cards := f.cards
 		f.mu.Unlock()
 		if cards == nil {
-			cards = []ipc.CardEntry{{Serial: serialA, Supported: true, Fresh: true, FreeSlots: []uint8{0x82, 0x83}}}
+			cards = []ipc.CardEntry{{Serial: serialA, Supported: true, Fresh: true, FreeSlots: ipc.Slots{0x82, 0x83}}}
 		}
 		return ipc.CardListResult{Cards: cards}, nil
 	})

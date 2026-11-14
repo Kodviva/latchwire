@@ -1,7 +1,9 @@
 package ipc
 
 import (
+	"bytes"
 	"encoding/json"
+	"strconv"
 	"time"
 )
 
@@ -101,8 +103,49 @@ type CardEntry struct {
 	Firmware  string   `json:"firmware"`
 	Supported bool     `json:"supported"`
 	Fresh     bool     `json:"fresh,omitempty"`
-	FreeSlots []uint8  `json:"freeSlots,omitempty"`
+	FreeSlots Slots    `json:"freeSlots,omitempty"`
 	Keys      []string `json:"keys,omitempty"`
+}
+
+// Slots is a list of PIV slot numbers. On the wire it is a JSON array of
+// numbers (a []uint8 would be a base64 string, which agents cannot read).
+// Decoding also accepts that old base64 string: an older app may still send it.
+type Slots []uint8
+
+// MarshalJSON writes the slots as an array of numbers.
+func (s Slots) MarshalJSON() ([]byte, error) {
+	b := make([]byte, 0, 4*len(s)+2)
+	b = append(b, '[')
+	for i, v := range s {
+		if i > 0 {
+			b = append(b, ',')
+		}
+		b = strconv.AppendUint(b, uint64(v), 10)
+	}
+	return append(b, ']'), nil
+}
+
+// UnmarshalJSON reads an array of numbers or a base64 string.
+func (s *Slots) UnmarshalJSON(b []byte) error {
+	b = bytes.TrimSpace(b)
+	if string(b) == "null" {
+		*s = nil
+		return nil
+	}
+	if len(b) > 0 && b[0] == '"' {
+		var raw []byte // encoding/json decodes a base64 string into []byte
+		if err := json.Unmarshal(b, &raw); err != nil {
+			return err
+		}
+		*s = Slots(raw)
+		return nil
+	}
+	var nums []uint8
+	if err := json.Unmarshal(b, &nums); err != nil {
+		return err
+	}
+	*s = Slots(nums)
+	return nil
 }
 
 // CardListResult is the result of card.list.
