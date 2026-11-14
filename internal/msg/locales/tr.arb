@@ -432,6 +432,7 @@
   "UIKeyNone": "Kullanılan kart yok",
   "UIKeyPresent": "Takılı · özel anahtar donanımda",
   "UIKeyAbsent": "Takılı değil",
+  "UIKeyReady": "Takılı · bağlanmaya hazır",
   "UILastHandshake": "Son el sıkışma",
   "UIHandshakeNote": "Kart işlemi yaklaşık 2 dakikada bir",
   "UIHandshakeNone": "—",

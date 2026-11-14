@@ -226,7 +226,7 @@ func (u *UI) apply(devs []desktop.Device, sts []ipc.TunnelStatus, err error) {
 		sts = nil
 	}
 	changedDevices := !slices.Equal(devs, u.devices)
-	changedTunnels := !slices.Equal(sts, u.statuses) || e != u.daemonErr
+	changedTunnels := !slices.EqualFunc(sts, u.statuses, ipc.TunnelStatus.Equal) || e != u.daemonErr
 	u.devices, u.statuses, u.daemonErr = devs, sts, e
 	u.known = u.known || err == nil
 	u.decideFirstRun()

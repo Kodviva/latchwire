@@ -51,6 +51,9 @@ func NewTunnelView(lang string, st ipc.TunnelStatus, present func(serial uint32)
 	}
 
 	v.Key = msg.Render(lang, msg.UIKeyNone, nil)
+	if st.Identity == "" {
+		v.idleKey(lang, st.Keys, present)
+	}
 	if ref, err := keyref.Parse(st.Identity); err == nil {
 		v.Key = msg.Render(lang, msg.UIDeviceName, msg.Args{"serial": ref.Serial})
 		if present(ref.Serial) {
@@ -75,6 +78,30 @@ func NewTunnelView(lang string, st ipc.TunnelStatus, present func(serial uint32)
 		v.Action = msg.Render(lang, msg.UIDisconnect, nil)
 	}
 	return v
+}
+
+// idleKey names the card a tunnel that is not bound would use: the first of
+// its keys whose card is plugged in, else the first key, marked absent.
+func (v *TunnelView) idleKey(lang string, keys []string, present func(uint32) bool) {
+	var first *keyref.Ref
+	for _, k := range keys {
+		ref, err := keyref.Parse(k)
+		if err != nil {
+			continue
+		}
+		if present(ref.Serial) {
+			v.Key = msg.Render(lang, msg.UIDeviceName, msg.Args{"serial": ref.Serial})
+			v.KeyNote = msg.Render(lang, msg.UIKeyReady, nil)
+			return
+		}
+		if first == nil {
+			first = &ref
+		}
+	}
+	if first != nil {
+		v.Key = msg.Render(lang, msg.UIDeviceName, msg.Args{"serial": first.Serial})
+		v.KeyNote, v.KeyWarn = msg.Render(lang, msg.UIKeyAbsent, nil), true
+	}
 }
 
 // Ago says how long ago something happened.

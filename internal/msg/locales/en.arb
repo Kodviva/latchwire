@@ -967,6 +967,7 @@
   "UIKeyNone": "No card in use",
   "UIKeyPresent": "Plugged in · private key in hardware",
   "UIKeyAbsent": "Not plugged in",
+  "UIKeyReady": "Plugged in · ready to connect",
   "UILastHandshake": "Last handshake",
   "UIHandshakeNote": "One card operation about every 2 minutes",
   "UIHandshakeNone": "—",

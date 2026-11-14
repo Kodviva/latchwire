@@ -401,9 +401,9 @@ func TestStatusShowsNetworkFields(t *testing.T) {
 	c.mu.Lock()
 	iface := c.iface
 	c.mu.Unlock()
-	want := ipc.TunnelStatus{Name: "full", State: StateConnected, Identity: refA.String(),
+	want := ipc.TunnelStatus{Name: "full", State: StateConnected, Identity: refA.String(), Keys: []string{refA.String()},
 		Interface: iface, MTU: 1420, FullTunnel: true, DNS: "primary", KillSwitch: "armed"}
-	if st := e.statusOf("full"); st != want {
+	if st := e.statusOf("full"); !st.Equal(want) {
 		t.Errorf("full:\n got %+v\nwant %+v", st, want)
 	}
 	lab := e.statusOf("lab")

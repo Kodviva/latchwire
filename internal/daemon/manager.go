@@ -1013,6 +1013,9 @@ func (m *Manager) status(t *tunnel) ipc.TunnelStatus {
 	if t.hasRef {
 		st.Identity = t.ref.String()
 	}
+	for _, id := range t.cfg.Identities {
+		st.Keys = append(st.Keys, id.Ref.String())
+	}
 	var dev *device.Device
 	if t.state == StateConnected && t.dev != nil {
 		dev = t.dev
