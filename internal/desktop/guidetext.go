@@ -11,10 +11,24 @@ import (
 // The whole line runs as root: wg0.conf is readable by root only.
 const SyncConf = "sudo bash -c 'wg syncconf wg0 <(wg-quick strip wg0)'"
 
-// GuideStep is one numbered step of a server guide. Values are the public
-// values the user copies for it: nothing secret is among them.
+// GuideField is one value of a step, with the label that names it. Key is
+// the index of the key it belongs to, or -1 for a value of no key.
+// Placeholder marks a text that still holds a stand-in for a missing tunnel
+// IP: it is shown but not copied.
+type GuideField struct {
+	Key         int
+	Label       msg.ID
+	Text        string
+	Placeholder bool
+}
+
+// GuideStep is one numbered step of a server guide. Fields are everything
+// the step shows, in order. Values are the public values the user copies
+// for it (the fields that are not placeholders): nothing secret is among
+// them.
 type GuideStep struct {
 	Text   string
+	Fields []GuideField
 	Values []string
 }
 
@@ -89,8 +103,7 @@ func MikroTikPeerCommand(k Key, allowed string) string {
 // GuideText is the written guide for adding the keys to a server of the
 // given kind: the version note (empty for a general guide) and the steps
 // with the values to copy. addrs[i] is the tunnel IP of keys[i]; a missing
-// or invalid one leaves its address values out, since they would only be
-// placeholders. An unknown kind gets the general guide.
+// or invalid one shows a placeholder field that is not among the Values. An unknown kind gets the general guide.
 func GuideText(lang string, kind ServerKind, keys []Key, addrs []netip.Addr) (version string, steps []GuideStep) {
 	d, ok := guideDefs[kind]
 	if !ok {
@@ -101,6 +114,12 @@ func GuideText(lang string, kind ServerKind, keys []Key, addrs []netip.Addr) (ve
 	}
 	for _, s := range d.steps {
 		st := GuideStep{Text: msg.Render(lang, s.text, nil)}
+		add := func(key int, label msg.ID, text string, ok bool) {
+			st.Fields = append(st.Fields, GuideField{Key: key, Label: label, Text: text, Placeholder: !ok})
+			if ok {
+				st.Values = append(st.Values, text)
+			}
+		}
 		for i, k := range keys {
 			var addr netip.Addr
 			if i < len(addrs) {
@@ -109,27 +128,23 @@ func GuideText(lang string, kind ServerKind, keys []Key, addrs []netip.Addr) (ve
 			allowed, valid := AllowedText(lang, addr)
 			switch s.values {
 			case valuesPeer:
-				st.Values = append(st.Values, k.PublicBase64())
-				if valid {
-					st.Values = append(st.Values, allowed)
-				}
+				add(i, msg.UIPublicKey, k.PublicBase64(), true)
+				add(i, msg.UIGuideAllowedLabel, allowed, valid)
 			case valuesPfSense:
-				st.Values = append(st.Values, k.PublicBase64())
+				ip := msg.Translate(lang, msg.KeygenTunnelIP)
 				if valid {
-					st.Values = append(st.Values, addr.String())
+					ip = addr.String()
 				}
+				add(i, msg.UIPublicKey, k.PublicBase64(), true)
+				add(i, msg.UIGuideAllowedLabel, ip, valid)
 			case valuesMikroTik:
-				if valid {
-					st.Values = append(st.Values, MikroTikPeerCommand(k, allowed))
-				}
+				add(i, msg.UIGuideCommandLabel, MikroTikPeerCommand(k, allowed), valid)
 			case valuesLinux:
-				if valid {
-					st.Values = append(st.Values, PeerBlock(lang, k, addr))
-				}
+				add(i, msg.UIPeerBlockLabel, PeerBlock(lang, k, addr), valid)
 			}
 		}
 		if s.values == valuesSync {
-			st.Values = []string{SyncConf}
+			add(-1, "", SyncConf, true)
 		}
 		steps = append(steps, st)
 	}

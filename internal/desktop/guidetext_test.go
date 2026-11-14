@@ -91,3 +91,12 @@ func TestGuideTextHasNoPrivateRef(t *testing.T) {
 		}
 	}
 }
+
+func TestGuideTextFieldsMarkPlaceholders(t *testing.T) {
+	k := guideKey()
+	_, steps := GuideText("en", ServerLinux, []Key{k}, nil)
+	f := steps[0].Fields
+	if len(f) != 1 || !f[0].Placeholder || f[0].Key != 0 || len(steps[0].Values) != 0 {
+		t.Fatalf("fields %+v values %q", f, steps[0].Values)
+	}
+}
