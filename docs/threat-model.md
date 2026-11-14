@@ -52,7 +52,7 @@ test only).
 
 ## 3. Components and trust
 
-Three programs (all in the one `latchwire` binary) cooperate. The desktop app
+Four programs (all in the one `latchwire` binary) cooperate. The desktop app
 (`desktop/`, a separate binary) is a fourth way to run the agent:
 
 | Component | Runs as | Does |
