@@ -154,6 +154,11 @@ func addTools(s *mcp.Server, d *daemon) {
 		Name:        ipc.ToolAddTunnel,
 		Description: "Add a tunnel for a YubiKey key (and optionally a backup YubiKey) to the servers given. Only an administrator's tunnels can be added; the user approves it in the Latchwire app. A preshared key is never shown back.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in tunnelIn) (*mcp.CallToolResult, any, error) {
+		// Access and the tunnels group first: while they are off nothing
+		// else is said, not even about the form.
+		if err := d.check(ctx, req, ipc.ToolAddTunnel); err != nil {
+			return nil, nil, err
+		}
 		conf, err := tunnelConfig(in)
 		if err != nil {
 			return nil, nil, err
@@ -188,7 +193,8 @@ func (d *daemon) forward(ctx context.Context, req *mcp.CallToolRequest, tool str
 	return nil, res.Data, nil
 }
 
-// check asks the daemon whether tool, which is computed here, may run.
+// check asks the daemon whether tool may run: peer_block and server_guide,
+// which are computed here, or add_tunnel before its form is validated.
 func (d *daemon) check(ctx context.Context, req *mcp.CallToolRequest, tool string) error {
 	_, err := d.call(ctx, req, ipc.ToolCheck, ipc.AssistCheckArgs{Tool: tool}, false)
 	return err

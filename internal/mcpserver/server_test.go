@@ -285,8 +285,31 @@ func TestAddTunnelFieldErrorHasNoValues(t *testing.T) {
 	if got := text(res); !res.IsError || got != "servers[0].preshared_key: invalid" || strings.Contains(got, testPSK) {
 		t.Errorf("bad PSK = %v %q", res.IsError, got)
 	}
-	if calls := d.recorded(); len(calls) != 0 {
-		t.Errorf("daemon called with an invalid form: %+v", calls)
+	// Only the access checks reached the daemon, never the invalid form.
+	for _, c := range d.recorded() {
+		if !isCheck(c, ipc.ToolAddTunnel) {
+			t.Errorf("daemon called with an invalid form: %+v", c)
+		}
+	}
+}
+
+// isCheck reports whether c is the access check of tool.
+func isCheck(c ipc.AssistCall, tool string) bool {
+	var a ipc.AssistCheckArgs
+	return c.Tool == ipc.ToolCheck && json.Unmarshal(c.Args, &a) == nil && a.Tool == tool
+}
+
+func TestAddTunnelChecksAccessFirst(t *testing.T) {
+	d := &fakeDaemon{handle: func(context.Context, ipc.AssistCall) (ipc.AssistResult, error) {
+		return ipc.AssistResult{}, &ipc.Error{Code: ipc.CodeAccessOff, Message: msg.AssistAccessOff}
+	}}
+	cs := connect(t, startDaemon(t, d), nil)
+	res := call(t, cs, "add_tunnel", tunnelArgs("vpn.example.com#secret"))
+	if !res.IsError || text(res) != msg.AssistAccessOff {
+		t.Errorf("add_tunnel with access off = %v %q, want the access_off message", res.IsError, text(res))
+	}
+	if calls := d.recorded(); len(calls) != 1 || !isCheck(calls[0], ipc.ToolAddTunnel) {
+		t.Errorf("daemon calls = %+v, want one check of add_tunnel", calls)
 	}
 }
 
@@ -308,9 +331,19 @@ func TestAddTunnelSendsBoundConfig(t *testing.T) {
 		t.Fatalf("add_tunnel with backup: %q", text(res))
 	}
 
-	calls := d.recorded()
+	var calls []ipc.AssistCall
+	for i, c := range d.recorded() {
+		// Each add_tunnel is preceded by its access check.
+		if i%2 == 0 {
+			if !isCheck(c, ipc.ToolAddTunnel) {
+				t.Errorf("daemon call %d = %+v, want the access check", i, c)
+			}
+			continue
+		}
+		calls = append(calls, c)
+	}
 	if len(calls) != 2 {
-		t.Fatalf("daemon calls = %+v", calls)
+		t.Fatalf("daemon calls = %+v", d.recorded())
 	}
 	for i, c := range calls {
 		var ta ipc.AssistTunnelArgs

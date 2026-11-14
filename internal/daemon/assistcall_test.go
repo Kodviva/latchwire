@@ -136,7 +136,49 @@ func TestUnknownToolIsBadRequest(t *testing.T) {
 	wantCode(t, err, ipc.CodeBadRequest)
 	wantResult(t, e, assistUID, "unknown", "error: bad_request")
 	_, err = tool(t, e, context.Background(), assistUID, ipc.ToolCheck, ipc.AssistCheckArgs{Tool: ipc.ToolCreateKey})
-	wantCode(t, err, ipc.CodeBadRequest) // check is for read-only tools only
+	wantCode(t, err, ipc.CodeBadRequest) // check is for read-only tools and add_tunnel only
+}
+
+// The MCP server checks access and the tunnels group before it validates
+// add_tunnel's form: the check asks no approval and adds no tunnel.
+func TestCheckAddTunnel(t *testing.T) {
+	e := newEnv(t, envOpts{noAgent: true})
+	check := ipc.AssistCheckArgs{Tool: ipc.ToolAddTunnel}
+
+	_, err := tool(t, e, context.Background(), assistUID, ipc.ToolCheck, check)
+	wantCode(t, err, ipc.CodeAccessOff)
+	wantResult(t, e, assistUID, ipc.ToolAddTunnel, "access_off")
+
+	f := &fakeApprover{allow: true}
+	grantAssist(t, e, f, assistUID, []string{ipc.GroupKeys, ipc.GroupConnect})
+	_, err = tool(t, e, context.Background(), assistUID, ipc.ToolCheck, check)
+	wantCode(t, err, ipc.CodeAccessOff) // the tunnels group is off
+	wantResult(t, e, assistUID, ipc.ToolAddTunnel, "access_off")
+
+	grantAssist(t, e, f, assistUID, []string{ipc.GroupTunnels})
+	res, err := tool(t, e, context.Background(), assistUID, ipc.ToolCheck, check)
+	if err != nil {
+		t.Fatalf("check of add_tunnel with tunnels on: %v", err)
+	}
+	if len(res.Data) != 0 || res.Summary != "" {
+		t.Fatalf("check result %+v, want none", res)
+	}
+	wantResult(t, e, assistUID, ipc.ToolAddTunnel, "checked")
+	if a := lastActivity(t, e, assistUID); a.Summary != "" {
+		t.Fatalf("check activity summary %q, want none", a.Summary)
+	}
+	f.mu.Lock()
+	asked := len(f.requests)
+	f.mu.Unlock()
+	if asked != 0 {
+		t.Fatalf("the check asked the app %d times", asked)
+	}
+	e.m.mu.Lock()
+	n := len(e.m.tunnels)
+	e.m.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("%d tunnels after a check", n)
+	}
 }
 
 func TestCreateKeyAsksApprovalThenKeygen(t *testing.T) {

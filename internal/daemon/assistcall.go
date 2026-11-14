@@ -87,13 +87,21 @@ func (m *Manager) assistCall(ctx context.Context, c *ipc.Conn, uid uint32, p ipc
 		elevated = c.ElevatedUser()
 	}
 	name := p.Tool
+	checkOnly := false // an access check of add_tunnel, which is not run
 	if name == ipc.ToolCheck {
 		// The MCP server computes peer_block and server_guide itself and
-		// only asks whether it may.
+		// only asks whether it may. Before it validates add_tunnel's form
+		// it asks whether access and the tunnels group are on, so that
+		// while they are off nothing else is said.
 		var a ipc.AssistCheckArgs
-		if json.Unmarshal(p.Args, &a) == nil && (a.Tool == ipc.ToolPeerBlock || a.Tool == ipc.ToolServerGuide) {
+		switch {
+		case json.Unmarshal(p.Args, &a) != nil:
+			name = ""
+		case a.Tool == ipc.ToolPeerBlock || a.Tool == ipc.ToolServerGuide:
 			name = a.Tool
-		} else {
+		case a.Tool == ipc.ToolAddTunnel:
+			name, checkOnly = a.Tool, true
+		default:
 			name = ""
 		}
 	}
@@ -110,14 +118,18 @@ func (m *Manager) assistCall(ctx context.Context, c *ipc.Conn, uid uint32, p ipc
 	)
 	// Access first, for every tool: while it is off nothing else is said.
 	if err = m.assist.allowed(uid, group, m.assist.now()); err == nil {
-		if !known {
+		switch {
+		case !known:
 			err = errUnknownTool
-		} else {
+		case !checkOnly:
 			res, err = call.run(p.Args)
 		}
 	}
 	entry.Summary = printable(res.Summary)
 	entry.Result = activityResult(err)
+	if checkOnly && err == nil {
+		entry.Result = "checked"
+	}
 	m.assist.record(uid, entry)
 	if err != nil {
 		return ipc.AssistResult{}, err
