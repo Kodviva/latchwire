@@ -8,8 +8,15 @@ texts in `THIRD_PARTY_LICENSES.txt`.
 | Module | Version | Licence | Origin |
 | --- | --- | --- | --- |
 | `github.com/go-piv/piv-go/v2` | v2.5.0 | Apache-2.0 AND BSD-3-Clause | Vendored and patched in third_party/piv-go, see PATCHES.md there |
+| `github.com/google/jsonschema-go` | v0.4.3 | MIT | Go module, used by the MCP SDK |
+| `github.com/modelcontextprotocol/go-sdk` | v1.8.0 | Apache-2.0 AND MIT | Go module, latchwire mcp |
+| `github.com/segmentio/asm` | v1.2.1 | MIT-0 | Go module, used by the MCP SDK |
+| `github.com/segmentio/encoding` | v0.5.4 | MIT | Go module, used by the MCP SDK |
+| `github.com/yosida95/uritemplate/v3` | v3.0.2 | BSD-3-Clause | Go module, used by the MCP SDK |
 | `golang.org/x/crypto` | v0.58.0 | BSD-3-Clause | Go module |
 | `golang.org/x/net` | v0.62.0 | BSD-3-Clause | Go module |
+| `golang.org/x/oauth2` | v0.38.0 | BSD-3-Clause | Go module, used by the MCP SDK |
+| `golang.org/x/sync` | v0.25.0 | BSD-3-Clause | Go module, used by the MCP SDK |
 | `golang.org/x/sys` | v0.49.0 | BSD-3-Clause | Go module |
 | `golang.org/x/term` | v0.47.0 | BSD-3-Clause | Go module |
 | `golang.org/x/time` | v0.16.0 | BSD-3-Clause | Go module |

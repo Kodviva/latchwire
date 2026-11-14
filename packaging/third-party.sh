@@ -19,8 +19,15 @@ export GOFLAGS=-mod=readonly
 table() {
 	cat <<'TABLE'
 github.com/go-piv/piv-go/v2|Apache-2.0 AND BSD-3-Clause|LICENSE third_party/rsa/LICENSE|Vendored and patched in third_party/piv-go, see PATCHES.md there
+github.com/google/jsonschema-go|MIT|LICENSE|Go module, used by the MCP SDK
+github.com/modelcontextprotocol/go-sdk|Apache-2.0 AND MIT|LICENSE|Go module, latchwire mcp
+github.com/segmentio/asm|MIT-0|LICENSE|Go module, used by the MCP SDK
+github.com/segmentio/encoding|MIT|LICENSE|Go module, used by the MCP SDK
+github.com/yosida95/uritemplate/v3|BSD-3-Clause|LICENSE|Go module, used by the MCP SDK
 golang.org/x/crypto|BSD-3-Clause|LICENSE|Go module
 golang.org/x/net|BSD-3-Clause|LICENSE|Go module
+golang.org/x/oauth2|BSD-3-Clause|LICENSE|Go module, used by the MCP SDK
+golang.org/x/sync|BSD-3-Clause|LICENSE|Go module, used by the MCP SDK
 golang.org/x/sys|BSD-3-Clause|LICENSE|Go module
 golang.org/x/term|BSD-3-Clause|LICENSE|Go module
 golang.org/x/time|BSD-3-Clause|LICENSE|Go module

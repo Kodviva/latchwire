@@ -220,6 +220,8 @@ commands:
                                 recognised only by its gateway's IP and MAC
                                 address, which anyone there can copy
   network                       print the ID of the current network
+  mcp                           serve the agent tools over MCP on stdio (the
+                                agent client starts it)
   version                       print the version of this program`
 	CLIUnknownCommandFmt = "unknown command %q"
 	CLIUsageErrorFmt     = "usage: latchwire %s"
@@ -378,6 +380,8 @@ runs the daemon:
 	AssistRequestCancelled = "the request was cancelled before the user answered"
 	// AssistUnknownTool: assist.call named a tool the daemon does not know.
 	AssistUnknownTool = "this Latchwire version does not offer that tool"
+	// AssistDaemonTooOld: latchwire mcp reached a daemon that does not know assist.call.
+	AssistDaemonTooOld = "the Latchwire daemon is too old for agent access: ask the user to update Latchwire"
 	// AssistNoCardFmt takes the serial the agent asked for.
 	AssistNoCardFmt = "no YubiKey with serial %d is plugged in, or it cannot hold Latchwire keys"
 	// AssistSlotNotFreeFmt takes the slot and the serial.
