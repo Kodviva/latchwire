@@ -192,6 +192,33 @@ schtasks /create /tn "Latchwire agent" /sc onlogon /rl limited /tr "\"C:\Program
 The task's console may flash at logon until packaging provides a build without
 one. To remove the service, keeping tunnels: `latchwire service uninstall`.
 
+## Agent access (MCP)
+
+`latchwire mcp` is a stdio MCP server, so an AI agent on the same computer
+can read status and, with your permission, create a key, add a tunnel,
+connect and disconnect. First turn access on in the desktop app, on the
+"Agent access" screen (off by default; 15 minutes, 1 hour or until the app
+closes). Then add the server to your MCP client. The binary is
+`/usr/local/latchwire/bin/latchwire` on macOS, `/usr/bin/latchwire` on Linux
+(deb and rpm; `/usr/local/bin/latchwire` for the tarball) and the installed
+`latchwire.exe` on Windows (by default `C:\Program Files\Latchwire\latchwire.exe`).
+The screen shows the commands below with the right path.
+
+Claude Code:
+
+    claude mcp add latchwire -- /usr/local/latchwire/bin/latchwire mcp
+
+Claude Desktop, in its configuration file:
+
+    {"mcpServers":{"latchwire":{"command":"/usr/local/latchwire/bin/latchwire","args":["mcp"]}}}
+
+Any other MCP client: the command is `<path to latchwire> mcp`.
+
+Key creation, adding a tunnel and connecting each ask for your approval in
+the app (no answer in 2 minutes is a refusal). The PIN, PUK and management
+key are typed only in Latchwire's own dialogs. See section 5.10 of the
+[threat model](threat-model.md) for what this does and does not protect.
+
 ## Upgrading from an earlier version (Plan 1)
 
 Two things change for tunnels stored by a version without tunnel policies
