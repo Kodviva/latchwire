@@ -14,65 +14,63 @@ import (
 	"github.com/Kodviva/latchwire/internal/msg"
 )
 
-// guideStep is one numbered step of a server guide. values draws the
-// copyable fields that follow the text; term adds a glossary button.
+// guideStep is the Fyne side of one numbered step of a server guide; its
+// text comes from desktop.GuideText. values draws the copyable fields that
+// follow the text; term adds a glossary button.
 type guideStep struct {
-	text   msg.ID
 	values func(u *UI) []fyne.CanvasObject
 	term   msg.ID
 }
 
-// serverGuide is the written guide for one kind of server. product and
-// version name what it was written for; an empty product means a general
-// guide with no version note.
-type serverGuide struct {
-	product, version string
-	steps            []guideStep
-}
-
-// syncconf reloads a wg-quick interface without dropping its other peers.
-// The whole line runs as root: wg0.conf is readable by root only.
-const syncconf = "sudo bash -c 'wg syncconf wg0 <(wg-quick strip wg0)'"
-
-var guides = map[desktop.ServerKind]serverGuide{
-	desktop.ServerOPNsense: {"OPNsense", "26.x", []guideStep{
-		{text: msg.UIGuideOPNsense1},
-		{text: msg.UIGuideOPNsense2, values: (*UI).peerValues, term: msg.UIGlossaryAllowedIPs},
-		{text: msg.UIGuideOPNsense3},
-		{text: msg.UIGuideOPNsense4, term: msg.UIGlossaryEndpoint},
-	}},
-	desktop.ServerPfSense: {"pfSense", "CE 2.8 / Plus 25.x", []guideStep{
-		{text: msg.UIGuidePfSense1},
-		{text: msg.UIGuidePfSense2, values: (*UI).pfSenseValues, term: msg.UIGlossaryAllowedIPs},
-		{text: msg.UIGuidePfSense3},
-		{text: msg.UIGuidePfSense4, term: msg.UIGlossaryEndpoint},
-	}},
-	desktop.ServerMikroTik: {"MikroTik RouterOS", "7", []guideStep{
-		{text: msg.UIGuideMikroTik1, values: (*UI).mikrotikValues},
-		{text: msg.UIGuideMikroTik2, values: (*UI).peerValues, term: msg.UIGlossaryAllowedIPs},
-		{text: msg.UIGuideMikroTik3, term: msg.UIGlossaryEndpoint},
-	}},
-	desktop.ServerLinux: {"Linux", "wg-quick", []guideStep{
-		{text: msg.UIGuideLinux1, values: (*UI).linuxValues, term: msg.UIGlossaryPeer},
-		{text: msg.UIGuideLinux2, values: func(u *UI) []fyne.CanvasObject {
-			return []fyne.CanvasObject{u.copyField(syncconf, true)}
+var guides = map[desktop.ServerKind][]guideStep{
+	desktop.ServerOPNsense: {
+		{},
+		{values: (*UI).peerValues, term: msg.UIGlossaryAllowedIPs},
+		{},
+		{term: msg.UIGlossaryEndpoint},
+	},
+	desktop.ServerPfSense: {
+		{},
+		{values: (*UI).pfSenseValues, term: msg.UIGlossaryAllowedIPs},
+		{},
+		{term: msg.UIGlossaryEndpoint},
+	},
+	desktop.ServerMikroTik: {
+		{values: (*UI).mikrotikValues},
+		{values: (*UI).peerValues, term: msg.UIGlossaryAllowedIPs},
+		{term: msg.UIGlossaryEndpoint},
+	},
+	desktop.ServerLinux: {
+		{values: (*UI).linuxValues, term: msg.UIGlossaryPeer},
+		{values: func(u *UI) []fyne.CanvasObject {
+			return []fyne.CanvasObject{u.copyField(desktop.SyncConf, true)}
 		}},
-		{text: msg.UIGuideLinux3, term: msg.UIGlossaryEndpoint},
-	}},
-	desktop.ServerOther: {"", "", []guideStep{
-		{text: msg.UIGuideOther1, values: (*UI).peerValues, term: msg.UIGlossaryPeer},
-		{text: msg.UIGuideOther2},
-		{text: msg.UIGuideOther3, term: msg.UIGlossaryEndpoint},
-	}},
+		{term: msg.UIGlossaryEndpoint},
+	},
+	desktop.ServerOther: {
+		{values: (*UI).peerValues, term: msg.UIGlossaryPeer},
+		{},
+		{term: msg.UIGlossaryEndpoint},
+	},
 }
 
-// guideFor is the guide of the server kind the survey named. Without an
-// answer it is the general one.
-func guideFor(k desktop.ServerKind) serverGuide {
+// guideFor is the Fyne part of the guide of the server kind the survey
+// named. Without an answer it is the general one.
+func guideFor(k desktop.ServerKind) []guideStep {
 	if g, ok := guides[k]; ok {
 		return g
 	}
 	return guides[desktop.ServerOther]
+}
+
+// guideAddrs are the tunnel IPs typed for the keys; an invalid one stays
+// the zero address.
+func (u *UI) guideAddrs() []netip.Addr {
+	out := make([]netip.Addr, len(u.session.keys))
+	for i := range out {
+		out[i], _ = u.tunnelAddr(i)
+	}
+	return out
 }
 
 // tunnelAddr is the tunnel IP typed for key i, if it is a valid address.
@@ -86,10 +84,8 @@ func (u *UI) tunnelAddr(i int) (netip.Addr, bool) {
 
 // allowedText is the AllowedIPs entry for key i, or a placeholder.
 func (u *UI) allowedText(i int) (string, bool) {
-	if a, ok := u.tunnelAddr(i); ok {
-		return fmt.Sprintf("%s/%d", a, a.BitLen()), true
-	}
-	return msg.Translate(u.lang, msg.KeygenTunnelIP) + "/32", false
+	a, _ := u.tunnelAddr(i)
+	return desktop.AllowedText(u.lang, a)
 }
 
 // copyField is a public value in mono with a Copy button. ok false shows
@@ -155,7 +151,7 @@ func (u *UI) mikrotikValues() []fyne.CanvasObject {
 	var out []fyne.CanvasObject
 	for i, k := range u.session.keys {
 		allowed, ok := u.allowedText(i)
-		cmd := fmt.Sprintf(`/interface/wireguard/peers/add interface=wireguard1 public-key="%s" allowed-address=%s`, k.PublicBase64(), allowed)
+		cmd := desktop.MikroTikPeerCommand(k, allowed)
 		out = append(out, u.keyHead(i)...)
 		out = append(out, label(u.t(msg.UIGuideCommandLabel)), u.copyField(cmd, ok))
 		out = append(out, u.noIP(ok)...)
@@ -185,14 +181,15 @@ func (u *UI) renderGuide() {
 		u.show(screenOnboard)
 		return
 	}
+	version, texts := desktop.GuideText(u.lang, u.survey.Server, s.keys, u.guideAddrs())
 	g := guideFor(u.survey.Server)
 	rows := []fyne.CanvasObject{h1(u.t(msg.UIGuideTitle))}
 	if e := u.explain(msg.UIExplainGuideLong, msg.UIExplainGuideShort); e != nil {
 		rows = append(rows, e)
 	}
 	rows = append(rows, body(u.t(msg.UIGuideIntro)))
-	if g.product != "" {
-		rows = append(rows, small(u.tr(msg.UIGuideVersionNote, msg.Args{"product": g.product, "version": g.version})))
+	if version != "" {
+		rows = append(rows, small(version))
 	}
 	if u.survey.Help == desktop.HelpHints && !u.guideOpen {
 		show := widget.NewButton(u.t(msg.UIGuideShow), func() {
@@ -201,8 +198,8 @@ func (u *UI) renderGuide() {
 		})
 		rows = append(rows, container.NewHBox(show))
 	} else {
-		for n, st := range g.steps {
-			var text fyne.CanvasObject = body(fmt.Sprintf("%d. %s", n+1, u.t(st.text)))
+		for n, st := range g {
+			var text fyne.CanvasObject = body(fmt.Sprintf("%d. %s", n+1, texts[n].Text))
 			if st.term != "" {
 				text = u.withTerm(text, st.term)
 			}
