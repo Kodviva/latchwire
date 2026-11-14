@@ -29,9 +29,11 @@ var approveTools = map[string]msg.ID{
 // Approve shows the approval window for an agent's request and reports
 // whether the user allowed it. Only the Allow button allows: the window
 // closes as refused when ctx ends (the daemon stopped waiting), after
-// approveTimeout, and when access is turned off. It must not run on the UI
-// goroutine. The client name and summary come from the daemon, which made
-// them printable; they are shown as text, never as markup.
+// approveTimeout, and when access is turned off. While access is off or
+// has run out in the app, it refuses at once without a window. It must not
+// run on the UI goroutine. The client name and summary come from the
+// daemon, which made them printable; they are shown as text, never as
+// markup.
 func (u *UI) Approve(ctx context.Context, r ipc.ApproveRequest) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, approveTimeout)
 	defer cancel()
@@ -48,6 +50,9 @@ func (u *UI) Approve(ctx context.Context, r ipc.ApproveRequest) (bool, error) {
 	var pop *widget.PopUp
 	var key *struct{}
 	fyne.DoAndWait(func() {
+		if !u.accessOpen() {
+			return
+		}
 		key = new(struct{})
 		u.access.approvals[key] = cancel
 		tool := r.Tool
@@ -75,6 +80,9 @@ func (u *UI) Approve(ctx context.Context, r ipc.ApproveRequest) (bool, error) {
 		pop = modal(u.win, 480, container.NewVBox(rows...))
 		pop.Show()
 	})
+	if pop == nil {
+		return false, nil
+	}
 	allowed := false
 	select {
 	case allowed = <-answer:
@@ -85,6 +93,13 @@ func (u *UI) Approve(ctx context.Context, r ipc.ApproveRequest) (bool, error) {
 		delete(u.access.approvals, key)
 	})
 	return allowed && ctx.Err() == nil, nil
+}
+
+// accessOpen reports whether access is on in the app and has not run out.
+// Call on the UI goroutine.
+func (u *UI) accessOpen() bool {
+	a := &u.access
+	return a.on && (a.until.IsZero() || time.Now().Before(a.until))
 }
 
 // closeApprovals closes every open approval window as refused. Call on the

@@ -206,6 +206,15 @@ func TestAccessActivityRefreshes(t *testing.T) {
 	eventually(t, "refreshed", func() bool { return strings.Contains(screenText(u), "disconnect") })
 }
 
+// accessOn opens agent access the way the access screen does.
+func accessOn(t *testing.T, u *UI, b *demo.Backend) {
+	t.Helper()
+	if err := b.Grant(context.Background(), ipc.AssistGrant{Minutes: 60, Groups: []string{ipc.GroupKeys}}); err != nil {
+		t.Fatal(err)
+	}
+	fyne.DoAndWait(func() { u.access.on, u.access.until = true, time.Now().Add(time.Hour) })
+}
+
 func approve(u *UI, ctx context.Context, r ipc.ApproveRequest) chan bool {
 	res := make(chan bool, 1)
 	go func() {
@@ -230,7 +239,8 @@ func answer(t *testing.T, res chan bool) bool {
 }
 
 func TestApproveDialogAllowDeny(t *testing.T) {
-	u, _ := start(t, "en")
+	u, b := start(t, "en")
+	accessOn(t, u, b)
 	r := ipc.ApproveRequest{ID: "a1", Client: "claude-code", Tool: ipc.ToolCreateKey, Summary: "new key on YubiKey 40727512, slot 82"}
 	res := approve(u, context.Background(), r)
 	eventually(t, "dialog", func() bool { return strings.Contains(screenText(u), en(msg.UIApproveTitle)) })
@@ -257,7 +267,8 @@ func TestApproveDialogAllowDeny(t *testing.T) {
 }
 
 func TestApproveDialogTranslated(t *testing.T) {
-	u, _ := start(t, "tr")
+	u, b := start(t, "tr")
+	accessOn(t, u, b)
 	res := approve(u, context.Background(), ipc.ApproveRequest{Client: "claude-code", Tool: ipc.ToolCreateKey,
 		Summary: "new key on YubiKey 40727512, slot 82"})
 	eventually(t, "dialog", func() bool { return strings.Contains(screenText(u), "İzin ver") })
@@ -269,7 +280,8 @@ func TestApproveDialogTranslated(t *testing.T) {
 }
 
 func TestApproveDialogClosesOnCancel(t *testing.T) {
-	u, _ := start(t, "en")
+	u, b := start(t, "en")
+	accessOn(t, u, b)
 	r := ipc.ApproveRequest{ID: "a1", Client: "claude-code", Tool: ipc.ToolConnect}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -292,7 +304,8 @@ func TestApproveDialogClosesOnCancel(t *testing.T) {
 }
 
 func TestApproveFreshWarns(t *testing.T) {
-	u, _ := start(t, "en")
+	u, b := start(t, "en")
+	accessOn(t, u, b)
 	res := approve(u, context.Background(), ipc.ApproveRequest{Client: "claude-code", Tool: ipc.ToolCreateKey, Fresh: true})
 	eventually(t, "dialog", func() bool { return strings.Contains(screenText(u), en(msg.UIApproveTitle)) })
 	wantText(t, u, "factory PIN and PUK")
@@ -437,5 +450,65 @@ func TestKeygenForAgent(t *testing.T) {
 	}
 	if len(fields(u)) != 0 || f.Len() != 0 {
 		t.Fatal("the form or its input stayed")
+	}
+}
+
+// With access off or run out, an approval is refused without a window.
+func TestApproveRefusedWhileAccessOff(t *testing.T) {
+	u, b := start(t, "en")
+	r := ipc.ApproveRequest{ID: "a1", Client: "claude-code", Tool: ipc.ToolConnect}
+	if answer(t, approve(u, context.Background(), r)) {
+		t.Fatal("allowed with access off")
+	}
+	noText(t, u, en(msg.UIApproveTitle))
+
+	accessOn(t, u, b)
+	fyne.DoAndWait(func() { u.access.until = time.Now().Add(-time.Second) })
+	if answer(t, approve(u, context.Background(), r)) {
+		t.Fatal("allowed after access ran out")
+	}
+	noText(t, u, en(msg.UIApproveTitle))
+}
+
+// A grant that fails may still have reached the daemon (a timeout after
+// it stored it): the app revokes it and shows access off.
+func TestAccessGrantFailureRevokes(t *testing.T) {
+	u, b := start(t, "en")
+	b.SetGrantErr(context.DeadlineExceeded)
+	openAccess(t, u)
+	tap(t, u, en(msg.UIAccessTurnOn))
+	eventually(t, "revoked", func() bool { return b.Revokes() == 1 && !b.GrantHeld() })
+	eventually(t, "off", func() bool { return strings.Contains(screenText(u), en(msg.UIAccessStateOff)) })
+	button(t, u, en(msg.UIAccessTurnOn))
+	noText(t, u, en(msg.UIAccessTurnOff))
+}
+
+func TestLatchwirePathLinux(t *testing.T) {
+	old, oldExe := statFile, executable
+	defer func() { statFile, executable = old, oldExe }()
+	executable = func() (string, error) { return "/opt/latchwire/latchwire-desktop", nil }
+	var present map[string]bool
+	statFile = func(p string) (os.FileInfo, error) {
+		if present[p] {
+			return os.Stat(os.Args[0]) // any regular file
+		}
+		return nil, os.ErrNotExist
+	}
+	for _, c := range []struct {
+		present []string
+		want    string
+	}{
+		{[]string{"/opt/latchwire/latchwire", "/usr/bin/latchwire", "/usr/local/bin/latchwire"}, "/opt/latchwire/latchwire"},
+		{[]string{"/usr/bin/latchwire", "/usr/local/bin/latchwire"}, "/usr/bin/latchwire"},
+		{[]string{"/usr/local/bin/latchwire"}, "/usr/local/bin/latchwire"},
+		{nil, "/usr/bin/latchwire"},
+	} {
+		present = map[string]bool{}
+		for _, p := range c.present {
+			present[p] = true
+		}
+		if got := latchwirePathFor("linux"); got != c.want {
+			t.Fatalf("with %v: %q, want %q", c.present, got, c.want)
+		}
 	}
 }

@@ -73,28 +73,45 @@ func newAccessState() accessState {
 		approvals: map[*struct{}]context.CancelFunc{}}
 }
 
-// executable is os.Executable; tests replace it.
-var executable = os.Executable
+// executable is os.Executable and statFile os.Stat; tests replace them.
+var (
+	executable = os.Executable
+	statFile   = os.Stat
+)
 
 // latchwirePath is the latchwire command an agent client starts: the one
 // beside this app if there is one, else where the platform's package
-// installs it.
-func latchwirePath() string {
+// installs it (on Linux /usr/bin, or /usr/local/bin when only that one
+// exists).
+func latchwirePath() string { return latchwirePathFor(runtime.GOOS) }
+
+// isFile reports whether p is a regular file.
+func isFile(p string) bool {
+	st, err := statFile(p)
+	return err == nil && st.Mode().IsRegular()
+}
+
+func latchwirePathFor(goos string) string {
 	name := "latchwire"
-	if runtime.GOOS == "windows" {
+	if goos == "windows" {
 		name += ".exe"
 	}
 	if exe, err := executable(); err == nil {
-		p := filepath.Join(filepath.Dir(exe), name)
-		if st, err := os.Stat(p); err == nil && st.Mode().IsRegular() {
+		if p := filepath.Join(filepath.Dir(exe), name); isFile(p) {
 			return p
 		}
 	}
-	switch runtime.GOOS {
+	switch goos {
 	case "darwin":
 		return "/usr/local/latchwire/bin/latchwire"
 	case "windows":
 		return `C:\Program Files\Latchwire\latchwire.exe`
+	}
+	// Linux: the package's place, else a manual install's.
+	for _, p := range []string{"/usr/bin/latchwire", "/usr/local/bin/latchwire"} {
+		if isFile(p) {
+			return p
+		}
 	}
 	return "/usr/bin/latchwire"
 }
@@ -206,6 +223,14 @@ func (u *UI) turnOn() {
 		ctx, cancel := context.WithTimeout(context.Background(), accessTimeout)
 		defer cancel()
 		err := u.b.Grant(ctx, g)
+		if err != nil {
+			// The daemon may have stored the grant all the same (a
+			// timeout after it took it): close it, so that access the app
+			// shows as off is off.
+			rctx, rcancel := context.WithTimeout(context.Background(), accessTimeout)
+			u.b.Revoke(rctx)
+			rcancel()
+		}
 		fyne.Do(func() {
 			a.working = false
 			if err != nil {

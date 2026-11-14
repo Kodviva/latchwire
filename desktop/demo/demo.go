@@ -36,6 +36,7 @@ type Backend struct {
 
 	fresh    map[uint32]bool
 	grants   []ipc.AssistGrant
+	grantErr error
 	held     bool
 	revokes  int
 	activity []ipc.ActivityEntry
@@ -200,7 +201,7 @@ func (b *Backend) SetFresh(serial uint32, fresh bool) {
 }
 
 // Grant implements ui.Backend: it records g and holds it until Revoke or
-// DropGrant.
+// DropGrant. SetGrantErr makes it fail even so.
 func (b *Backend) Grant(_ context.Context, g ipc.AssistGrant) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -210,7 +211,15 @@ func (b *Backend) Grant(_ context.Context, g ipc.AssistGrant) error {
 	g.Groups = append([]string(nil), g.Groups...)
 	b.grants = append(b.grants, g)
 	b.held = true
-	return nil
+	return b.grantErr
+}
+
+// SetGrantErr makes Grant fail with err after it stored the grant, the way
+// a call that timed out after the daemon took it does; nil ends that.
+func (b *Backend) SetGrantErr(err error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.grantErr = err
 }
 
 // Revoke implements ui.Backend.

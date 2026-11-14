@@ -49,7 +49,10 @@ func runAgent(ctx context.Context, u *ui.UI) {
 	a.Run(ctx)
 }
 
-var errNoAgent = errors.New(msg.AssistAppNotConnected)
+var (
+	errNoAgent    = errors.New(msg.AssistAppNotConnected)
+	errOldService = errors.New(msg.AssistServiceTooOld)
+)
 
 // accessErr is the text to show for an error of the agent connection.
 func accessErr(err error) error {
@@ -59,6 +62,9 @@ func accessErr(err error) error {
 		return nil
 	case errors.Is(err, ipc.ErrClosed):
 		return errNoAgent
+	case errors.As(err, &ie) && ie.Code == ipc.CodeNotFound && ie.Message == ipc.UnknownMethod:
+		// A daemon older than agent access.
+		return errOldService
 	case errors.As(err, &ie):
 		return errors.New(ie.Message)
 	}
