@@ -12,6 +12,10 @@ Latchwire is an open-source WireGuard-compatible client that keeps the static X2
 
 `desktop/` is a menu bar and tray app built with Fyne, in its own Go module. It hosts the key agent, so run it instead of `latchwire agent`. Test it with `cd desktop && go test ./...`; `desktop/build_macos.sh -tags demo` builds a demo that needs no card or daemon.
 
+## Agent access
+
+`latchwire mcp` is an MCP server that lets an AI agent on the same computer read status and, with your permission, create a key, add a tunnel, connect and disconnect. It is off until you turn it on in the desktop app, for a limited time; each of those actions asks for your approval in the app, and the PIN is only ever typed by you in Latchwire's own dialogs. It is not a defence against malware running as you. Setup: [docs/manual-install.md](docs/manual-install.md#agent-access-mcp); limits: [threat model](docs/threat-model.md), section 5.10.
+
 ## Translations
 
 Messages live in `internal/msg/locales/*.arb` (ICU MessageFormat); `en.arb` is the source. The steps for adding a message or a language are in `internal/msg/doc.go`.

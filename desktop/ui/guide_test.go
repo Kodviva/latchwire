@@ -241,3 +241,64 @@ func TestGuideTurkish(t *testing.T) {
 	wantText(t, u, msg.Render("tr", msg.UIGuideOPNsense1, nil))
 	wantText(t, u, "VPN → WireGuard → Peers")
 }
+
+// copied taps every Copy button on screen and returns what each copied.
+func copied(t *testing.T, u *UI) []string {
+	t.Helper()
+	var out []string
+	walk(u, func(o fyne.CanvasObject) {
+		if b, ok := o.(*widget.Button); ok && b.Text == en(msg.UICopy) {
+			test.Tap(b)
+			out = append(out, u.app.Clipboard().Content())
+		}
+	})
+	return out
+}
+
+// TestGuideFieldsFollowGuideText holds the guide screen to the shared guide
+// text: the Copy buttons copy exactly its Values, and a value that is still
+// a placeholder is shown without one.
+func TestGuideFieldsFollowGuideText(t *testing.T) {
+	kinds := []desktop.ServerKind{desktop.ServerOPNsense, desktop.ServerPfSense, desktop.ServerMikroTik, desktop.ServerLinux, desktop.ServerOther}
+	for _, addr := range []string{"10.8.0.2", ""} {
+		for _, k := range kinds {
+			s := ownerSurvey(desktop.HelpGuided)
+			s.Server = k
+			u, _ := startGuided(t, s)
+			openFixedPubkey(u, addr)
+			u.show(screenGuide)
+
+			var addrs []netip.Addr
+			if addr != "" {
+				addrs = []netip.Addr{netip.MustParseAddr(addr)}
+			}
+			_, steps := desktop.GuideText("en", k, u.session.keys, addrs)
+			var want []string
+			for _, st := range steps {
+				want = append(want, st.Values...)
+				wantText(t, u, st.Text)
+				for _, f := range st.Fields {
+					wantText(t, u, f.Text)
+				}
+			}
+			if got := copied(t, u); !slices.Equal(got, want) {
+				t.Errorf("%s addr %q: copied %q, want %q", k, addr, got, want)
+			}
+			if addr == "" {
+				wantText(t, u, en(msg.UIGuideNoIP))
+			} else {
+				noText(t, u, en(msg.UIGuideNoIP))
+			}
+		}
+	}
+}
+
+// TestGuideTermsMatchSteps keeps the glossary terms in step with the guide.
+func TestGuideTermsMatchSteps(t *testing.T) {
+	for k, terms := range guideTerms {
+		_, steps := desktop.GuideText("en", k, nil, nil)
+		if len(terms) != len(steps) {
+			t.Errorf("%s: %d terms, %d steps", k, len(terms), len(steps))
+		}
+	}
+}

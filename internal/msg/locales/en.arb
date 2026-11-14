@@ -390,7 +390,7 @@
       }
     }
   },
-  "CLIUsage": "usage: latchwire <command> [arguments]\n\ncommands:\n  devices                       list connected YubiKeys\n  keygen --serial N [--slot 82] [--force] [--address IP]\n                                generate an X25519 key on a YubiKey\n  pubkey <keyref>               print the public key of a key on a YubiKey\n  agent                         run the user agent (asks for the PIN)\n  daemon                        run the tunnel daemon (root)\n  add <name> <file>             add a tunnel configuration (administrator)\n  remove <name>                 remove a tunnel (administrator)\n  up <name>                     connect a tunnel\n  down <name>                   disconnect a tunnel\n  status [name]                 show tunnels\n  policy <name> [--kill-switch auto|on|off] [--auto-connect=true|false]\n         [--on-demand=true|false] [--trust-network ID]\n         [--trust-current-network] [--untrust-network ID]\n         [--allow-user NAME] [--deny-user NAME]\n                                show a tunnel's policy, or change it\n                                (administrator); a trusted network is\n                                recognised only by its gateway's IP and MAC\n                                address, which anyone there can copy\n  network                       print the ID of the current network\n  version                       print the version of this program",
+  "CLIUsage": "usage: latchwire <command> [arguments]\n\ncommands:\n  devices                       list connected YubiKeys\n  keygen --serial N [--slot 82] [--force] [--address IP]\n                                generate an X25519 key on a YubiKey\n  pubkey <keyref>               print the public key of a key on a YubiKey\n  agent                         run the user agent (asks for the PIN)\n  daemon                        run the tunnel daemon (root)\n  add <name> <file>             add a tunnel configuration (administrator)\n  remove <name>                 remove a tunnel (administrator)\n  up <name>                     connect a tunnel\n  down <name>                   disconnect a tunnel\n  status [name]                 show tunnels\n  policy <name> [--kill-switch auto|on|off] [--auto-connect=true|false]\n         [--on-demand=true|false] [--trust-network ID]\n         [--trust-current-network] [--untrust-network ID]\n         [--allow-user NAME] [--deny-user NAME]\n                                show a tunnel's policy, or change it\n                                (administrator); a trusted network is\n                                recognised only by its gateway's IP and MAC\n                                address, which anyone there can copy\n  network                       print the ID of the current network\n  mcp                           serve the agent tools over MCP on stdio (the\n                                agent client starts it)\n  version                       print the version of this program",
   "@CLIUsage": {
     "section": "Command line. None of these formats take a PIN, PUK or key; the ones that\nshow a public key say so in their name."
   },
@@ -1039,5 +1039,172 @@
   "ServiceLocationFmt": "refusing to install {path} as a service: it would run as SYSTEM, so it must be under Program Files, where only administrators can write",
   "@ServiceLocationFmt": {
     "description": "ServiceLocationFmt takes the path of the program."
-  }
+  },
+  "AssistAccessOff": "Latchwire agent access is off: ask the user to turn it on in the Latchwire app (Agent access)",
+  "@AssistAccessOff": {
+    "description": "AssistAccessOff: an agent tool was called while access is off or expired."
+  },
+  "AssistGroupOffFmt": "Latchwire agent access does not include {group}: ask the user to turn it on in the Latchwire app (Agent access)",
+  "@AssistGroupOffFmt": {
+    "description": "AssistGroupOffFmt takes the name of the permission group (keys, tunnels, connect).",
+    "placeholders": {
+      "group": {
+        "verb": "%s"
+      }
+    }
+  },
+  "AssistDenied": "the user did not allow this action",
+  "@AssistDenied": {
+    "description": "AssistDenied: the user refused, or did not answer, the approval window."
+  },
+  "AssistNoApp": "the Latchwire app is not open: ask the user to open it",
+  "@AssistNoApp": {
+    "description": "AssistNoApp: no desktop agent can show the approval window."
+  },
+  "AssistCancelled": "the action was cancelled because agent access was turned off",
+  "@AssistCancelled": {
+    "description": "AssistCancelled: access was revoked while the action waited."
+  },
+  "AssistRequestCancelled": "the request was cancelled before the user answered",
+  "@AssistRequestCancelled": {
+    "description": "AssistRequestCancelled: the caller went away while the approval window waited."
+  },
+  "AssistBusy": "another request is waiting for the user's answer: try again after the user answers it",
+  "@AssistBusy": {
+    "description": "AssistBusy: an approval window is already open for this user; a second request is refused at once."
+  },
+  "AssistUnknownTool": "this Latchwire version does not offer that tool",
+  "@AssistUnknownTool": {
+    "description": "AssistUnknownTool: assist.call named a tool the daemon does not know."
+  },
+  "AssistDaemonTooOld": "the Latchwire daemon is too old for agent access: ask the user to update Latchwire",
+  "@AssistDaemonTooOld": {
+    "description": "AssistDaemonTooOld: latchwire mcp reached a daemon that does not know assist.call."
+  },
+  "AssistNoCardFmt": "no YubiKey with serial {serial} is plugged in, or it cannot hold Latchwire keys",
+  "@AssistNoCardFmt": {
+    "description": "AssistNoCardFmt takes the serial the agent asked for.",
+    "placeholders": {
+      "serial": {
+        "verb": "%d"
+      }
+    }
+  },
+  "AssistSlotNotFreeFmt": "slot {slot} of YubiKey {serial} is not free: leave the slot out to take the first free one",
+  "@AssistSlotNotFreeFmt": {
+    "description": "AssistSlotNotFreeFmt takes the slot and the serial.",
+    "placeholders": {
+      "slot": {
+        "verb": "%02x"
+      },
+      "serial": {
+        "verb": "%d"
+      }
+    }
+  },
+  "AssistKeygenFailed": "the app reported a key that does not match the request; no key was recorded",
+  "@AssistKeygenFailed": {
+    "description": "AssistKeygenFailed: the app's card.keygen answer had a bad key reference or public key."
+  },
+  "AssistSummaryKeyFmt": "new key on YubiKey {serial}, slot {slot}",
+  "@AssistSummaryKeyFmt": {
+    "description": "AssistSummaryKeyFmt is the summary of create_key in the approval window and the activity list. It takes the serial and the slot.",
+    "placeholders": {
+      "serial": {
+        "verb": "%d"
+      },
+      "slot": {
+        "verb": "%02x"
+      }
+    }
+  },
+  "AssistSummaryTunnelFmt": "tunnel {name}: endpoints {endpoints}, allowed IPs {networks}, servers: {peers}, {psk}",
+  "@AssistSummaryTunnelFmt": {
+    "description": "AssistSummaryTunnelFmt is the summary of add_tunnel. It takes the tunnel name, the endpoints and the allowed IPs (each joined with spaces), the number of servers and AssistPSKYes or AssistPSKNo; never a key or the PSK itself.",
+    "placeholders": {
+      "name": {
+        "verb": "%q"
+      },
+      "endpoints": {
+        "verb": "%s"
+      },
+      "networks": {
+        "verb": "%s"
+      },
+      "peers": {
+        "verb": "%d"
+      },
+      "psk": {
+        "verb": "%v"
+      }
+    }
+  },
+  "AssistPSKYes": "PSK: yes",
+  "@AssistPSKYes": {
+    "description": "AssistPSKYes: the tunnel has a preshared key (never shown)."
+  },
+  "AssistPSKNo": "PSK: no",
+  "@AssistPSKNo": {
+    "description": "AssistPSKNo: the tunnel has no preshared key."
+  },
+  "AssistSummaryTunnelNameFmt": "the tunnel {name}",
+  "@AssistSummaryTunnelNameFmt": {
+    "description": "AssistSummaryTunnelNameFmt is the summary of connect, disconnect and setup_progress: the tunnel's name.",
+    "placeholders": {
+      "name": {
+        "verb": "%q"
+      }
+    }
+  },
+  "AssistKeygenCancelled": "the user cancelled creating the key in the Latchwire app",
+  "@AssistKeygenCancelled": {
+    "description": "AssistKeygenCancelled: the person closed a PIN or PUK form of a key the agent asked for."
+  },
+  "UIAccessNav": "Agent access",
+  "UIAccessIntro": "An AI agent on this computer can help you set up Latchwire. With access on, it can read your setup: tunnels, plugged-in YubiKeys and the next steps. In the groups you allow, it can also ask to create keys, add tunnels and connect; Latchwire shows you each request and does nothing until you allow it. The agent never sees or types your PIN, PUK or keys.",
+  "UIAccessStateOff": "Agent access is off.",
+  "UIAccessStateMinutes": "{minutes, plural, one {Agent access is on: # minute left.} other {Agent access is on: # minutes left.}}",
+  "UIAccessStateUntilQuit": "Agent access is on until Latchwire quits.",
+  "UIAccessDuration": "How long",
+  "UIAccess15": "15 minutes",
+  "UIAccess60": "1 hour",
+  "UIAccessUntilQuit": "Until Latchwire quits",
+  "UIAccessGroups": "What the agent may ask for (reading your setup is always included)",
+  "UIAccessGroupKeys": "Create keys on a YubiKey",
+  "UIAccessGroupTunnels": "Add tunnels",
+  "UIAccessGroupConnect": "Connect and disconnect tunnels",
+  "UIAccessTurnOn": "Turn on",
+  "UIAccessTurnOff": "Turn off",
+  "UIAccessSetup": "Add Latchwire to your agent",
+  "UIAccessClaudeCode": "Claude Code: run this in a terminal",
+  "UIAccessClaudeDesktop": "Claude Desktop: add this to claude_desktop_config.json",
+  "UIAccessOther": "Other MCP clients: start this command (stdio)",
+  "UIAccessActivity": "Recent agent actions",
+  "UIAccessNoActivity": "No agent actions yet.",
+  "UIAccessResultDone": "done",
+  "UIAccessResultDenied": "refused",
+  "UIAccessResultOff": "access was off",
+  "UIAccessResultNoApp": "app was not open",
+  "UIAccessResultCancelled": "cancelled",
+  "UIAccessResultError": "failed",
+  "AssistAppNotConnected": "The app is not connected to the Latchwire service yet. Try again in a moment.",
+  "@AssistAppNotConnected": {
+    "description": "AssistAppNotConnected: the app turned agent access on or off before its agent had connected to the daemon."
+  },
+  "AssistServiceTooOld": "The Latchwire service is too old for agent access. Update Latchwire.",
+  "@AssistServiceTooOld": {
+    "description": "AssistServiceTooOld: the daemon does not know the agent access methods (an older version)."
+  },
+  "UIRoadmapAgentLink": "Let an AI agent help with these steps",
+  "UIApproveTitle": "Allow this agent request?",
+  "UIApproveClient": "Agent: “{client}”",
+  "UIApproveTool": "Request: {tool}",
+  "UIApproveToolCreateKey": "create a key on a YubiKey",
+  "UIApproveToolAddTunnel": "add a tunnel",
+  "UIApproveToolConnect": "connect a tunnel",
+  "UIApproveToolDisconnect": "disconnect a tunnel",
+  "UIApproveFresh": "This YubiKey still has its factory PIN and PUK. Creating the key will change them: Latchwire will ask you for the current PUK and a new PIN and PUK.",
+  "UIApproveTimeout": "Without an answer within 2 minutes, the request is refused.",
+  "UIApproveAllow": "Allow",
+  "UIApproveDeny": "Deny"
 }

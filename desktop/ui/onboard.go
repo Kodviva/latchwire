@@ -170,7 +170,7 @@ func (u *UI) startKeygen() {
 	u.renderOnboard()
 	serial, slot := dev.Serial, u.card.slot
 	go func() {
-		key, err := u.b.Keygen(serial, slot, asker{u})
+		key, err := u.b.Keygen(serial, slot, asker{u: u})
 		fyne.Do(func() {
 			u.card.working = false
 			u.inspect(serial)

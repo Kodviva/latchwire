@@ -424,3 +424,23 @@ func TestPINRetriesReadsWithoutSpending(t *testing.T) {
 		}
 	}
 }
+
+// Fresh tells a factory-fresh card by its default management key only: no
+// PIN or PUK is sent and nothing changes.
+func TestFreshProbesManagementKeyOnly(t *testing.T) {
+	for _, fresh := range []bool{true, false} {
+		f := newFakeCard(t, testSerial)
+		if fresh {
+			f.fresh()
+		}
+		c := mustCard(t, f)
+		got, err := c.Fresh()
+		if err != nil || got != fresh {
+			t.Fatalf("Fresh() = %v, %v; want %v", got, err, fresh)
+		}
+		if len(f.pinsSent) != 0 || f.callCount("SetPIN") != 0 || f.callCount("SetPUK") != 0 ||
+			f.callCount("SetManagementKey") != 0 || f.callCount("GenerateKey") != 0 {
+			t.Fatalf("Fresh touched the card: %v", f.calls)
+		}
+	}
+}

@@ -123,6 +123,9 @@ func (u *UI) renderRoadmap() {
 	for i, id := range steps {
 		rows = append(rows, u.stepRow(i+1, id, id == cur))
 	}
+	// The one line guided and hints users get about agent access; expert
+	// mode has no roadmap.
+	rows = append(rows, newTapCard(label(u.t(msg.UIRoadmapAgentLink)), false, true, func() { u.show(screenAccess) }))
 	u.setMain(page(container.NewVScroll(container.NewVBox(rows...))))
 }
 

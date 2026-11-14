@@ -45,6 +45,10 @@ var (
 	errServeTwice = errors.New("ipc: Serve already called")
 )
 
+// UnknownMethod is the message of the CodeNotFound error a peer returns
+// for a method it does not serve, such as an older daemon.
+const UnknownMethod = "unknown method"
+
 // Message is the wire format. A request has Method set; a response has
 // Method empty and either Result or Error.
 type Message struct {
@@ -310,7 +314,7 @@ func (c *Conn) dispatch(ctx context.Context, req Message) {
 	h := c.handlers[req.Method]
 	c.mu.Unlock()
 	if h == nil {
-		c.reply(req.ID, nil, &Error{Code: CodeNotFound, Message: "unknown method"})
+		c.reply(req.ID, nil, &Error{Code: CodeNotFound, Message: UnknownMethod})
 		return
 	}
 	select {

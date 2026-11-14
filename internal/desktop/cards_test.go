@@ -30,6 +30,7 @@ type fakeCard struct {
 	results  []error // of successive Generate calls
 	opts     []piv.GenerateOptions
 	closed   int
+	fresh    bool
 }
 
 func (c *fakeCard) Generate(o piv.GenerateOptions) (keyref.Ref, [32]byte, error) {
@@ -54,6 +55,7 @@ func (c *fakeCard) Provider(ref keyref.Ref, prompt func(int) (string, error)) (k
 }
 func (c *fakeCard) Occupied(s uint8) (bool, error) { return c.occupied[s], nil }
 func (c *fakeCard) PINRetries() (int, error)       { return c.retries, nil }
+func (c *fakeCard) Fresh() (bool, error)           { return c.fresh, nil }
 func (c *fakeCard) Close() error                   { c.closed++; return nil }
 
 func cards(c *fakeCard) Cards {
@@ -242,5 +244,15 @@ func TestManagementKeyRejected(t *testing.T) {
 	a := &asker{pin: "123456", mk: strings.Repeat("ab", 16)}
 	if _, err := cards(c).Keygen(serial, 0, a); err == nil || err.Error() != msg.KeygenManagementKeyRejected {
 		t.Fatal(err)
+	}
+}
+
+func TestInspectReportsFresh(t *testing.T) {
+	for _, fresh := range []bool{true, false} {
+		c := &fakeCard{fresh: fresh}
+		info, err := cards(c).Inspect(serial)
+		if err != nil || info.Fresh != fresh {
+			t.Fatalf("Fresh = %v, %v; want %v", info.Fresh, err, fresh)
+		}
 	}
 }

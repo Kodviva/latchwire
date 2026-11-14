@@ -220,6 +220,8 @@ commands:
                                 recognised only by its gateway's IP and MAC
                                 address, which anyone there can copy
   network                       print the ID of the current network
+  mcp                           serve the agent tools over MCP on stdio (the
+                                agent client starts it)
   version                       print the version of this program`
 	CLIUnknownCommandFmt = "unknown command %q"
 	CLIUsageErrorFmt     = "usage: latchwire %s"
@@ -364,6 +366,46 @@ runs the daemon:
 	PolicyNoSuchUser = "no such user"
 	// ServiceLocationFmt takes the path of the program.
 	ServiceLocationFmt = "refusing to install %s as a service: it would run as SYSTEM, so it must be under Program Files, where only administrators can write"
+	// AssistAccessOff: an agent tool was called while access is off or expired.
+	AssistAccessOff = "Latchwire agent access is off: ask the user to turn it on in the Latchwire app (Agent access)"
+	// AssistGroupOffFmt takes the name of the permission group (keys, tunnels, connect).
+	AssistGroupOffFmt = "Latchwire agent access does not include %s: ask the user to turn it on in the Latchwire app (Agent access)"
+	// AssistDenied: the user refused, or did not answer, the approval window.
+	AssistDenied = "the user did not allow this action"
+	// AssistNoApp: no desktop agent can show the approval window.
+	AssistNoApp = "the Latchwire app is not open: ask the user to open it"
+	// AssistCancelled: access was revoked while the action waited.
+	AssistCancelled = "the action was cancelled because agent access was turned off"
+	// AssistRequestCancelled: the caller went away while the approval window waited.
+	AssistRequestCancelled = "the request was cancelled before the user answered"
+	// AssistBusy: an approval window is already open for this user; a second request is refused at once.
+	AssistBusy = "another request is waiting for the user's answer: try again after the user answers it"
+	// AssistUnknownTool: assist.call named a tool the daemon does not know.
+	AssistUnknownTool = "this Latchwire version does not offer that tool"
+	// AssistDaemonTooOld: latchwire mcp reached a daemon that does not know assist.call.
+	AssistDaemonTooOld = "the Latchwire daemon is too old for agent access: ask the user to update Latchwire"
+	// AssistNoCardFmt takes the serial the agent asked for.
+	AssistNoCardFmt = "no YubiKey with serial %d is plugged in, or it cannot hold Latchwire keys"
+	// AssistSlotNotFreeFmt takes the slot and the serial.
+	AssistSlotNotFreeFmt = "slot %02x of YubiKey %d is not free: leave the slot out to take the first free one"
+	// AssistKeygenFailed: the app's card.keygen answer had a bad key reference or public key.
+	AssistKeygenFailed = "the app reported a key that does not match the request; no key was recorded"
+	// AssistSummaryKeyFmt is the summary of create_key in the approval window and the activity list. It takes the serial and the slot.
+	AssistSummaryKeyFmt = "new key on YubiKey %d, slot %02x"
+	// AssistSummaryTunnelFmt is the summary of add_tunnel. It takes the tunnel name, the endpoints and the allowed IPs (each joined with spaces), the number of servers and AssistPSKYes or AssistPSKNo; never a key or the PSK itself.
+	AssistSummaryTunnelFmt = "tunnel %q: endpoints %s, allowed IPs %s, servers: %d, %v"
+	// AssistPSKYes: the tunnel has a preshared key (never shown).
+	AssistPSKYes = "PSK: yes"
+	// AssistPSKNo: the tunnel has no preshared key.
+	AssistPSKNo = "PSK: no"
+	// AssistSummaryTunnelNameFmt is the summary of connect, disconnect and setup_progress: the tunnel's name.
+	AssistSummaryTunnelNameFmt = "the tunnel %q"
+	// AssistKeygenCancelled: the person closed a PIN or PUK form of a key the agent asked for.
+	AssistKeygenCancelled = "the user cancelled creating the key in the Latchwire app"
+	// AssistAppNotConnected: the app turned agent access on or off before its agent had connected to the daemon.
+	AssistAppNotConnected = "The app is not connected to the Latchwire service yet. Try again in a moment."
+	// AssistServiceTooOld: the daemon does not know the agent access methods (an older version).
+	AssistServiceTooOld = "The Latchwire service is too old for agent access. Update Latchwire."
 )
 
 // Desktop app messages, rendered with Render.
@@ -616,4 +658,43 @@ const (
 	UITrayConnected             ID = "UITrayConnected"
 	UIQuitTitle                 ID = "UIQuitTitle"
 	UIQuitBody                  ID = "UIQuitBody"
+	UIAccessNav                 ID = "UIAccessNav"
+	UIAccessIntro               ID = "UIAccessIntro"
+	UIAccessStateOff            ID = "UIAccessStateOff"
+	UIAccessStateMinutes        ID = "UIAccessStateMinutes"
+	UIAccessStateUntilQuit      ID = "UIAccessStateUntilQuit"
+	UIAccessDuration            ID = "UIAccessDuration"
+	UIAccess15                  ID = "UIAccess15"
+	UIAccess60                  ID = "UIAccess60"
+	UIAccessUntilQuit           ID = "UIAccessUntilQuit"
+	UIAccessGroups              ID = "UIAccessGroups"
+	UIAccessGroupKeys           ID = "UIAccessGroupKeys"
+	UIAccessGroupTunnels        ID = "UIAccessGroupTunnels"
+	UIAccessGroupConnect        ID = "UIAccessGroupConnect"
+	UIAccessTurnOn              ID = "UIAccessTurnOn"
+	UIAccessTurnOff             ID = "UIAccessTurnOff"
+	UIAccessSetup               ID = "UIAccessSetup"
+	UIAccessClaudeCode          ID = "UIAccessClaudeCode"
+	UIAccessClaudeDesktop       ID = "UIAccessClaudeDesktop"
+	UIAccessOther               ID = "UIAccessOther"
+	UIAccessActivity            ID = "UIAccessActivity"
+	UIAccessNoActivity          ID = "UIAccessNoActivity"
+	UIAccessResultDone          ID = "UIAccessResultDone"
+	UIAccessResultDenied        ID = "UIAccessResultDenied"
+	UIAccessResultOff           ID = "UIAccessResultOff"
+	UIAccessResultNoApp         ID = "UIAccessResultNoApp"
+	UIAccessResultCancelled     ID = "UIAccessResultCancelled"
+	UIAccessResultError         ID = "UIAccessResultError"
+	UIRoadmapAgentLink          ID = "UIRoadmapAgentLink"
+	UIApproveTitle              ID = "UIApproveTitle"
+	UIApproveClient             ID = "UIApproveClient"
+	UIApproveTool               ID = "UIApproveTool"
+	UIApproveToolCreateKey      ID = "UIApproveToolCreateKey"
+	UIApproveToolAddTunnel      ID = "UIApproveToolAddTunnel"
+	UIApproveToolConnect        ID = "UIApproveToolConnect"
+	UIApproveToolDisconnect     ID = "UIApproveToolDisconnect"
+	UIApproveFresh              ID = "UIApproveFresh"
+	UIApproveTimeout            ID = "UIApproveTimeout"
+	UIApproveAllow              ID = "UIApproveAllow"
+	UIApproveDeny               ID = "UIApproveDeny"
 )

@@ -52,8 +52,8 @@ test only).
 
 ## 3. Components and trust
 
-Three programs (all in the one `latchwire` binary) cooperate. The desktop app
-(`desktop/`, a separate binary) is a fourth way to run the agent:
+Four programs, all in the one `latchwire` binary, cooperate. The desktop app
+(`desktop/`, a separate binary) is one more way to run the agent:
 
 | Component | Runs as | Does |
 | --- | --- | --- |
@@ -61,6 +61,7 @@ Three programs (all in the one `latchwire` binary) cooperate. The desktop app
 | `latchwire agent` | the logged-in user | Talks to the card over PC/SC, asks for the PIN (a dialog when started by launchd or systemd, else the terminal), answers the daemon's key requests. |
 | Desktop app | the logged-in user | Hosts the same agent code in its own process and shows its own PIN form instead of the terminal or system dialog. Creates keys on the card, reads which keys a card holds, and calls the daemon over the same socket and with the same permissions as the CLI. See section 5.8. |
 | `latchwire` CLI | the caller | `keygen`, `devices`, `pubkey` talk to the card directly; `add`, `remove`, `up`, `down`, `status`, `policy`, `network` talk to the daemon. |
+| `latchwire mcp` | the logged-in user | A stdio server that an AI agent (an MCP client) starts. Holds no state and decides nothing: it passes each of its 8 tools to the daemon as one `assist.call` and returns the answer. Section 5.10. |
 
 They talk over one unix socket, `/var/run/latchwire.sock`, mode `0666`. The
 file mode is deliberately open; **who may do what is decided from the peer's
@@ -735,6 +736,105 @@ everything in this section is on top of the limits above.
 The demo build (`-tags demo`) uses made-up data and is not what is shipped;
 `desktop/deps_test.go` checks that the normal build links neither it nor the
 software key.
+
+### 5.10 Agent access (MCP)
+
+`latchwire mcp` lets an AI agent on the same computer read status and, with
+your permission, create a key, add a tunnel, connect and disconnect. It is
+off until you turn it on in the desktop app's "Agent access" screen, for 15
+minutes, 1 hour or until the app closes, and for the groups you pick (`keys`,
+`tunnels`, `connect`; the read-only tools need open access and no group). It
+adds a way to ask for these actions, not a new trust level.
+
+- **It is not a security boundary against programs running as you.** A
+  program running as your user can run `latchwire` commands directly, so
+  access, approval windows and the activity list exist to limit and show the
+  mistakes of a well-meaning agent, not to stop malware. A same-user program
+  could also register with the daemon as an app agent that reports the assist
+  capability and grant, and approve, itself. The boundary that remains is the
+  one in 5.1 and 5.2: the YubiKey and its PIN, typed by you. Everything below
+  is hardening on top of that, not a replacement.
+  Where: `internal/daemon/assist.go` (`handleAssist`, `assistAgentLocked`);
+  `internal/daemon/approve.go` (`assistAgent`).
+- **Who can grant and who is asked.** Access is granted only by a registered
+  agent connection of the same uid that reported the assist capability and has
+  never made an `assist.call`. Approval windows and card operations go only to
+  the connection that granted access, not to any other agent of that user. A
+  connection that makes an `assist.call` can never be a grant owner, and a
+  grant it held is closed. This stops a plain MCP process, or a second agent
+  that only claims the capability, from opening or answering its own access.
+  Where: `internal/daemon/assist.go` (`assistAgentLocked`, `markAssistCaller`);
+  `internal/daemon/approve.go` (`assistAgent`, `cardList`, `cardKeygen`).
+  Tests: `TestGrantNeedsAssistAgent`, `TestGrantRefusedForAssistCaller`,
+  `TestAssistAgentIsGrantOwner`, `TestGrantOwnerWithoutCapIsNoApp`.
+- **Access ends** when the granting connection drops (the app quits), on
+  revoke, at its time limit, or when the daemon restarts: it is kept in the
+  daemon's memory only. A new grant replaces the old one. Every tool,
+  read-only ones included, is refused with `access_off` while access is off
+  or expired. A pending approval or PIN wait counts as refused when access
+  closes.
+  Where: `internal/daemon/assist.go` (`assistState`, `set`, `revoke`,
+  `dropOwner`, `allowed`, `pending`). Tests: `TestGrantExpires`,
+  `TestGrantUntilClosedEndsWithOwner`, `TestRevoke`,
+  `TestAccessOffRefusesEveryTool`, `TestApproveRevokedWhilePending`.
+- **Approval.** `create_key`, `add_tunnel` and `connect` each ask you in the
+  app, which shows the client name, the action and a summary. No answer
+  within 2 minutes is a refusal, as are cancel, a lost app connection and
+  access closing. After you click Allow the daemon checks access again before
+  it acts, so an Allow that arrives after a revoke or expiry does nothing.
+  `disconnect` needs no approval and is recorded. Each request carries an ID,
+  and when the daemon stops waiting (timeout, caller cancelled, revoke) it
+  sends `assist.abort` so the window or the key creation is given up.
+  Where: `internal/daemon/approve.go` (`approve`, `approveTimeout`, `abort`);
+  `internal/daemon/assistcall.go` (`approved`, `act`). Tests:
+  `TestApproveTimesOutAsDeny`, `TestApproveAllowAfterRevokeIsDenied`,
+  `TestApproveAbortsWindowWhenDaemonStopsWaiting`,
+  `TestCreateKeyRevokedAbortsKeygen`, `TestConnectRevokedWhileWaitingForPIN`.
+- **The PIN, PUK and management key** are never a tool input or output. When
+  a card needs them, Latchwire's own dialog in the app (key creation) or the
+  agent's PIN prompt (connect, as in 5.3 and 5.9) asks you. The MCP process
+  never sees them, and neither the daemon log nor the activity list contains
+  them. `connect` uses the same daemon path as `latchwire up`.
+  Where: `internal/daemon/assistcall.go` (`createKey`, `connect`);
+  `internal/agent/assist.go`.
+- **Rights.** `connect` and `disconnect` from an agent run with the rights of
+  the user who granted access; an administrator's agent gets no administrator
+  pass-through (it can take down only a tunnel bound to its user, or its
+  user's own failed or pending connect). `add_tunnel`
+  follows the same rule as `latchwire add`: only an administrator may add a
+  tunnel, and the owner is the user who granted access.
+  Where: `internal/daemon/assistcall.go` (`addTunnel`, `connect`,
+  `disconnect`); `internal/daemon/manager.go` (`agentConnect`,
+  `disconnectAs`). Tests: `TestAddTunnelNonAdminForbidden`,
+  `TestAgentConnectIsNotAdmin`, `TestAgentDisconnectIsNotAdmin`.
+- **A preshared key** may be given by the agent in `add_tunnel`; it travels
+  to the daemon inside the configuration text, as it does when you type it
+  in the server form (5.9), and as Go strings it cannot be wiped. It is never
+  in a tool result, an approval summary, the activity list or a log line,
+  which say only "PSK: yes" or "PSK: no". The daemon builds the summary from
+  the parsed configuration, not from the agent's text: an endpoint must be an
+  IP address or a plain DNS name with a valid port, and unprintable
+  characters are removed. Field errors name the field, never the value.
+  Where: `internal/daemon/assistcall.go` (`tunnelSummary`, `endpointText`,
+  `printable`, `addTunnel`); `internal/mcpserver/tools.go` (`invalidField`).
+  Test: `TestAddTunnelSummaryHidesPSK`.
+- **Client names** (from the MCP handshake) are agent-controlled text. The
+  daemon strips non-printing characters (control, bidi and zero-width ones,
+  invalid UTF-8) and cuts the name to 64 characters before it reaches the
+  approval window, the activity list or the log. An agent can still choose a
+  misleading but printable name: read what the window asks for, not who it
+  says is asking.
+  Where: `internal/daemon/assistcall.go` (`clientName`, `printable`). Tests:
+  `TestClientName`, `TestSummaryAndClientArePrintable`.
+- **A larger binary.** The `latchwire` binary now links the MCP SDK, which
+  brings `net/http`, TLS and OAuth code. The root daemon process contains it
+  too but does not use it: the SDK is reached only from `latchwire mcp`, which
+  runs as you. It is more code in the root process than before.
+  Where: `cmd/latchwire/mcp.go`; `packaging/THIRD_PARTY.md`.
+- **Activity.** The last 20 calls per user (tool, client, result, summary)
+  are kept in memory and logged one line each; summaries are built by the
+  daemon and never echo arguments.
+  Where: `internal/daemon/assist.go` (`record`, `activity`).
 
 ## 6. Why the cached `ss` alone cannot build a tunnel
 

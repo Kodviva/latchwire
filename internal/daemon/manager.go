@@ -218,7 +218,10 @@ type Manager struct {
 	ctx     context.Context // Serve's ctx; tunnel lifetimes derive from it
 	tunnels map[string]*tunnel
 	agents  map[*ipc.Conn]*agentState
-	nextSeq uint64
+	assist  assistState
+	// assistCallers: connections that made an assist.call (guarded by mu).
+	assistCallers map[*ipc.Conn]bool
+	nextSeq       uint64
 	// netID is the last identified network an on-demand evaluation saw
 	// ("" before the first). odEpoch changes with it and whenever an agent
 	// registers or reports a card anew: an on-demand attempt is made once
@@ -235,6 +238,7 @@ type agentState struct {
 	uid     uint32
 	seq     uint64
 	serials map[uint32]bool
+	caps    map[string]bool // CapAssist and friends, from AgentRegister.Caps
 	noAuto  map[string]bool
 }
 
@@ -720,6 +724,16 @@ func (m *Manager) requestConnect(ctx context.Context, uid uint32, name string) (
 	return m.connect(ctx, name, uid, admin, connectOpts{})
 }
 
+// agentConnect is connect for an agent tool of uid: with uid's own rights,
+// never an administrator's, so it can neither use another user's agent
+// nor connect a tunnel that only another user may use.
+func (m *Manager) agentConnect(ctx context.Context, uid uint32, name string) (ipc.TunnelStatus, error) {
+	if !m.agentUser(uid) {
+		return ipc.TunnelStatus{}, errForbidden
+	}
+	return m.connect(ctx, name, uid, false, connectOpts{asUser: true})
+}
+
 // notAllowed logs and returns the refusal of a connect for uid, which is
 // not one of the tunnel's allowed users (P20).
 func notAllowed(name string, uid uint32) error {
@@ -747,7 +761,12 @@ func notAllowed(name string, uid uint32) error {
 // (whose next attempt would be for the same user). The policy is read again
 // after the network lookup, so a user denied meanwhile is refused.
 func (m *Manager) requestDisconnect(uid uint32, name string) (ipc.TunnelStatus, error) {
-	admin := m.admin(uid)
+	return m.disconnectAs(uid, name, m.admin(uid))
+}
+
+// disconnectAs is requestDisconnect with admin given: an agent tool calls it
+// with false, so an administrator's agent only has a user's rights.
+func (m *Manager) disconnectAs(uid uint32, name string, admin bool) (ipc.TunnelStatus, error) {
 	if !admin && !m.agentUser(uid) {
 		return ipc.TunnelStatus{}, errForbidden
 	}
@@ -816,12 +835,13 @@ func (m *Manager) requestDisconnect(uid uint32, name string) (ipc.TunnelStatus, 
 }
 
 func (m *Manager) handle(c *ipc.Conn) {
+	m.handleAssist(c)
 	c.Handle(ipc.MethodAgentRegister, func(_ context.Context, uid uint32, params json.RawMessage) (any, error) {
 		var p ipc.AgentRegister
 		if err := decode(params, &p); err != nil {
 			return nil, err
 		}
-		m.agentRegister(c, uid, p.Serials)
+		m.agentRegister(c, uid, p.Serials, p.Caps...)
 		return nil, nil
 	})
 	c.Handle(ipc.MethodAgentEvent, func(_ context.Context, uid uint32, params json.RawMessage) (any, error) {
@@ -831,6 +851,15 @@ func (m *Manager) handle(c *ipc.Conn) {
 		}
 		m.agentEvent(c, uid, p)
 		return nil, nil
+	})
+	c.Handle(ipc.MethodAssistCall, func(ctx context.Context, uid uint32, params json.RawMessage) (any, error) {
+		// A malformed call still goes through the access check and the
+		// activity list, as an unknown tool.
+		var p ipc.AssistCall
+		if decode(params, &p) != nil {
+			p = ipc.AssistCall{}
+		}
+		return m.assistCall(ctx, c, uid, p)
 	})
 	c.Handle(ipc.MethodTunnelAdd, func(_ context.Context, uid uint32, params json.RawMessage) (any, error) {
 		if !m.admin(uid) {
@@ -1075,8 +1104,18 @@ func lastHandshake(dev *device.Device) string {
 
 // ---- agents ----
 
-func (m *Manager) agentRegister(c *ipc.Conn, uid uint32, serials []uint32) {
+func (m *Manager) agentRegister(c *ipc.Conn, uid uint32, serials []uint32, caps ...string) {
 	m.mu.Lock()
+	// Serve closes c before the accept loop calls dropAgent, and dropAgent
+	// deletes under mu: a register that runs after the drop sees Done closed
+	// here, so it cannot put a dead connection back into the table.
+	select {
+	case <-c.Done():
+		m.mu.Unlock()
+		log.Printf("daemon: agent of uid %d registered on a closed connection: ignored", uid)
+		return
+	default:
+	}
 	a := m.agents[c]
 	if a == nil {
 		a = &agentState{uid: uid, noAuto: map[string]bool{}}
@@ -1085,6 +1124,13 @@ func (m *Manager) agentRegister(c *ipc.Conn, uid uint32, serials []uint32) {
 	if a.seq == 0 {
 		m.nextSeq++
 		a.seq = m.nextSeq
+	}
+	a.caps = map[string]bool{}
+	for _, name := range caps {
+		a.caps[name] = true
+	}
+	if !a.caps[ipc.CapAssist] {
+		m.assist.dropOwner(c)
 	}
 	old := a.serials
 	a.serials = map[uint32]bool{}
@@ -1160,6 +1206,8 @@ func (m *Manager) dropAgent(c *ipc.Conn) {
 	m.mu.Lock()
 	a := m.agents[c]
 	delete(m.agents, c)
+	delete(m.assistCallers, c)
+	m.assist.dropOwner(c) // under mu: see handleAssist
 	m.mu.Unlock()
 	if a == nil || a.seq == 0 {
 		return
@@ -1415,6 +1463,9 @@ type connectOpts struct {
 	// down by hand meanwhile (odSuppressed) is not connected, and the
 	// binding is marked as on-demand's (odConnected).
 	onDemand bool
+	// asUser says that uid's administrator rights do not count: an agent
+	// tool connects with its user's own rights only.
+	asUser bool
 }
 
 // connect brings tunnel name up. caller is the requester's context: the
@@ -1444,7 +1495,7 @@ func (m *Manager) connect(caller context.Context, name string, uid uint32, admin
 	// adminOK: uid may connect whatever AllowedUsers says. uidOK is the
 	// early answer, for the first step only. (File I/O and the admin lookup
 	// stay outside Manager.mu.)
-	adminOK := admin || m.admin(uid)
+	adminOK := admin || (!o.asUser && m.admin(uid))
 	uidOK := adminOK || m.store.policyFor(name).allows(uid)
 	m.mu.Lock()
 	switch cur := m.tunnels[name]; {
@@ -1477,7 +1528,7 @@ func (m *Manager) connect(caller context.Context, name string, uid uint32, admin
 		return ipc.TunnelStatus{}, errNotYours
 	}
 	if t.state == StateConnecting || t.state == StateConnected {
-		if o == (connectOpts{}) {
+		if (connectOpts{asUser: o.asUser}) == o {
 			t.odConnected = false // a connect by hand claims the tunnel
 		}
 		m.mu.Unlock()

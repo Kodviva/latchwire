@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"errors"
 	"time"
 
@@ -31,6 +32,9 @@ type secretForm struct {
 	// call) and returns what to show instead of closing.
 	check   func(vals [][]byte) string
 	timeout time.Duration
+	// ctx, if set, closes the form as cancelled when it ends: the daemon
+	// stopped waiting for the key the form is for.
+	ctx context.Context
 }
 
 // askSecrets shows the form and blocks until it is answered, so it must not
@@ -110,14 +114,28 @@ func (u *UI) askSecrets(form secretForm) ([][]byte, error) {
 		defer t.Stop()
 		expire = t.C
 	}
+	var ended <-chan struct{}
+	if form.ctx != nil {
+		ended = form.ctx.Done()
+	}
+	var a answer
 	select {
-	case a := <-done:
-		return a.vals, a.err
+	case a = <-done:
 	case <-expire:
 		fyne.DoAndWait(func() { finish(answer{err: errTimeout}) })
-		a := <-done
-		return a.vals, a.err
+		a = <-done
+	case <-ended:
+		fyne.DoAndWait(func() { finish(answer{err: desktop.ErrCancelled}) })
+		a = <-done
 	}
+	if a.err == nil && form.ctx != nil && form.ctx.Err() != nil {
+		// Answered as the request ended: nobody waits for the values.
+		for _, v := range a.vals {
+			clear(v)
+		}
+		return nil, desktop.ErrCancelled
+	}
+	return a.vals, a.err
 }
 
 // prompter is the agent's Prompter: the PIN goes from the form straight to
@@ -156,14 +174,19 @@ func (p *prompter) Warn(m string) {
 	fyne.Do(func() { p.u.setNotice(msg.Translate(p.u.lang, m)) })
 }
 
-// asker is desktop.Asker on top of secret forms.
-type asker struct{ u *UI }
+// asker is desktop.Asker on top of secret forms. ctx, if set, closes the
+// forms when it ends.
+type asker struct {
+	u   *UI
+	ctx context.Context
+}
 
 func (a asker) PIN(serial uint32, retries int) ([]byte, error) {
 	u := a.u
 	form := secretForm{
 		title:  u.tr(msg.UIPINForKey, msg.Args{"serial": serial}),
 		fields: []string{u.tr(msg.UIPINRetries, msg.Args{"retries": retries})},
+		ctx:    a.ctx,
 	}
 	if retries == 1 {
 		form.warning = msg.Translate(u.lang, msg.LastPINRetry)
@@ -183,6 +206,7 @@ func (a asker) Fresh(uint32) (desktop.FreshSecrets, error) {
 		fields: []string{u.t(msg.UICurrentPUK), u.t(msg.UINewPIN), u.t(msg.UINewPINAgain),
 			u.t(msg.UINewPUK), u.t(msg.UINewPUKAgain)},
 		check: func(v [][]byte) string { return checkFresh(u.lang, v) },
+		ctx:   a.ctx,
 	})
 	if err != nil {
 		return desktop.FreshSecrets{}, err
@@ -211,6 +235,7 @@ func (a asker) ManagementKey(uint32) ([]byte, error) {
 		title:  u.t(msg.UIManagementTitle),
 		text:   u.t(msg.UIManagementBody),
 		fields: []string{u.t(msg.UIManagementTitle)},
+		ctx:    a.ctx,
 	})
 	if err != nil {
 		return nil, err

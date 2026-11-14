@@ -66,6 +66,9 @@ type Agent struct {
 	b      Backend
 	p      Prompter
 	poll   time.Duration
+	assist Assistant // nil: no approvals or card operations (the CLI agent)
+
+	conn atomic.Pointer[ipc.Conn] // the registered daemon connection, if any
 
 	promptMu sync.Mutex // one prompt on the terminal at a time
 
@@ -154,6 +157,11 @@ func (a *Agent) session(ctx context.Context) error {
 	c.Handle(ipc.MethodKeyX25519, func(ctx context.Context, _ uint32, params json.RawMessage) (any, error) {
 		return a.handleX25519(ctx, c, params)
 	})
+	var caps []string
+	if a.assist != nil {
+		a.handleAssist(c)
+		caps = []string{ipc.CapAssist}
+	}
 	served := make(chan error, 1)
 	go func() { served <- c.Serve(ctx) }()
 
@@ -162,9 +170,11 @@ func (a *Agent) session(ctx context.Context) error {
 		log.Printf("agent: listing cards: %v", err)
 	}
 	a.dropAbsent(cur)
-	if err := a.call(ctx, c, ipc.MethodAgentRegister, ipc.AgentRegister{Serials: nonNil(cur)}); err != nil {
+	if err := a.call(ctx, c, ipc.MethodAgentRegister, ipc.AgentRegister{Serials: nonNil(cur), Caps: caps}); err != nil {
 		return fmt.Errorf("agent.register: %w", err)
 	}
+	a.conn.Store(c)
+	defer a.conn.CompareAndSwap(c, nil)
 	log.Printf("agent: registered with %d card(s)", len(cur))
 
 	last := cur
