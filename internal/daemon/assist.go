@@ -31,6 +31,8 @@ type assistUser struct {
 	grant   *assistGrant
 	log     []ipc.ActivityEntry // newest first
 	pending map[*struct{}]context.CancelFunc
+	// asking is set while an approval of this user waits for the app.
+	asking bool
 }
 
 // assistGrant is one open access. until is zero for "until the app closes";
@@ -205,6 +207,25 @@ func (a *assistState) pending(uid uint32) (context.Context, func()) {
 		a.mu.Unlock()
 		cancel()
 	}
+}
+
+// startAsking marks that an approval of uid waits for the app. It returns
+// false when one already waits: each holds a handler slot of the app's
+// connection, so a user gets one at a time. The caller calls the returned
+// func when done.
+func (a *assistState) startAsking(uid uint32) (func(), bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	u := a.userLocked(uid)
+	if u.asking {
+		return nil, false
+	}
+	u.asking = true
+	return func() {
+		a.mu.Lock()
+		u.asking = false
+		a.mu.Unlock()
+	}, true
 }
 
 // handleAssist registers the methods of the desktop agent that manage access.

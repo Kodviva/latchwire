@@ -455,3 +455,84 @@ func TestApproveAbortsWindowWhenDaemonStopsWaiting(t *testing.T) {
 	wantCode(t, result(t, done), ipc.CodeCancelled)
 	f.waitAborts(t, f.approveID(0))
 }
+
+// Only one approval per user waits at a time: each holds a handler slot of
+// the app's connection. A second one is refused at once and recorded.
+func TestApproveOnePendingPerUser(t *testing.T) {
+	started := make(chan struct{}, 4)
+	answer := make(chan bool)
+	f := &fakeApprover{answer: func(ctx context.Context) bool {
+		started <- struct{}{}
+		select {
+		case ok := <-answer:
+			return ok
+		case <-ctx.Done():
+			return false
+		}
+	}}
+	e := newEnv(t, envOpts{noAgent: true})
+	grantAssist(t, e, f, assistUID, allGroups())
+	first := approveAsync(e, context.Background())
+	<-started
+
+	start := time.Now()
+	err := result(t, approveAsync(e, context.Background()))
+	wantCode(t, err, ipc.CodeDenied)
+	if m := err.(*ipc.Error).Message; m != msg.AssistBusy {
+		t.Fatalf("message %q, want the busy text", m)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("the second approval waited %v", d)
+	}
+	// Through a tool call it is recorded as refused.
+	_, err = tool(t, e, context.Background(), assistUID, ipc.ToolCreateKey, ipc.AssistKeyArgs{Serial: serialA})
+	wantCode(t, err, ipc.CodeDenied)
+	wantResult(t, e, assistUID, ipc.ToolCreateKey, "denied")
+	f.mu.Lock()
+	asked := len(f.requests)
+	f.mu.Unlock()
+	if asked != 1 {
+		t.Fatalf("the app was asked %d times, want 1", asked)
+	}
+
+	answer <- true
+	if err := result(t, first); err != nil {
+		t.Fatalf("first approval: %v", err)
+	}
+	// The slot is free again.
+	second := approveAsync(e, context.Background())
+	<-started
+	answer <- true
+	if err := result(t, second); err != nil {
+		t.Fatalf("approval after the first: %v", err)
+	}
+}
+
+// The limit is per user: another user's approval is not held up.
+func TestApproveBusyIsPerUser(t *testing.T) {
+	started := make(chan struct{}, 4)
+	release := make(chan struct{})
+	f := &fakeApprover{answer: func(ctx context.Context) bool {
+		started <- struct{}{}
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return true
+	}}
+	e := newEnv(t, envOpts{noAgent: true})
+	grantAssist(t, e, f, assistUID, allGroups())
+	grantAssist(t, e, f, assistUID+1, allGroups())
+	a := approveAsync(e, context.Background())
+	<-started
+	b := make(chan error, 1)
+	go func() { b <- e.m.approve(context.Background(), assistUID+1, testApproval) }()
+	<-started
+	close(release)
+	if err := result(t, a); err != nil {
+		t.Fatal(err)
+	}
+	if err := result(t, b); err != nil {
+		t.Fatal(err)
+	}
+}

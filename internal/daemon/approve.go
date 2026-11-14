@@ -23,6 +23,7 @@ var (
 	errDenied    = &ipc.Error{Code: ipc.CodeDenied, Message: msg.AssistDenied}
 	errRevoked   = &ipc.Error{Code: ipc.CodeDenied, Message: msg.AssistCancelled}
 	errCancelled = &ipc.Error{Code: ipc.CodeCancelled, Message: msg.AssistRequestCancelled}
+	errBusy      = &ipc.Error{Code: ipc.CodeDenied, Message: msg.AssistBusy}
 )
 
 // assistAgent returns the app that approvals and card operations of uid go
@@ -46,7 +47,8 @@ func (m *Manager) assistAgent(uid uint32) *ipc.Conn {
 // r. It returns nil only when the user allowed it while access stayed open.
 // A refusal, no answer within approveTimeout, access closing meanwhile
 // (revoke, a new grant, the owner leaving) and losing the app's connection
-// are CodeDenied; access that expired by time is CodeAccessOff; ctx ending
+// are CodeDenied, and so is a second approval of uid while one waits;
+// access that expired by time is CodeAccessOff; ctx ending
 // is CodeCancelled; no grant owner is CodeNoApp, or CodeAccessOff when
 // access is off. Callers still check access again before acting.
 func (m *Manager) approve(ctx context.Context, uid uint32, r ipc.ApproveRequest) error {
@@ -63,6 +65,12 @@ func (m *Manager) approve(ctx context.Context, uid uint32, r ipc.ApproveRequest)
 		}
 		return errRevoked
 	}
+	done, ok := m.assist.startAsking(uid)
+	if !ok {
+		log.Printf("daemon: assist.approve for uid %d: refused, another approval waits", uid)
+		return errBusy
+	}
+	defer done()
 	cctx, cancel := context.WithTimeout(ctx, approveTimeout)
 	defer cancel()
 	// cancel takes no lock of the Manager or of assistState, so it may run
