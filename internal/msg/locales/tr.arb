@@ -469,5 +469,6 @@
   "AssistGroupOffFmt": "Latchwire ajan erişimi {group} iznini içermiyor: kullanıcıdan Latchwire uygulamasında (Ajan erişimi) açmasını isteyin",
   "AssistDenied": "kullanıcı bu işleme izin vermedi",
   "AssistNoApp": "Latchwire uygulaması açık değil: kullanıcıdan açmasını isteyin",
-  "AssistCancelled": "ajan erişimi kapatıldığı için işlem iptal edildi"
+  "AssistCancelled": "ajan erişimi kapatıldığı için işlem iptal edildi",
+  "AssistRequestCancelled": "istek, siz yanıt vermeden iptal edildi"
 }

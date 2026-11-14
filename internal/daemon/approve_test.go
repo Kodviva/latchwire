@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Kodviva/latchwire/internal/ipc"
+	"github.com/Kodviva/latchwire/internal/msg"
 )
 
 const assistUID = 1000
@@ -21,6 +23,7 @@ type fakeApprover struct {
 	requests []ipc.ApproveRequest
 	notices  []string
 	keygens  []ipc.KeygenRequest
+	lists    int
 }
 
 func (f *fakeApprover) setup(ac *ipc.Conn) {
@@ -39,6 +42,9 @@ func (f *fakeApprover) setup(ac *ipc.Conn) {
 		return ipc.ApproveResult{Allow: allow}, nil
 	})
 	ac.Handle(ipc.MethodCardList, func(context.Context, uint32, json.RawMessage) (any, error) {
+		f.mu.Lock()
+		f.lists++
+		f.mu.Unlock()
 		return ipc.CardListResult{Cards: []ipc.CardEntry{{Serial: serialA, Supported: true, Fresh: true}}}, nil
 	})
 	ac.Handle(ipc.MethodCardKeygen, func(_ context.Context, _ uint32, p json.RawMessage) (any, error) {
@@ -157,11 +163,43 @@ func TestApproveWithoutAccessAsksNobody(t *testing.T) {
 	f := &fakeApprover{allow: true}
 	e, _ := assistEnv(t, f)
 	e.m.assist.revoke(assistUID)
-	wantCode(t, e.m.approve(context.Background(), assistUID, testApproval), ipc.CodeDenied)
+	wantCode(t, e.m.approve(context.Background(), assistUID, testApproval), ipc.CodeNoApp)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if len(f.requests) != 0 {
 		t.Fatalf("asked %d times without access", len(f.requests))
+	}
+}
+
+// fakeClock is an assistState clock the test moves.
+type fakeClock struct{ ns atomic.Int64 }
+
+func (c *fakeClock) set(t time.Time) { c.ns.Store(t.UnixNano()) }
+func (c *fakeClock) now() time.Time  { return time.Unix(0, c.ns.Load()) }
+
+// A grant that runs out by time while the window is open does not cancel
+// the approval: the allow that follows must still be refused.
+func TestApproveAfterExpiryIsAccessOff(t *testing.T) {
+	var clock fakeClock
+	clock.set(t0)
+	f := &fakeApprover{answer: func(context.Context) bool {
+		clock.set(t0.Add(15*time.Minute + time.Second))
+		return true
+	}}
+	e := newEnv(t, envOpts{noAgent: true})
+	e.m.assist.clock = clock.now
+	dc := connPairWith(t, e, f.setup)
+	e.m.agentRegister(dc, assistUID, nil, ipc.CapAssist)
+	if err := e.m.assist.set(assistUID, dc, ipc.AssistGrant{Minutes: 15, Groups: allGroups()}, t0); err != nil {
+		t.Fatal(err)
+	}
+	wantCode(t, e.m.approve(context.Background(), assistUID, testApproval), ipc.CodeAccessOff)
+	// Already expired: nobody is asked, and the answer says why.
+	wantCode(t, e.m.approve(context.Background(), assistUID, testApproval), ipc.CodeAccessOff)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.requests) != 1 {
+		t.Fatalf("asked %d times, want 1", len(f.requests))
 	}
 }
 
@@ -174,7 +212,11 @@ func TestApproveCallerCancelled(t *testing.T) {
 	done := approveAsync(e, ctx)
 	<-started
 	cancel()
-	wantCode(t, result(t, done), ipc.CodeCancelled)
+	err := result(t, done)
+	wantCode(t, err, ipc.CodeCancelled)
+	if err.(*ipc.Error).Message != msg.AssistRequestCancelled {
+		t.Fatalf("message %q, want the request-cancelled text", err.(*ipc.Error).Message)
+	}
 }
 
 func TestApproveAgentLostIsDenied(t *testing.T) {
@@ -212,23 +254,61 @@ func TestNoAssistAgentRefusesApproval(t *testing.T) {
 	}
 }
 
-func TestAssistAgentIsEarliest(t *testing.T) {
-	f := &fakeApprover{}
-	e, first := assistEnv(t, f)
-	second := connPairWith(t, e, f.setup)
+// Only the agent that opened the grant is asked: another agent of the same
+// user that also reports CapAssist never sees approvals or card operations.
+func TestAssistAgentIsGrantOwner(t *testing.T) {
+	owner := &fakeApprover{allow: true}
+	e, first := assistEnv(t, owner)
+	intruder := &fakeApprover{allow: true}
+	second := connPairWith(t, e, intruder.setup)
 	e.m.agentRegister(second, assistUID, nil, ipc.CapAssist)
 	if got := e.m.assistAgent(assistUID); got != first {
-		t.Fatal("assistAgent is not the earliest registered")
+		t.Fatal("assistAgent is not the grant owner")
 	}
+	if err := e.m.approve(context.Background(), assistUID, testApproval); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.m.cardList(context.Background(), assistUID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.m.cardKeygen(context.Background(), assistUID, serialA, 0x82); err != nil {
+		t.Fatal(err)
+	}
+	// The owner leaves: access closes and nobody else is asked.
 	e.m.dropAgent(first)
+	wantCode(t, e.m.approve(context.Background(), assistUID, testApproval), ipc.CodeNoApp)
+	_, err := e.m.cardList(context.Background(), assistUID)
+	wantCode(t, err, ipc.CodeNoApp)
+	_, err = e.m.cardKeygen(context.Background(), assistUID, serialA, 0x82)
+	wantCode(t, err, ipc.CodeNoApp)
+	intruder.mu.Lock()
+	n := len(intruder.requests) + len(intruder.keygens) + intruder.lists
+	intruder.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("the non-owner agent got %d requests", n)
+	}
+	// The second agent opens its own grant: now it is the app.
+	if err := e.m.assist.set(assistUID, second, ipc.AssistGrant{Groups: allGroups()}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	if got := e.m.assistAgent(assistUID); got != second {
-		t.Fatal("assistAgent did not fall back to the next one")
+		t.Fatal("assistAgent is not the new grant owner")
 	}
 	// A connection that makes assist calls is never the app.
 	e.m.markAssistCaller(second)
 	if got := e.m.assistAgent(assistUID); got != nil {
 		t.Fatal("an assist caller was chosen")
 	}
+}
+
+// A grant owner that re-registers without CapAssist is no longer the app.
+func TestGrantOwnerWithoutCapIsNoApp(t *testing.T) {
+	f := &fakeApprover{allow: true}
+	e, dc := assistEnv(t, f)
+	e.m.mu.Lock()
+	e.m.agents[dc].caps = map[string]bool{}
+	e.m.mu.Unlock()
+	wantCode(t, e.m.approve(context.Background(), assistUID, testApproval), ipc.CodeNoApp)
 }
 
 func TestCardOpsReachAssistAgent(t *testing.T) {

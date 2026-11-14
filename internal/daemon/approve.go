@@ -20,31 +20,33 @@ var (
 	errNoApp     = &ipc.Error{Code: ipc.CodeNoApp, Message: msg.AssistNoApp}
 	errDenied    = &ipc.Error{Code: ipc.CodeDenied, Message: msg.AssistDenied}
 	errRevoked   = &ipc.Error{Code: ipc.CodeDenied, Message: msg.AssistCancelled}
-	errCancelled = &ipc.Error{Code: ipc.CodeCancelled, Message: msg.AssistDenied}
+	errCancelled = &ipc.Error{Code: ipc.CodeCancelled, Message: msg.AssistRequestCancelled}
 )
 
-// assistAgent returns uid's earliest registered agent that reported
-// CapAssist (the desktop app), or nil. Older agents and the CLI agent report
-// no capabilities and are never chosen.
+// assistAgent returns the app that approvals and card operations of uid go
+// to: the connection that opened uid's current grant, while it is still a
+// registered agent of uid reporting CapAssist. Without a grant, or when its
+// owner no longer qualifies, it returns nil. Another agent of the same user
+// that merely reports CapAssist is never asked: the capability is the
+// client's own claim, the grant is the user's act in the app.
 func (m *Manager) assistAgent(uid uint32) *ipc.Conn {
+	// Lock order: m.mu, then assist.mu.
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var best *ipc.Conn
-	var seq uint64
-	for c, a := range m.agents {
-		if m.assistAgentLocked(c, uid) && (best == nil || a.seq < seq) {
-			best, seq = c, a.seq
-		}
+	c := m.assist.owner(uid)
+	if c == nil || !m.assistAgentLocked(c, uid) {
+		return nil
 	}
-	return best
+	return c
 }
 
-// approve asks uid's app to show the approval window for r. It returns nil
-// only when the user allowed it while access stayed open. A refusal, no
-// answer within approveTimeout, access closing meanwhile (revoke, a new
-// grant, the owner leaving) and losing the app's connection are CodeDenied;
-// ctx ending is CodeCancelled; no app is CodeNoApp. Callers still check
-// access again before acting.
+// approve asks uid's app (the grant's owner) to show the approval window for
+// r. It returns nil only when the user allowed it while access stayed open.
+// A refusal, no answer within approveTimeout, access closing meanwhile
+// (revoke, a new grant, the owner leaving) and losing the app's connection
+// are CodeDenied; access that expired by time is CodeAccessOff; ctx ending
+// is CodeCancelled; no grant owner is CodeNoApp. Callers still check access
+// again before acting.
 func (m *Manager) approve(ctx context.Context, uid uint32, r ipc.ApproveRequest) error {
 	c := m.assistAgent(uid)
 	if c == nil {
@@ -54,6 +56,9 @@ func (m *Manager) approve(ctx context.Context, uid uint32, r ipc.ApproveRequest)
 	defer release()
 	if pctx.Err() != nil {
 		// No open access: nobody is asked.
+		if err := m.assist.allowed(uid, "", m.assist.now()); err != nil {
+			return err
+		}
 		return errRevoked
 	}
 	cctx, cancel := context.WithTimeout(ctx, approveTimeout)
@@ -76,10 +81,12 @@ func (m *Manager) approve(ctx context.Context, uid uint32, r ipc.ApproveRequest)
 	case !res.Allow:
 		return errDenied
 	}
-	return nil
+	// The grant may have run out by time while the window was open: that
+	// does not cancel pending approvals, so check it here.
+	return m.assist.allowed(uid, "", m.assist.now())
 }
 
-// cardList returns the cards that uid's app sees.
+// cardList returns the cards that uid's app (the grant's owner) sees.
 func (m *Manager) cardList(ctx context.Context, uid uint32) ([]ipc.CardEntry, error) {
 	c := m.assistAgent(uid)
 	if c == nil {

@@ -374,6 +374,8 @@ runs the daemon:
 	AssistNoApp = "the Latchwire app is not open: ask the user to open it"
 	// AssistCancelled: access was revoked while the action waited.
 	AssistCancelled = "the action was cancelled because agent access was turned off"
+	// AssistRequestCancelled: the caller went away while the approval window waited.
+	AssistRequestCancelled = "the request was cancelled before the user answered"
 )
 
 // Desktop app messages, rendered with Render.

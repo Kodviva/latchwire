@@ -1064,5 +1064,9 @@
   "AssistCancelled": "the action was cancelled because agent access was turned off",
   "@AssistCancelled": {
     "description": "AssistCancelled: access was revoked while the action waited."
+  },
+  "AssistRequestCancelled": "the request was cancelled before the user answered",
+  "@AssistRequestCancelled": {
+    "description": "AssistRequestCancelled: the caller went away while the approval window waited."
   }
 }

@@ -127,6 +127,18 @@ func (a *assistState) dropOwner(c *ipc.Conn) {
 	}
 }
 
+// owner returns the connection that opened uid's current grant, or nil when
+// uid has no grant. An expired grant still names its owner: callers check
+// allowed for the time limit.
+func (a *assistState) owner(uid uint32) *ipc.Conn {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if u := a.users[uid]; u != nil && u.grant != nil {
+		return u.grant.owner
+	}
+	return nil
+}
+
 // allowed reports whether uid's agent may use a tool of group at now. An
 // empty group is a read-only tool: it needs open access, no group.
 func (a *assistState) allowed(uid uint32, group string, now time.Time) error {
