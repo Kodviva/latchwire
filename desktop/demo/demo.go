@@ -33,11 +33,18 @@ type Backend struct {
 	Added map[string]string
 	// DaemonDown makes every daemon call fail.
 	DaemonDown bool
+
+	fresh    map[uint32]bool
+	grants   []ipc.AssistGrant
+	held     bool
+	revokes  int
+	activity []ipc.ActivityEntry
 }
 
 // New returns a backend with two cards and two tunnels.
 func New() *Backend {
-	b := &Backend{present: map[uint32]bool{CardA: true, CardB: true}, keys: map[uint32][]desktop.Key{}, Added: map[string]string{}}
+	b := &Backend{present: map[uint32]bool{CardA: true, CardB: true}, keys: map[uint32][]desktop.Key{},
+		Added: map[string]string{}, fresh: map[uint32]bool{}}
 	b.tunnels = []ipc.TunnelStatus{
 		{Name: "office", State: daemon.StateConnected, Identity: "piv://40727512/82",
 			LastHandshake: time.Now().Add(-48 * time.Second).Format(time.RFC3339)},
@@ -91,7 +98,7 @@ func (b *Backend) Devices() ([]desktop.Device, error) {
 func (b *Backend) Inspect(serial uint32) (desktop.CardInfo, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	info := desktop.CardInfo{Keys: b.keys[serial]}
+	info := desktop.CardInfo{Keys: b.keys[serial], Fresh: b.fresh[serial]}
 	used := map[uint8]bool{}
 	for _, k := range info.Keys {
 		used[k.Ref.Slot] = true
@@ -183,4 +190,79 @@ func (b *Backend) Add(_ context.Context, name, config string) error {
 	b.Added[name] = config
 	b.tunnels = append(b.tunnels, ipc.TunnelStatus{Name: name, State: daemon.StateDisconnected})
 	return nil
+}
+
+// SetFresh makes a card look factory-fresh to Inspect.
+func (b *Backend) SetFresh(serial uint32, fresh bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.fresh[serial] = fresh
+}
+
+// Grant implements ui.Backend: it records g and holds it until Revoke or
+// DropGrant.
+func (b *Backend) Grant(_ context.Context, g ipc.AssistGrant) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.DaemonDown {
+		return desktop.ErrDaemonDown
+	}
+	g.Groups = append([]string(nil), g.Groups...)
+	b.grants = append(b.grants, g)
+	b.held = true
+	return nil
+}
+
+// Revoke implements ui.Backend.
+func (b *Backend) Revoke(context.Context) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.held = false
+	b.revokes++
+	return nil
+}
+
+// GrantHeld implements ui.Backend.
+func (b *Backend) GrantHeld() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.held
+}
+
+// DropGrant ends the access the way a lost agent connection does.
+func (b *Backend) DropGrant() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.held = false
+}
+
+// Grants returns what Grant was given, oldest first.
+func (b *Backend) Grants() []ipc.AssistGrant {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]ipc.AssistGrant(nil), b.grants...)
+}
+
+// Revokes counts the Revoke calls.
+func (b *Backend) Revokes() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.revokes
+}
+
+// SetActivity sets what Activity returns (newest first).
+func (b *Backend) SetActivity(e []ipc.ActivityEntry) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.activity = append([]ipc.ActivityEntry(nil), e...)
+}
+
+// Activity implements ui.Backend.
+func (b *Backend) Activity(context.Context) ([]ipc.ActivityEntry, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.DaemonDown {
+		return nil, desktop.ErrDaemonDown
+	}
+	return append([]ipc.ActivityEntry(nil), b.activity...), nil
 }

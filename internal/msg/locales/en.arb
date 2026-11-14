@@ -1151,5 +1151,52 @@
         "verb": "%q"
       }
     }
-  }
+  },
+  "AssistKeygenCancelled": "the user cancelled creating the key in the Latchwire app",
+  "@AssistKeygenCancelled": {
+    "description": "AssistKeygenCancelled: the person closed a PIN or PUK form of a key the agent asked for."
+  },
+  "UIAccessNav": "Agent access",
+  "UIAccessIntro": "An AI agent on this computer, such as Claude Code, can help you set up Latchwire. With access on, it can read your setup: tunnels, plugged-in YubiKeys and the next steps. In the groups you allow, it can also ask to create keys, add tunnels and connect; Latchwire shows you each request and does nothing until you allow it. The agent never sees or types your PIN, PUK or keys.",
+  "UIAccessStateOff": "Agent access is off.",
+  "UIAccessStateMinutes": "{minutes, plural, one {Agent access is on: # minute left.} other {Agent access is on: # minutes left.}}",
+  "UIAccessStateUntilQuit": "Agent access is on until Latchwire quits.",
+  "UIAccessDuration": "How long",
+  "UIAccess15": "15 minutes",
+  "UIAccess60": "1 hour",
+  "UIAccessUntilQuit": "Until Latchwire quits",
+  "UIAccessGroups": "What the agent may ask for (reading your setup is always included)",
+  "UIAccessGroupKeys": "Create keys on a YubiKey",
+  "UIAccessGroupTunnels": "Add tunnels",
+  "UIAccessGroupConnect": "Connect and disconnect tunnels",
+  "UIAccessTurnOn": "Turn on",
+  "UIAccessTurnOff": "Turn off",
+  "UIAccessSetup": "Add Latchwire to your agent",
+  "UIAccessClaudeCode": "Claude Code: run this in a terminal",
+  "UIAccessClaudeDesktop": "Claude Desktop: add this to claude_desktop_config.json",
+  "UIAccessOther": "Other MCP clients: start this command (stdio)",
+  "UIAccessActivity": "Recent agent actions",
+  "UIAccessNoActivity": "No agent actions yet.",
+  "UIAccessResultDone": "done",
+  "UIAccessResultDenied": "refused",
+  "UIAccessResultOff": "access was off",
+  "UIAccessResultNoApp": "app was not open",
+  "UIAccessResultCancelled": "cancelled",
+  "UIAccessResultError": "failed",
+  "AssistAppNotConnected": "The app is not connected to the Latchwire service yet. Try again in a moment.",
+  "@AssistAppNotConnected": {
+    "description": "AssistAppNotConnected: the app turned agent access on or off before its agent had connected to the daemon."
+  },
+  "UIRoadmapAgentLink": "Let an AI agent help with these steps",
+  "UIApproveTitle": "Allow this agent request?",
+  "UIApproveClient": "Agent: “{client}”",
+  "UIApproveTool": "Request: {tool}",
+  "UIApproveToolCreateKey": "create a key on a YubiKey",
+  "UIApproveToolAddTunnel": "add a tunnel",
+  "UIApproveToolConnect": "connect a tunnel",
+  "UIApproveToolDisconnect": "disconnect a tunnel",
+  "UIApproveFresh": "This YubiKey still has its factory PIN and PUK. Creating the key will change them: Latchwire will ask you for the current PUK and a new PIN and PUK.",
+  "UIApproveTimeout": "Without an answer within 2 minutes, the request is refused.",
+  "UIApproveAllow": "Allow",
+  "UIApproveDeny": "Deny"
 }

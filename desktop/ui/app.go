@@ -45,6 +45,15 @@ type Backend interface {
 	Connect(ctx context.Context, name string) (ipc.TunnelStatus, error)
 	Disconnect(ctx context.Context, name string) error
 	Add(ctx context.Context, name, config string) error
+	// Grant opens agent access over the app's agent connection and Revoke
+	// closes it; Activity lists the last agent tool calls, newest first.
+	Grant(ctx context.Context, g ipc.AssistGrant) error
+	Revoke(ctx context.Context) error
+	Activity(ctx context.Context) ([]ipc.ActivityEntry, error)
+	// GrantHeld reports whether the access the last Grant opened can still
+	// be in force: false after Revoke and once the agent connection that
+	// opened it has closed, which ends the access in the daemon too.
+	GrantHeld() bool
 }
 
 // DemoAction is an extra button of the demo build.
@@ -74,6 +83,7 @@ const (
 	screenExplore
 	screenGuide
 	screenShare
+	screenAccess
 )
 
 // UI is the app. Its fields are touched on the Fyne goroutine only.
@@ -122,12 +132,15 @@ type UI struct {
 	explorePage int
 	// guideOpen is set once a hints user opened the server guide's steps.
 	guideOpen bool
+
+	access accessState
 }
 
 // New creates the app. Call Run to start it.
 func New(a fyne.App, o Options) *UI {
 	a.Settings().SetTheme(newTheme())
 	u := &UI{app: a, opts: o, b: o.Backend, infos: map[uint32]desktop.CardInfo{}, pending: map[string]bool{}}
+	u.access = newAccessState()
 	u.lang = chooseLanguage(a)
 	u.loadGuide()
 	u.win = a.NewWindow("Latchwire")
@@ -238,6 +251,7 @@ func (u *UI) apply(devs []desktop.Device, sts []ipc.TunnelStatus, err error) {
 		u.inspectNew()
 	}
 	u.renderNotices()
+	u.tickAccess()
 	switch u.screen {
 	case screenTunnels:
 		if changedTunnels || changedDevices {
@@ -289,6 +303,8 @@ func (u *UI) render() {
 		u.renderGuide()
 	case screenShare:
 		u.renderShare()
+	case screenAccess:
+		u.renderAccess()
 	}
 }
 
@@ -347,6 +363,7 @@ func (u *UI) renderSidebar() {
 			u.show(screenTunnels)
 		}))
 	}
+	access := newTapCard(strong(u.t(msg.UIAccessNav)), u.screen == screenAccess, true, func() { u.show(screenAccess) })
 	add := widget.NewButton(u.t(msg.UINewTunnel), func() { u.show(screenOnboard) })
 	names, codes := languages()
 	sel := widget.NewSelect(names, nil)
@@ -354,7 +371,7 @@ func (u *UI) renderSidebar() {
 		sel.SetSelectedIndex(i)
 	}
 	sel.OnChanged = func(string) { u.setLanguage(codes[sel.SelectedIndex()]) }
-	foot := container.NewVBox(add, widget.NewSeparator(), small(u.t(msg.UILanguage)), sel)
+	foot := container.NewVBox(access, add, widget.NewSeparator(), small(u.t(msg.UILanguage)), sel)
 	if u.survey.Help != "" {
 		foot.Add(u.helpSelect())
 	}

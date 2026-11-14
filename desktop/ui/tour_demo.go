@@ -62,7 +62,7 @@ func (u *UI) Tour(dir string, setCard func(bool)) {
 		go u.Prompter().PIN(tourDesc, 1)
 		shot(lang + "-4-pin")
 		do(u.tourCancel)
-		go asker{u}.Fresh(0)
+		go asker{u: u}.Fresh(0)
 		shot(lang + "-5-fresh")
 		do(u.tourCancel)
 		do(func() {
