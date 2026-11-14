@@ -15,6 +15,7 @@ import (
 
 	"github.com/Kodviva/latchwire/internal/ipc"
 	"github.com/Kodviva/latchwire/internal/keyref"
+	"github.com/Kodviva/latchwire/internal/msg"
 )
 
 // grantAssist registers f as an assist app of uid and opens access for it
@@ -343,6 +344,7 @@ func connectEnv(t *testing.T, f *fakeApprover) *env {
 	e := newEnv(t, envOpts{present: []uint32{serialA}})
 	srv := newServer(t, e.b.pub(serialA), "10.0.0.2")
 	e.add(e.config([]keyref.Ref{refA}, []string{"10.0.0.2"}, srv, ""))
+	e.allow(uidA) // uidA's own tunnel: its agent connects as a user
 	e.waitCard(serialA, true)
 	grantAssist(t, e, f, uidA, allGroups())
 	return e
@@ -769,5 +771,31 @@ func TestAgentDisconnectIsNotAdmin(t *testing.T) {
 	// The administrator itself still can, through the CLI.
 	if err := e.call(ipc.MethodTunnelDisconnect, ipc.TunnelName{Name: tunName}, nil); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// An administrator's agent connects with its user's own rights: a tunnel
+// that only another user may use is refused as for any user, before a PIN
+// is asked of anyone.
+func TestAgentConnectIsNotAdmin(t *testing.T) {
+	f := &fakeApprover{allow: true}
+	e := connectEnv(t, f) // everyone is an administrator; only uidA may use it
+	other := &fakeApprover{allow: true}
+	grantAssist(t, e, other, assistUID, allGroups())
+	_, err := tool(t, e, context.Background(), assistUID, ipc.ToolConnect, ipc.TunnelName{Name: tunName})
+	wantCode(t, err, ipc.CodeForbidden)
+	if want := fmt.Sprintf(msg.DaemonNotAllowedUserFmt, tunName); err.(*ipc.Error).Message != want {
+		t.Fatalf("message %q, want the user refusal %q", err.(*ipc.Error).Message, want)
+	}
+	wantResult(t, e, assistUID, ipc.ToolConnect, "error: forbidden")
+	if st := e.status(); st.State != StateDisconnected {
+		t.Fatalf("state %q after another user's agent connect", st.State)
+	}
+	if n := e.p.count(); n != 0 {
+		t.Fatalf("PIN asked %d times", n)
+	}
+	// The same administrator through the CLI path still may.
+	if _, err := e.m.requestConnect(context.Background(), assistUID, tunName); err != nil {
+		t.Fatalf("administrator connect: %v", err)
 	}
 }

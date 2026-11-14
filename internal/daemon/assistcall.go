@@ -534,7 +534,8 @@ func (a assistCall) tunnelArg(args json.RawMessage, res *ipc.AssistResult) (stri
 	return p.Name, nil
 }
 
-// connect brings a tunnel up after the approval; the PIN is asked the way
+// connect brings a tunnel up after the approval with the user's own rights
+// (an administrator's agent is no administrator); the PIN is asked the way
 // tunnel.connect asks it, never through the agent.
 func (a assistCall) connect(args json.RawMessage) (ipc.AssistResult, error) {
 	var res ipc.AssistResult
@@ -548,7 +549,7 @@ func (a assistCall) connect(args json.RawMessage) (ipc.AssistResult, error) {
 	var st ipc.TunnelStatus
 	err = a.act(func(ctx context.Context) error {
 		var err error
-		st, err = a.m.requestConnect(ctx, a.uid, name)
+		st, err = a.m.agentConnect(ctx, a.uid, name)
 		return err
 	})
 	if err != nil {

@@ -724,6 +724,16 @@ func (m *Manager) requestConnect(ctx context.Context, uid uint32, name string) (
 	return m.connect(ctx, name, uid, admin, connectOpts{})
 }
 
+// agentConnect is connect for an agent tool of uid: with uid's own rights,
+// never an administrator's, so it can neither use another user's agent
+// nor connect a tunnel that only another user may use.
+func (m *Manager) agentConnect(ctx context.Context, uid uint32, name string) (ipc.TunnelStatus, error) {
+	if !m.agentUser(uid) {
+		return ipc.TunnelStatus{}, errForbidden
+	}
+	return m.connect(ctx, name, uid, false, connectOpts{asUser: true})
+}
+
 // notAllowed logs and returns the refusal of a connect for uid, which is
 // not one of the tunnel's allowed users (P20).
 func notAllowed(name string, uid uint32) error {
@@ -1453,6 +1463,9 @@ type connectOpts struct {
 	// down by hand meanwhile (odSuppressed) is not connected, and the
 	// binding is marked as on-demand's (odConnected).
 	onDemand bool
+	// asUser says that uid's administrator rights do not count: an agent
+	// tool connects with its user's own rights only.
+	asUser bool
 }
 
 // connect brings tunnel name up. caller is the requester's context: the
@@ -1482,7 +1495,7 @@ func (m *Manager) connect(caller context.Context, name string, uid uint32, admin
 	// adminOK: uid may connect whatever AllowedUsers says. uidOK is the
 	// early answer, for the first step only. (File I/O and the admin lookup
 	// stay outside Manager.mu.)
-	adminOK := admin || m.admin(uid)
+	adminOK := admin || (!o.asUser && m.admin(uid))
 	uidOK := adminOK || m.store.policyFor(name).allows(uid)
 	m.mu.Lock()
 	switch cur := m.tunnels[name]; {
@@ -1515,7 +1528,7 @@ func (m *Manager) connect(caller context.Context, name string, uid uint32, admin
 		return ipc.TunnelStatus{}, errNotYours
 	}
 	if t.state == StateConnecting || t.state == StateConnected {
-		if o == (connectOpts{}) {
+		if (connectOpts{asUser: o.asUser}) == o {
 			t.odConnected = false // a connect by hand claims the tunnel
 		}
 		m.mu.Unlock()
