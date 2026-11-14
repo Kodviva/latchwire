@@ -51,9 +51,11 @@ const (
 )
 
 // AgentRegister is the params of agent.register: the card serials the agent
-// currently sees.
+// currently sees. Caps lists the capabilities of the agent (CapAssist);
+// older agents send none.
 type AgentRegister struct {
 	Serials []uint32 `json:"serials"`
+	Caps    []string `json:"caps,omitempty"`
 }
 
 // AgentEvent is the params of agent.event.
